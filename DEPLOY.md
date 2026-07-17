@@ -97,12 +97,25 @@ convention but was 0 during testing — verify after dark when importing.
 In the Grafana UI (not provisioning files):
 
 1. Connections → Data sources → Add data source → **InfluxDB**
-2. Query language: **Flux**
-3. URL: `http://influxdb:8086`
-4. Organization: `home` (or your `INFLUX_ORG`)
-5. Token: the `INFLUX_TOKEN` value from `.env`
-6. Default bucket: `alphaess`
-7. Save & test
+2. **Name**: `alphaess` (so it's distinguishable from other InfluxDB
+   datasources)
+3. **Query language**: switch the dropdown from the default *InfluxQL* to
+   **Flux**. This is required — InfluxDB 2 with token auth. The form below
+   changes when you switch: the InfluxQL-specific *Database/User/Password*
+   fields disappear and Flux fields (*Organization/Token/Default Bucket*)
+   appear under **InfluxDB Details**.
+4. **HTTP → URL**: `http://influxdb:8086` (container port — always 8086 here,
+   regardless of any `INFLUX_PORT` host-port remapping in `.env`)
+5. **Auth**: leave all toggles off (Basic auth off — auth is via the token
+   below)
+6. **InfluxDB Details**:
+   - **Organization**: `home` (your `INFLUX_ORG`)
+   - **Token**: the `INFLUX_TOKEN` value from `.env`
+   - **Default Bucket**: `alphaess`
+   - **Min time interval**: `30s` (matches the poll interval; avoids Grafana
+     requesting finer resolution than the data has)
+7. **Save & test** — expect a green "datasource is working" with buckets
+   found
 
 > **Why the UI and not provisioning files:** UI-added datasources are stored
 > in Grafana's internal database in its Docker volume, which survives
@@ -116,8 +129,13 @@ In the Grafana UI (not provisioning files):
 
 ## 8. First dashboard panels
 
-New dashboard querying bucket `alphaess`, measurement `power_readings`.
-Example Flux query for the power overview panel:
+Dashboards → New dashboard → **Add visualization** → select the `alphaess`
+datasource, then paste each query below into the raw Flux editor. After
+pasting, hit **Refresh** — the panel does not re-run the query on its own.
+
+### Panel 1 — Power overview
+
+All four power series (PV, grid, load, battery):
 
 ```flux
 from(bucket: "alphaess")
@@ -127,8 +145,54 @@ from(bucket: "alphaess")
   |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)
 ```
 
-Same query with `r._field == "soc_percent"` for a battery SoC panel
-(unit: percent, min 0, max 100).
+Panel settings (right sidebar):
+
+- Panel options → Title: `Power`
+- Standard options → Unit: **Watt (W)**
+- Legend → Values: `Last`, `Mean` (optional, shows current/average per series)
+
+**Apply** (top right) to return to the dashboard.
+
+### Panel 2 — Solar vs Load vs SoC
+
+Shows how solar production and house load drive battery SoC, plus a computed
+`net_power_w = pv − load` series: **negative = house consuming more than the
+panels produce**. Mixed units (W and %), so SoC goes on a right-hand axis via
+a field override.
+
+```flux
+from(bucket: "alphaess")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "power_readings")
+  |> filter(fn: (r) => r._field == "soc_percent" or r._field == "pv_power_w" or r._field == "load_power_w")
+  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> map(fn: (r) => ({ r with
+      net_power_w: (if exists r.pv_power_w then r.pv_power_w else 0.0)
+                 - (if exists r.load_power_w then r.load_power_w else 0.0)
+  }))
+  |> keep(columns: ["_time", "soc_percent", "pv_power_w", "load_power_w", "net_power_w"])
+```
+
+The `pivot` turns the fields into columns so `map` can compute the net series.
+
+Panel settings:
+
+- Panel options → Title: `Solar vs Load vs SoC`
+- Standard options → Unit: **Watt (W)** (default for the power series)
+- Overrides tab → **Add field override** → *Fields with name* → `soc_percent`:
+  - Standard options > Unit → **Percent (0-100)**
+  - Standard options > Min → `0`, Max → `100`
+  - Axis > Placement → **Right**
+- Optional override for `net_power_w`: Graph styles > Fill opacity → ~15, so
+  the surplus/deficit area around the zero line stands out
+- Apply
+
+### Save
+
+Save icon (top right) → name the dashboard (e.g. `AlphaESS`) → Save. Set the
+auto-refresh dropdown (next to Refresh) to `30s`–`1m` for a live view. Panels
+move by dragging the title, resize by the corner.
 
 ## Updating
 
