@@ -46,25 +46,9 @@ charging vs discharging).
 
 ## NAS deployment (shared Grafana)
 
-The existing Grafana container needs to reach this InfluxDB instance. Once, on
-the NAS:
-
-```sh
-docker network create shared-grafana-net
-docker network connect shared-grafana-net <grafana-container-name>
-```
-
-Then run with the overlay:
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.nas.yml up -d --build
-```
-
-In Grafana, add an InfluxDB datasource (Flux) pointing at
-`http://influxdb:8086`, org `home`, bucket `alphaess`, with the token from
-`.env`. Add the datasource via the Grafana UI (stored in Grafana's data
-volume, survives TeslaMate image updates) — do not edit TeslaMate's baked-in
-provisioning files.
+See [DEPLOY.md](DEPLOY.md) — full walkthrough: cloning, secrets transfer,
+shared Grafana network setup, starting with the NAS overlay, Grafana
+datasource, and first dashboard queries.
 
 ## Notes
 
