@@ -1,0 +1,48 @@
+services:
+  influxdb:
+    image: influxdb:2
+    restart: unless-stopped
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_ADMIN_USER:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_ADMIN_PASSWORD}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-home}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-alphaess}
+      DOCKER_INFLUXDB_INIT_RETENTION: "0" # infinite
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN}
+    ports:
+      - "${INFLUX_PORT:-8086}:8086" # for local inspection / Grafana outside Docker
+    volumes:
+      - alphaess-influxdb-data:/var/lib/influxdb2
+    networks:
+      - alphaess-net
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  collector:
+    build: ./collector
+    restart: unless-stopped
+    environment:
+      ALPHAESS_APP_ID: ${ALPHAESS_APP_ID}
+      ALPHAESS_APP_SECRET: ${ALPHAESS_APP_SECRET}
+      ALPHAESS_SYS_SN: ${ALPHAESS_SYS_SN}
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
+      INFLUX_ORG: ${INFLUX_ORG:-home}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-30}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - alphaess-net
+
+networks:
+  alphaess-net:
+
+volumes:
+  alphaess-influxdb-data:

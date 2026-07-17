@@ -1,0 +1,18 @@
+# NAS deployment overlay: attaches InfluxDB to the external network shared
+# with the existing Grafana container, so Grafana can reach it by service name.
+#
+# The network must exist first (once):
+#   docker network create shared-grafana-net
+#   docker network connect shared-grafana-net <grafana-container-name>
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.nas.yml up -d
+services:
+  influxdb:
+    networks:
+      - alphaess-net
+      - shared-grafana-net
+
+networks:
+  shared-grafana-net:
+    external: true
