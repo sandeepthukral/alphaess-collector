@@ -129,7 +129,16 @@ In the Grafana UI (not provisioning files):
 
 ## 8. First dashboard panels
 
-Dashboards → New dashboard → **Add visualization** → select the `alphaess`
+**Shortcut — import instead of building by hand:** the repo ships a ready
+dashboard at [grafana/alphaess-dashboard.json](grafana/alphaess-dashboard.json)
+with all panels below plus daily/hourly energy-total tables. In Grafana:
+Dashboards → **New → Import** → upload the JSON (or paste its contents) → in
+the datasource dropdown pick your `alphaess` datasource → Import. Skip the
+manual steps below if you use it. (Daily-table queries pin day boundaries to
+`Europe/Amsterdam` — edit the `timezone.location` lines if needed.)
+
+To build manually instead: Dashboards → New dashboard → **Add visualization**
+→ select the `alphaess`
 datasource, then paste each query below into the raw Flux editor. After
 pasting, hit **Refresh** — the panel does not re-run the query on its own.
 
