@@ -101,7 +101,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
+        "w": 4,
         "x": 0,
         "y": 0
       },
@@ -165,8 +165,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 8,
+        "w": 5,
+        "x": 4,
         "y": 0
       },
       "id": 6,
@@ -229,8 +229,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 16,
+        "w": 5,
+        "x": 9,
         "y": 0
       },
       "id": 7,
@@ -261,6 +261,126 @@
         }
       ],
       "title": "Discharged Today",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "yellow",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 14,
+        "y": 0
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.1+security-01",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"pv_power_w\")\n  |> integral(unit: 1h)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))",
+          "refId": "A"
+        }
+      ],
+      "title": "Solar Produced Today",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 19,
+        "y": 0
+      },
+      "id": 9,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "13.0.1+security-01",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"power_readings\")\n  |> filter(fn: (r) => r._field == \"pv_power_w\" or r._field == \"battery_power_w\" or r._field == \"grid_power_w\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with _value:\n      (if exists r.pv_power_w then r.pv_power_w else 0.0)\n    + (if exists r.battery_power_w then r.battery_power_w else 0.0)\n    + (if exists r.grid_power_w then r.grid_power_w else 0.0) }))\n  |> keep(columns: [\"_time\", \"_start\", \"_stop\", \"_value\"])\n  |> group(columns: [\"_start\", \"_stop\"])\n  |> integral(unit: 1h)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Household Consumption Today",
       "type": "stat"
     },
     {
@@ -963,6 +1083,6 @@
   "timezone": "browser",
   "title": "AlphaESS Dashboard",
   "uid": "alphaess-main",
-  "version": 9,
+  "version": 2,
   "weekStart": ""
 }
