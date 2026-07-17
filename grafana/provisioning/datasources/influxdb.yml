@@ -1,0 +1,16 @@
+apiVersion: 1
+
+datasources:
+  - name: alphaess
+    uid: alphaess
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    isDefault: true
+    jsonData:
+      version: Flux
+      organization: $INFLUX_ORG
+      defaultBucket: $INFLUX_BUCKET
+      timeInterval: 30s
+    secureJsonData:
+      token: $INFLUX_TOKEN

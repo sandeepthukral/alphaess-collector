@@ -41,8 +41,44 @@ services:
     networks:
       - alphaess-net
 
+  grafana:
+    image: grafana/grafana-oss:11.6.0
+    restart: unless-stopped
+    # Copies the dashboard JSON into the provisioning dir with the import
+    # placeholder ${DS_ALPHAESS} resolved to the provisioned datasource uid,
+    # then starts Grafana normally. Keeps grafana/alphaess-dashboard.json
+    # import-compatible for setups with an existing Grafana (see DEPLOY.md).
+    entrypoint:
+      - /bin/sh
+      - -c
+      - >
+        mkdir -p /var/lib/grafana/dashboards &&
+        sed 's/$${DS_ALPHAESS}/alphaess/g'
+        /etc/grafana/dashboard-src/alphaess-dashboard.json
+        > /var/lib/grafana/dashboards/alphaess.json &&
+        exec /run.sh
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # Consumed by grafana/provisioning/datasources/influxdb.yml
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
+      INFLUX_ORG: ${INFLUX_ORG:-home}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - alphaess-grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/alphaess-dashboard.json:/etc/grafana/dashboard-src/alphaess-dashboard.json:ro
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - alphaess-net
+
 networks:
   alphaess-net:
 
 volumes:
   alphaess-influxdb-data:
+  alphaess-grafana-data:

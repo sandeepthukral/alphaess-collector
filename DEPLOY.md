@@ -1,9 +1,14 @@
-# Deploying to the NAS
+# Deploying with an existing Grafana (NAS)
 
-Deployment of the collector stack to the NAS that already runs TeslaMate,
-which has a Grafana container it it. Grafana is shared: this stack's InfluxDB
-joins an external Docker network that Grafana is also attached to, so Grafana
-can query it by container name.
+This is the secondary deployment path, for reusing a Grafana instance that
+already runs elsewhere — here, a NAS that runs TeslaMate, which has a Grafana
+container in it. (The primary, self-contained path with a bundled,
+auto-provisioned Grafana is covered in the [README](README.md).)
+
+Grafana is shared: this stack's InfluxDB joins an external Docker network
+that Grafana is also attached to, so Grafana can query it by container name.
+The `docker-compose.nas.yml` overlay sets this up and also disables the
+bundled Grafana service from the base compose file.
 
 ## 1. Clone on the NAS
 

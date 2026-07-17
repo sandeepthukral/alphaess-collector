@@ -1,5 +1,7 @@
-# NAS deployment overlay: attaches InfluxDB to the external network shared
-# with the existing Grafana container, so Grafana can reach it by service name.
+# NAS / shared-Grafana deployment overlay:
+#  - disables the bundled Grafana service (an existing Grafana is reused)
+#  - attaches InfluxDB to the external network shared with that Grafana
+#    container, so Grafana can reach it by service name
 #
 # The network must exist first (once):
 #   docker network create shared-grafana-net
@@ -8,6 +10,11 @@
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.nas.yml up -d
 services:
+  grafana:
+    # Assigning a profile that is never activated prevents the bundled
+    # Grafana from starting in this deployment.
+    profiles: ["disabled"]
+
   influxdb:
     networks:
       - alphaess-net
