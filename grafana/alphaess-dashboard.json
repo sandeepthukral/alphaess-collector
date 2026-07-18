@@ -516,9 +516,37 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "pv_power_w"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Solar"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "load_power_w"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Load"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "soc_percent"
             },
             "properties": [
+              {
+                "id": "displayName",
+                "value": "SOC %"
+              },
               {
                 "id": "unit",
                 "value": "percent"
@@ -544,8 +572,38 @@
             },
             "properties": [
               {
+                "id": "displayName",
+                "value": "Net Power"
+              },
+              {
                 "id": "custom.fillOpacity",
                 "value": 15
+              },
+              {
+                "id": "color",
+                "value": {
+                  "mode": "thresholds"
+                }
+              },
+              {
+                "id": "custom.gradientMode",
+                "value": "scheme"
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "green",
+                      "value": 0
+                    }
+                  ]
+                }
               }
             ]
           },
@@ -574,7 +632,7 @@
         ]
       },
       "gridPos": {
-        "h": 9,
+        "h": 11,
         "w": 12,
         "x": 0,
         "y": 4
@@ -709,7 +767,7 @@
         ]
       },
       "gridPos": {
-        "h": 9,
+        "h": 11,
         "w": 12,
         "x": 12,
         "y": 4
@@ -781,6 +839,18 @@
           "unit": "kwatth"
         },
         "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Time"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "time:YYYY-MM-DD"
+              }
+            ]
+          },
           {
             "matcher": {
               "id": "byName",
@@ -865,7 +935,7 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 15
       },
       "id": 3,
       "options": {
@@ -885,7 +955,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"battery_charged_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"battery_charged_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
           "refId": "A"
         },
         {
@@ -893,7 +963,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value > 0.0 then r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"battery_discharged_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value > 0.0 then r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"battery_discharged_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
           "refId": "B"
         },
         {
@@ -901,7 +971,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"load_power_w\")\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"home_consumed_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"load_power_w\")\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"home_consumed_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
           "refId": "C"
         },
         {
@@ -909,7 +979,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"grid_feedin_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"grid_feedin_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
           "refId": "D"
         },
         {
@@ -917,7 +987,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value > 0.0 then r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"grid_consumed_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value > 0.0 then r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"grid_consumed_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
           "refId": "E"
         },
         {
@@ -925,7 +995,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"pv_power_w\")\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"solar_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
+          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"pv_power_w\")\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"solar_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
           "refId": "F"
         }
       ],
@@ -1060,7 +1130,7 @@
         "h": 5,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 19
       },
       "id": 4,
       "options": {
