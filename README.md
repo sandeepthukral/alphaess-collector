@@ -36,7 +36,10 @@ with `sys_sn`:
 
 4. Open Grafana at http://localhost:3000 (login with
    `GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD`). The InfluxDB datasource and
-   the **AlphaESS** dashboard are provisioned automatically — no manual setup.
+   two dashboards — **AlphaESS** (power/energy overview) and **AlphaESS Energy
+   Flow** (a source→use Sankey, defaults to Today) — are provisioned
+   automatically, no manual setup. The bundled Grafana also installs the
+   `volkovlabs-echarts-panel` plugin the Energy Flow dashboard needs.
 
    > The dashboard's daily/hourly energy tables pin day boundaries to
    > `Europe/Amsterdam`. If you live elsewhere, edit the `timezone.location`

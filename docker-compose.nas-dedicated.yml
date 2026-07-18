@@ -1,0 +1,25 @@
+# NAS dedicated-Grafana overlay.
+#
+# Use this INSTEAD of docker-compose.nas.yml when you would rather run this
+# project's own bundled, auto-provisioned Grafana (which already includes the
+# netsage-sankey-panel plugin for the Energy-flow Sankey) than install the
+# plugin into the shared TeslaMate Grafana.
+#
+# It keeps the bundled Grafana enabled and just republishes it on a non-default
+# host port so it does not clash with the TeslaMate Grafana already on 3000.
+# No shared network, no changes to the TeslaMate stack, no Grafana restart.
+#
+# (If host port 8086 is also taken, set INFLUX_PORT in .env as usual — see
+# DEPLOY.md step 2.)
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.nas-dedicated.yml up -d
+# Then open http://<nas-host>:3001
+services:
+  grafana:
+    # !override replaces the base port list instead of appending to it, so
+    # Grafana publishes ONLY 3001 and never tries to bind 3000 (taken by the
+    # TeslaMate Grafana). Needs Docker Compose v2.24+. On older Compose, drop
+    # this overlay and instead set GRAFANA_PORT=3001 in .env with the base file.
+    ports: !override
+      - "${GRAFANA_PORT:-3001}:3000"

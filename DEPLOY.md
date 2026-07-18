@@ -134,13 +134,68 @@ In the Grafana UI (not provisioning files):
 
 ## 8. First dashboard panels
 
-**Shortcut — import instead of building by hand:** the repo ships a ready
-dashboard at [grafana/alphaess-dashboard.json](grafana/alphaess-dashboard.json)
-with all panels below plus daily/hourly energy-total tables. In Grafana:
-Dashboards → **New → Import** → upload the JSON (or paste its contents) → in
-the datasource dropdown pick your `alphaess` datasource → Import. Skip the
-manual steps below if you use it. (Daily-table queries pin day boundaries to
-`Europe/Amsterdam` — edit the `timezone.location` lines if needed.)
+**Shortcut — import instead of building by hand:** the repo ships two ready
+dashboards. Import each the same way: Dashboards → **New → Import** → upload the
+JSON (or paste its contents) → in the datasource dropdown pick your `alphaess`
+datasource → Import. Skip the manual steps below if you use them. (Daily-table
+queries pin day boundaries to `Europe/Amsterdam` — edit the `timezone.location`
+lines if needed.)
+
+- [grafana/alphaess-dashboard.json](grafana/alphaess-dashboard.json) — the main
+  dashboard: all panels below plus daily/hourly energy-total tables. Needs no
+  extra plugins.
+- [grafana/alphaess-energy-flow.json](grafana/alphaess-energy-flow.json) — the
+  **Energy Flow** Sankey, on its own dashboard (defaults to Today; change the
+  day with the time picker). This one needs the `volkovlabs-echarts-panel` plugin —
+  see [Sankey plugin on the NAS](#sankey-plugin-on-the-nas) below. Without it
+  the panel shows a "plugin not found" placeholder; the main dashboard is
+  unaffected.
+
+### Sankey plugin on the NAS
+
+The **Energy Flow** dashboard (`alphaess-energy-flow.json`) is the one part of
+this stack that needs a Grafana plugin (`volkovlabs-echarts-panel`); the main
+dashboard needs none. A panel plugin is purely additive —
+it registers a new visualization type and touches nothing else (no datasources,
+dashboards, or config), so installing it into the shared TeslaMate Grafana is
+low-risk. Two ways to provide it:
+
+**Option A — install into the shared Grafana.** One-time, no edits to the
+TeslaMate stack's compose:
+
+```sh
+docker ps | grep -i grafana        # find the Grafana container name
+docker exec <grafana-container> grafana-cli plugins install volkovlabs-echarts-panel
+docker restart <grafana-container>
+```
+
+> On recent Grafana images `grafana-cli` is not on `PATH` — it was merged into
+> the main binary. If you get `"grafana-cli": executable file not found`, use
+> `grafana cli` instead:
+> `docker exec <grafana-container> grafana cli plugins install volkovlabs-echarts-panel`
+
+The plugin lives in Grafana's data volume, so it survives restarts and
+container recreation (as long as that volume persists — if it is ever wiped,
+re-run the install, same as the `docker network connect` step above). The one
+cost is the restart: a ~10–20s blip on your TeslaMate dashboards.
+
+**Option B — run a dedicated Grafana for this stack.** If you would rather not
+touch the TeslaMate container at all (not even a restart), skip the shared
+network and run this project's own bundled, auto-provisioned Grafana instead —
+it already includes the plugin. Use the dedicated overlay in place of
+`docker-compose.nas.yml`:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.nas-dedicated.yml up -d
+# then open http://<nas-host>:3001
+```
+
+This publishes Grafana on host port 3001 (override with `GRAFANA_PORT`) so it
+does not clash with the TeslaMate Grafana on 3000. The datasource and both
+dashboards are provisioned automatically, exactly like the primary README path —
+you do
+not need steps 4–8 of this guide in that case. Trade-off: a second Grafana
+container/login on the NAS, versus keeping everything in one Grafana.
 
 To build manually instead: Dashboards → New dashboard → **Add visualization**
 → select the `alphaess`
