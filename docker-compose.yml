@@ -78,6 +78,12 @@ services:
 
 networks:
   alphaess-net:
+    # Cap the bridge MTU to clear path-MTU limits on some hosts (e.g. Synology
+    # NAS uplinks / VPN/PPPoE), where the default 1500 causes large TLS
+    # handshake packets to the AlphaESS API to be dropped, surfacing as
+    # intermittent "SSL: UNEXPECTED_EOF_WHILE_READING" errors in the collector.
+    driver_opts:
+      com.docker.network.driver.mtu: 1400
 
 volumes:
   alphaess-influxdb-data:
