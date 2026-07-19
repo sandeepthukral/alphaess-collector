@@ -1,2 +1,4 @@
 requests==2.32.4
 influxdb-client==1.49.0
+# zoneinfo (Europe/Amsterdam) needs a tz database; python:*-slim ships none.
+tzdata==2026.3

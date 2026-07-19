@@ -74,6 +74,7 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/alphaess-dashboard.json:/etc/grafana/dashboard-src/alphaess-dashboard.json:ro
       - ./grafana/alphaess-energy-flow.json:/etc/grafana/dashboard-src/alphaess-energy-flow.json:ro
+      - ./grafana/alphaess-battery-savings.json:/etc/grafana/dashboard-src/alphaess-battery-savings.json:ro
     depends_on:
       influxdb:
         condition: service_healthy
