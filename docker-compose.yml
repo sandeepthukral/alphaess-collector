@@ -35,6 +35,9 @@ services:
       INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-30}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Battery usable capacity (kWh) — used by pricing.py to express the daily
+      # SoC change in kWh. Optional; leave blank to skip that indicator.
+      BATTERY_CAPACITY_KWH: ${BATTERY_CAPACITY_KWH:-}
     depends_on:
       influxdb:
         condition: service_healthy
