@@ -35,6 +35,9 @@ services:
       INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-30}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Battery usable capacity (kWh) — used by pricing.py to express the daily
+      # SoC change in kWh. Optional; leave blank to skip that indicator.
+      BATTERY_CAPACITY_KWH: ${BATTERY_CAPACITY_KWH:-}
       # Optional Kuma "Push" monitor URL; unset = no heartbeat.
       HEARTBEAT_URL: ${HEARTBEAT_URL:-}
     depends_on:
@@ -98,6 +101,7 @@ services:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/alphaess-dashboard.json:/etc/grafana/dashboard-src/alphaess-dashboard.json:ro
       - ./grafana/alphaess-energy-flow.json:/etc/grafana/dashboard-src/alphaess-energy-flow.json:ro
+      - ./grafana/alphaess-battery-savings.json:/etc/grafana/dashboard-src/alphaess-battery-savings.json:ro
     depends_on:
       influxdb:
         condition: service_healthy

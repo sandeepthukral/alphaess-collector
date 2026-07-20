@@ -143,6 +143,39 @@ Reordering apps or hiding the time is done in the AWTRIX app settings. The
 pusher runs in every deployment mode, since it lives in the base compose file
 and the NAS overlays only override Grafana/InfluxDB.
 
+## Battery-savings analysis
+
+Quantifies what the battery is worth in euros: for each complete local (NL) day
+it prices the real grid flows (Model 1, with battery) against a counterfactual
+with no battery (Model 2), using Frank Energie's hourly market prices. The
+difference is the battery's value that day. See
+[DESIGN-battery-savings.md](DESIGN-battery-savings.md) for the full rationale.
+
+Two batch jobs write to InfluxDB; the **Battery Savings** dashboard
+([grafana/alphaess-battery-savings.json](grafana/alphaess-battery-savings.json))
+reads the results:
+
+1. `prices.py` — fetches Frank Energie market prices → `market_price` measurement.
+2. `pricing.py` — integrates `power_readings` × `market_price` → `daily_cost`.
+
+Neither runs automatically (the collector container only polls live power). Run
+them for a range once to backfill, e.g.:
+
+```sh
+docker compose run --rm collector python prices.py  --backfill 2026-07-01 2026-07-19
+docker compose run --rm collector python pricing.py --backfill 2026-07-01 2026-07-19
+```
+
+`pricing.py` skips days already written and only stores days with ≥98% sample
+coverage, so re-running a range is cheap and self-healing (days skipped for late
+prices or gaps are retried once the data lands). Optional: set
+`BATTERY_CAPACITY_KWH` in `.env` to also express each day's SoC change in kWh.
+
+To keep it current, schedule [scripts/daily-savings.sh](scripts/daily-savings.sh)
+nightly — it reprocesses a rolling window of recent complete days. See
+[DEPLOY.md](DEPLOY.md#nightly-battery-savings-update) for the DSM Task Scheduler
+setup.
+
 ## Notes
 
 - Poll interval floor is 10 s (API rate limit guidance); default is 30 s.

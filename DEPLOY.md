@@ -159,7 +159,7 @@ In the Grafana UI (not provisioning files):
 
 ## 8. First dashboard panels
 
-**Shortcut — import instead of building by hand:** the repo ships two ready
+**Shortcut — import instead of building by hand:** the repo ships three ready
 dashboards. Import each the same way: Dashboards → **New → Import** → upload the
 JSON (or paste its contents) → in the datasource dropdown pick your `alphaess`
 datasource → Import. Skip the manual steps below if you use them. (Daily-table
@@ -175,6 +175,10 @@ lines if needed.)
   see [Sankey plugin on the NAS](#sankey-plugin-on-the-nas) below. Without it
   the panel shows a "plugin not found" placeholder; the main dashboard is
   unaffected.
+- [grafana/alphaess-battery-savings.json](grafana/alphaess-battery-savings.json)
+  — the **Battery Savings** dashboard (euro value of the battery per day). Needs
+  no extra plugins, but shows "No data" until the pricing jobs have run — see
+  [Battery-savings pricing jobs](#battery-savings-pricing-jobs) below.
 
 ### Sankey plugin on the NAS
 
@@ -287,6 +291,61 @@ Panel settings:
 Save icon (top right) → name the dashboard (e.g. `AlphaESS`) → Save. Set the
 auto-refresh dropdown (next to Refresh) to `30s`–`1m` for a live view. Panels
 move by dragging the title, resize by the corner.
+
+## Battery-savings pricing jobs
+
+The **Battery Savings** dashboard reads a `daily_cost` measurement that is _not_
+produced by the live collector — two batch jobs populate it (see the
+[README](README.md#battery-savings-analysis) and
+[DESIGN-battery-savings.md](DESIGN-battery-savings.md) for what they compute):
+
+1. `prices.py` — fetches Frank Energie market prices → `market_price`.
+2. `pricing.py` — integrates `power_readings` × `market_price` → `daily_cost`.
+
+Backfill a range once (adjust the start to how far back your `power_readings`
+go; end at yesterday — today is incomplete):
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.nas.yml \
+  run --rm collector python prices.py  --backfill 2026-07-01 2026-07-19
+docker compose -f docker-compose.yml -f docker-compose.nas.yml \
+  run --rm collector python pricing.py --backfill 2026-07-01 2026-07-19
+```
+
+> **Always pass both `-f` files** for `run` too. A bare `docker compose run`
+> recreates InfluxDB off the base compose, dropping it from `shared-grafana-net`
+> and its `influxdb` network alias — the Grafana datasource then fails with
+> `lookup influxdb ... no such host`. If that happens, bring it back with
+> `docker compose -f docker-compose.yml -f docker-compose.nas.yml up -d`
+> (which re-attaches it _with_ the alias; a manual `docker network connect`
+> restores the network but not the alias).
+
+`pricing.py` skips days already written and only stores days with ≥98% sample
+coverage, so a range is cheap to re-run and self-heals days skipped for late
+prices or gaps. Optionally set `BATTERY_CAPACITY_KWH` in `.env` to also show
+each day's SoC change in kWh.
+
+### Nightly battery-savings update
+
+To keep `daily_cost` current, schedule [scripts/daily-savings.sh](scripts/daily-savings.sh)
+to run nightly. It cd's into the repo, computes a rolling window (yesterday plus
+the 3 days before, TZ-correct), and runs both jobs above — always with both
+compose files, so it can't break the datasource.
+
+DSM **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined
+script**:
+
+- **General**: User = `root` (DSM's docker socket needs root)
+- **Schedule**: Daily, first run time `02:00`
+- **Task Settings → Run command**:
+
+  ```sh
+  /volume1/docker/alphaess-collector/scripts/daily-savings.sh
+  ```
+
+Test it once by hand first (`sudo /volume1/docker/alphaess-collector/scripts/daily-savings.sh`)
+and confirm the Grafana datasource still resolves afterward. Adjust the window
+via `WINDOW_DAYS` near the top of the script.
 
 ## Updating
 
