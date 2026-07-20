@@ -66,6 +66,18 @@ def get_last_power_data(app_id: str, app_secret: str, sys_sn: str) -> dict:
     return data
 
 
+def send_heartbeat(url: str, timeout: float = 5) -> None:
+    """Ping a Kuma 'Push' monitor after a successful write (a dead-man's switch
+    for the whole collect->write path). Best-effort: never let a monitoring
+    hiccup disturb collection, so all errors are swallowed."""
+    if not url:
+        return
+    try:
+        requests.get(url, timeout=timeout)
+    except Exception as exc:
+        log.debug("Heartbeat ping failed: %s", exc)
+
+
 def parse_fields(data: dict) -> dict:
     """Extract the fields we store. All powers in watts.
 
@@ -106,6 +118,9 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
     if interval < 10:
         log.warning("POLL_INTERVAL_SECONDS=%d below API floor of 10s, using 10", interval)
         interval = 10
+    # Optional: URL of a Kuma "Push" monitor, pinged after each successful
+    # write. Unset -> no heartbeat, collector behaves exactly as before.
+    heartbeat_url = os.environ.get("HEARTBEAT_URL", "")
 
     client = InfluxDBClient(url=influx_url, token=influx_token, org=influx_org)
     write_api = client.write_api(write_options=SYNCHRONOUS)
@@ -135,6 +150,7 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                     point = point.field(key, value)
                 write_api.write(bucket=influx_bucket, record=point)
                 log.debug("Wrote point: %s", fields)
+                send_heartbeat(heartbeat_url)
             else:
                 log.warning("No usable fields in response, skipping write")
             consecutive_failures = 0

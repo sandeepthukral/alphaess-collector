@@ -35,6 +35,8 @@ services:
       INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-30}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Optional Kuma "Push" monitor URL; unset = no heartbeat.
+      HEARTBEAT_URL: ${HEARTBEAT_URL:-}
     depends_on:
       influxdb:
         condition: service_healthy
