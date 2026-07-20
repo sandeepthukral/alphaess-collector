@@ -132,7 +132,7 @@ def build_apps(fields: dict, stale: bool, icons: dict[str, str]) -> dict[str, di
                 sign = "+"   # charging
             elif bat > IDLE_W:
                 sign = "-"   # discharging
-        apps["soc"] = app("soc", "", f"{sign}{round(soc)}%", soc_color(soc))
+        apps["soc"] = app("soc", "", f"{sign}{soc:.1f}%", soc_color(soc))
 
     if pv is not None:
         apps["pv"] = app("pv", "PV", fmt_power(pv), COLOR_PV)
