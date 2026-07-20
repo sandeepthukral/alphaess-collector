@@ -38,6 +38,30 @@ services:
       # Battery usable capacity (kWh) — used by pricing.py to express the daily
       # SoC change in kWh. Optional; leave blank to skip that indicator.
       BATTERY_CAPACITY_KWH: ${BATTERY_CAPACITY_KWH:-}
+      # Optional Kuma "Push" monitor URL; unset = no heartbeat.
+      HEARTBEAT_URL: ${HEARTBEAT_URL:-}
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - alphaess-net
+
+  awtrix-pusher:
+    build: ./awtrix-pusher
+    restart: unless-stopped
+    environment:
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
+      INFLUX_ORG: ${INFLUX_ORG:-home}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
+      AWTRIX_HOST: ${AWTRIX_HOST}
+      PUSH_INTERVAL_SECONDS: ${PUSH_INTERVAL_SECONDS:-30}
+      STALE_AFTER_SECONDS: ${STALE_AFTER_SECONDS:-180}
+      AWTRIX_ICON_SOC: ${AWTRIX_ICON_SOC:-}
+      AWTRIX_ICON_PV: ${AWTRIX_ICON_PV:-}
+      AWTRIX_ICON_GRID: ${AWTRIX_ICON_GRID:-}
+      AWTRIX_ICON_LOAD: ${AWTRIX_ICON_LOAD:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       influxdb:
         condition: service_healthy
