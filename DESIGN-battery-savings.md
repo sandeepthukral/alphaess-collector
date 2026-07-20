@@ -166,6 +166,33 @@ pricing.py     per complete day: Model 1/2               →  daily_cost      (N
 dashboard      read + sum daily_cost                                        (NEW)
 ```
 
+### Time & timezone convention
+
+**Everything is stored as true UTC instants; "days" are an Amsterdam-local
+concept applied only at read/compute time.** This is the standard InfluxDB model
+and is DST-safe, but it means a day *looks* like it starts the night before when
+you inspect raw timestamps in UTC.
+
+- **What's stored:** `market_price` points at each interval's `from` (a UTC
+  instant); `daily_cost` points at local-midnight-expressed-as-UTC
+  (`day_window_utc()` in `pricing.py`, via
+  `datetime.combine(day, time(), NL_TZ).astimezone(utc)` — zoneinfo resolves the
+  real offset per date, so no hardcoded `+01:00`/`+02:00`).
+- **Local midnight in UTC:** `22:00` the previous day in summer (CEST, UTC+2),
+  `23:00` the previous day in winter (CET, UTC+1). So in a UTC-based view a day's
+  first row shows at 22:00 or 23:00 "the night before" — this is **correct
+  storage, not a bug.**
+- **How to view it right:** the InfluxDB Data Explorer and all Grafana panels
+  render in Amsterdam/browser time, so days line up on `00:00` there. Every
+  day-truncating Flux query uses `import "timezone"` +
+  `option location = timezone.location(name: "Europe/Amsterdam")` with
+  `today()`/`date.sub`; the dashboards set `"timezone": "browser"`. Only a raw
+  UTC query (or the Data Explorer with a UTC range) makes the previous-night
+  offset visible.
+- **Day boundaries in code** (`pricing.py` windows, coverage length,
+  `daily-savings.sh` date window) all go through `Europe/Amsterdam` zoneinfo, so
+  23 h and 25 h DST-transition days are handled correctly.
+
 ### `prices.py`
 
 - POST GraphQL to Frank's endpoint (no auth); fetch electricity market prices
@@ -249,7 +276,10 @@ day; there is no with/without split in the day set.
 3. **Frank API backfill depth** — confirm how far back `marketPricesElectricity`
    serves; older days may need an alternative source or may be unrecoverable.
 4. **DST correctness** — day windows and price-slot alignment in Europe/Amsterdam
-   including the 23 h / 25 h transition days.
+   including the 23 h / 25 h transition days. Handled via zoneinfo throughout;
+   see [Time & timezone convention](#time--timezone-convention) for the
+   UTC-storage / local-day model (and why a UTC view shows a day starting the
+   night before).
 5. **2027 saldering cliff** — tax netting on export ends; the "per-slot netting
    is exact" property breaks and export tax handling must change. The
    per-component price storage means the price side tracks automatically, but the
