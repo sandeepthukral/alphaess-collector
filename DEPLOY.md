@@ -34,6 +34,10 @@ cp .env.example .env
 Required values: `ALPHAESS_APP_ID`, `ALPHAESS_APP_SECRET`, `ALPHAESS_SYS_SN`,
 `INFLUX_ADMIN_PASSWORD`, `INFLUX_TOKEN` (generate with `openssl rand -hex 32`).
 
+Optional: to push live stats to an AWTRIX 3 clock, also set `AWTRIX_HOST` to the
+clock's LAN IP (see [AWTRIX clock display](#awtrix-clock-display) below). Leave
+it blank to skip that feature — the `awtrix-pusher` service just idles.
+
 **Port check:** if another InfluxDB (e.g. Sparky's) already uses host port
 8086, set `INFLUX_PORT=8087` (or any free port) in `.env`. This only affects
 host access to the InfluxDB UI; Grafana reaches the container over the Docker
@@ -86,6 +90,27 @@ docker compose logs -f collector
 ```
 
 Expected: a `Polling every 30s ...` line and no repeated `Poll failed` errors.
+
+### AWTRIX clock display
+
+If you set `AWTRIX_HOST`, the `awtrix-pusher` service comes up with the stack
+and pushes SoC / solar / grid / load to the clock every 30 s (reading InfluxDB,
+never the AlphaESS API). Dry-run it first:
+
+```sh
+docker compose run --rm awtrix-pusher python pusher.py --once
+```
+
+Then check the loop:
+
+```sh
+docker compose logs -f awtrix-pusher
+```
+
+Reserve a static IP for the clock on the router so `AWTRIX_HOST` stays valid.
+The container reaches the clock over the NAS's LAN — no extra Docker network
+needed. See the [README](README.md#awtrix-clock-display-ulanzi-tc001) for the
+app/colour reference and stale-data behaviour.
 
 ## 6. Verify sign conventions (once)
 

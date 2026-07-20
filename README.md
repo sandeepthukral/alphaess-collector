@@ -73,6 +73,76 @@ See [DEPLOY.md](DEPLOY.md) — full walkthrough: cloning, secrets transfer,
 shared Grafana network setup, starting with the NAS overlay, Grafana
 datasource, and dashboard import.
 
+## AWTRIX clock display (Ulanzi TC001)
+
+Push a few live stats to an [AWTRIX 3](https://blueforcer.github.io/awtrix3/)
+clock (e.g. a modded Ulanzi TC001). The `awtrix-pusher` service reads the most
+recent sample **already in InfluxDB** and POSTs it to the clock over HTTP — it
+never calls the AlphaESS API, so it adds zero upstream load and is fully
+decoupled from the collector.
+
+```
+InfluxDB.last() ──(every 30 s)──▶ awtrix-pusher ──HTTP──▶ clock /api/custom
+```
+
+Four custom apps rotate in the clock's loop:
+
+| App | Example | Colour |
+|---|---|---|
+| `soc` | `+85%` / `-85%` | `+` charging, `-` discharging; green→amber→red by level |
+| `pv` | `PV 1.8kW` | amber |
+| `grid` | `GRID 0.4kW` | green = exporting, red = importing, grey near zero |
+| `load` | `LOAD 0.6kW` | blue |
+
+If the newest InfluxDB point is older than `STALE_AFTER_SECONDS` (default 180),
+all apps push in dim grey so a dead collector or API outage is visible on the
+clock instead of showing silently frozen numbers.
+
+**Icons (optional):** by default the apps are text-only with a short label
+(`PV`, `GRID`, `LOAD`). To use AWTRIX's own 8×8 icons instead, upload them via
+the clock's web UI **Icons** page (it can fetch by ID from the
+[LaMetric icon gallery](https://developer.lametric.com/icons)), then set the
+matching env var to that icon's name/ID:
+
+```
+AWTRIX_ICON_SOC=1234
+AWTRIX_ICON_PV=5678
+AWTRIX_ICON_GRID=...
+AWTRIX_ICON_LOAD=...
+```
+
+When an app has an icon, its text label is dropped (the icon carries the
+identity) so the value shows without scrolling — e.g. `☀ 1.8kW`. Colours and
+the SoC `+/-` charge indicator still apply.
+
+**Setup:**
+
+1. Reserve a static IP for the clock on your router and set it in `.env`:
+
+   ```
+   AWTRIX_HOST=192.168.1.42
+   PUSH_INTERVAL_SECONDS=30
+   STALE_AFTER_SECONDS=180
+   ```
+
+2. Dry-run — prints the fields read and the payloads, then pushes once
+   (add `--no-push` to preview without touching the clock):
+
+   ```sh
+   docker compose run --rm awtrix-pusher python pusher.py --once
+   ```
+
+3. Start it (it also comes up with `docker compose up -d`):
+
+   ```sh
+   docker compose up -d awtrix-pusher
+   ```
+
+The apps join the clock's rotation automatically — no clock-side config.
+Reordering apps or hiding the time is done in the AWTRIX app settings. The
+pusher runs in every deployment mode, since it lives in the base compose file
+and the NAS overlays only override Grafana/InfluxDB.
+
 ## Notes
 
 - Poll interval floor is 10 s (API rate limit guidance); default is 30 s.
