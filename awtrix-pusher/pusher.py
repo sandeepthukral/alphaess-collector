@@ -132,7 +132,9 @@ def build_apps(fields: dict, stale: bool, icons: dict[str, str]) -> dict[str, di
                 sign = "+"   # charging
             elif bat > IDLE_W:
                 sign = "-"   # discharging
-        apps["soc"] = app("soc", "", f"{sign}{soc:.1f}%", soc_color(soc))
+        # Drop the decimal at a full 100% ("100%"); show one decimal otherwise.
+        soc_text = f"{soc:.0f}" if soc >= 100 else f"{soc:.1f}"
+        apps["soc"] = app("soc", "", f"{sign}{soc_text}%", soc_color(soc))
 
     if pv is not None:
         apps["pv"] = app("pv", "PV", fmt_power(pv), COLOR_PV)
