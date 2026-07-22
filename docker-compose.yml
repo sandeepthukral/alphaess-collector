@@ -40,6 +40,11 @@ services:
       BATTERY_CAPACITY_KWH: ${BATTERY_CAPACITY_KWH:-}
       # Optional Kuma "Push" monitor URL; unset = no heartbeat.
       HEARTBEAT_URL: ${HEARTBEAT_URL:-}
+      # Keep in sync with the com.docker.network.driver.mtu driver_opt on
+      # alphaess-net below. The collector warns at startup if the MTU it
+      # actually has is larger, which catches the network having been created
+      # before that cap was added.
+      EXPECTED_MAX_MTU: ${EXPECTED_MAX_MTU:-1400}
     depends_on:
       influxdb:
         condition: service_healthy
@@ -114,6 +119,16 @@ networks:
     # NAS uplinks / VPN/PPPoE), where the default 1500 causes large TLS
     # handshake packets to the AlphaESS API to be dropped, surfacing as
     # intermittent "SSL: UNEXPECTED_EOF_WHILE_READING" errors in the collector.
+    #
+    # !! Changing anything under driver_opts requires `docker compose down`
+    # followed by `up -d`. Compose only applies driver_opts when it CREATES a
+    # network; if one with this name already exists it is reused as-is and
+    # your edit is silently ignored -- no warning, no error. `up
+    # --force-recreate` does NOT help: it recreates the container but
+    # reattaches it to the existing network. Verify with
+    #   docker compose exec collector cat /sys/class/net/eth0/mtu
+    # The collector also logs its link MTU at startup and warns if it exceeds
+    # EXPECTED_MAX_MTU (see collector/collector.py:check_mtu).
     driver_opts:
       com.docker.network.driver.mtu: 1400
 

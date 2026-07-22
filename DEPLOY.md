@@ -356,3 +356,103 @@ docker compose -f docker-compose.yml -f docker-compose.nas.yml up -d --build
 
 InfluxDB data lives in the `alphaess-influxdb-data` volume and survives
 updates. Only `down -v` on _this_ stack deletes it.
+
+### If the pull changed `networks:` or `volumes:`
+
+`up -d` is **not** enough. Compose reconciles services (it diffs the config
+and recreates containers), but it treats networks and volumes as
+create-if-absent: when one already exists under that name it is reused and
+your changed `driver_opts` / options are ignored, with no warning and no
+error. `up -d --force-recreate` does not help either — it recreates the
+container but reattaches it to the existing network.
+
+This is deliberate. Recreating a network means disconnecting every attached
+container, including ones from other projects (here, TeslaMate's Grafana on
+`shared-grafana-net`), and recreating a volume would destroy data. So Compose
+never does either implicitly.
+
+To actually apply such a change, recreate the network:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.nas.yml down
+docker compose -f docker-compose.yml -f docker-compose.nas.yml up -d
+```
+
+`down` without `-v` keeps the named volumes, and it does not touch
+`shared-grafana-net` (declared `external: true`). Afterwards confirm InfluxDB
+rejoined the shared network, or the existing Grafana loses its datasource:
+
+```sh
+docker network inspect shared-grafana-net -f '{{range .Containers}}{{.Name}} {{end}}'
+```
+
+Verify the MTU specifically — this exact drift caused a silent collection
+outage on 2026-07-22, because a stale 1500 MTU only drops the large TLS
+handshake packets and shows up as intermittent
+`SSL: UNEXPECTED_EOF_WHILE_READING`:
+
+```sh
+docker compose exec collector cat /sys/class/net/eth0/mtu   # expect 1400
+```
+
+The collector also logs this at startup and warns when it is too high, so
+`docker compose logs collector | head` will tell you without the exec. It
+re-checks after 3 consecutive TLS failures, so a long-running container still
+reports it.
+
+## Monitoring that the collector is actually collecting
+
+The poll loop catches every exception and backs off (capped at 5 minutes)
+instead of exiting, so **container liveness is not a useful signal** — the
+process stays up while collecting nothing. Expired credentials, API errors,
+InfluxDB write failures and the MTU problem above all look identical from the
+outside.
+
+Two independent checks cover this, from opposite ends of the pipeline:
+
+**1. `HEARTBEAT_URL` (write side, primary).** Set it to an Uptime Kuma
+**Push** monitor URL and the collector pings it after each successful
+InfluxDB write — a dead-man's switch over the whole collect→write path. Set
+the Kuma monitor's grace period above `POLL_INTERVAL_SECONDS`; allow for the
+5-minute backoff cap, so ~10 minutes is a sensible floor or you will get
+false alarms on a transient blip.
+
+**2. Grafana staleness alert (read side, secondary).** The rule in
+[`grafana/provisioning/alerting/alphaess-staleness.yml`](grafana/provisioning/alerting/alphaess-staleness.yml)
+fires when the newest `power_readings` sample is more than 5 minutes old, and
+on no data at all.
+
+These overlap substantially — the heartbeat already catches most stalls. The
+staleness alert adds the cases the heartbeat structurally cannot see, because
+it queries the data rather than trusting the writer: a wrong bucket, a
+retention policy quietly dropping data, a Grafana datasource pointed
+elsewhere, or `HEARTBEAT_URL` simply never being set. If you run only one, run
+the heartbeat.
+
+**With `docker-compose.nas-dedicated.yml`** (this project's own Grafana) the
+rule is picked up automatically — `./grafana/provisioning` is already mounted,
+along with the datasource and all three dashboards. Nothing to do.
+
+**With `docker-compose.nas.yml`** (shared TeslaMate Grafana) the bundled
+Grafana is disabled, so the file is not mounted anywhere and the rule will
+*not* appear on its own. Mount it into the existing Grafana by adding to that
+Grafana's compose service:
+
+```yaml
+volumes:
+  - <path>/alphaess-collector/grafana/provisioning/alerting:/etc/grafana/provisioning/alerting:ro
+```
+
+then restart that container.
+
+Two things to check after installing:
+
+- The rule's `datasourceUid` is `alphaess`. In the existing Grafana the
+  InfluxDB datasource must have that uid (Connections → Data sources →
+  alphaess → the uid is in the URL). Adjust the rule if it differs.
+- The query hardcodes `bucket: "alphaess"`. Change it if `INFLUX_BUCKET` is
+  not the default.
+
+Provisioned rules route through the **default notification policy**. Point
+that at a real contact point (Alerting → Contact points), otherwise the alert
+fires into nothing.

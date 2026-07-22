@@ -1,0 +1,98 @@
+# Alerts on the collector going quiet, regardless of why.
+#
+# The collector's poll loop catches every exception and backs off (capped at
+# 5 minutes) rather than exiting, so a container-liveness check stays green
+# while no data is being written. Credential expiry, AlphaESS API errors,
+# InfluxDB write failures and the stale-MTU TLS problem all present
+# identically: the process is up and the dashboards are empty.
+#
+# This is the SECONDARY check. The primary one is HEARTBEAT_URL: the
+# collector pings an Uptime Kuma "Push" monitor after each successful write,
+# which already catches most stalls at the write end. This rule watches the
+# read end instead -- it queries the data rather than trusting the writer --
+# so it additionally covers a wrong bucket, a retention policy dropping data,
+# a datasource pointed elsewhere, or HEARTBEAT_URL never being set. Running
+# both is intentional redundancy; if you run only one, run the heartbeat.
+#
+# Bundled Grafana picks this up automatically (docker-compose.yml mounts
+# ./grafana/provisioning). With the NAS overlay the bundled Grafana is
+# disabled, so this must be installed into the existing Grafana instead --
+# see DEPLOY.md, "Staleness alert".
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: alphaess-health
+    folder: AlphaESS
+    # How often the rule is evaluated. With a 300s threshold this detects a
+    # stall roughly 5-6 minutes after the last successful write.
+    interval: 1m
+    rules:
+      - uid: alphaess-data-stale
+        title: AlphaESS collector data stale
+        condition: C
+        # The metric is itself an elapsed time, so it is inherently debounced
+        # -- a brief blip cannot push it over 300s. No extra "for" needed.
+        for: 0s
+        # No series at all means the collector has written nothing in the last
+        # hour, which is the most severe case -- not a reason to stay silent.
+        noDataState: Alerting
+        execErrState: Alerting
+        labels:
+          service: alphaess-collector
+        annotations:
+          summary: >-
+            No AlphaESS data written for over 5 minutes (newest sample is
+            {{ humanize $values.B.Value }}s old).
+          description: >-
+            The collector container is probably still running -- its poll loop
+            backs off on failure instead of exiting, so check the logs rather
+            than the container state:
+            `docker compose logs --tail=100 collector`.
+            Common causes: an "SSL: UNEXPECTED_EOF_WHILE_READING" TLS failure
+            from an oversized MTU on alphaess-net (the collector logs its link
+            MTU at startup; recreate the network with `docker compose down &&
+            docker compose up -d`, as --force-recreate reuses the existing
+            network); expired AlphaESS API credentials; or InfluxDB refusing
+            writes.
+        data:
+          # A: age in seconds of the newest power_readings sample.
+          - refId: A
+            relativeTimeRange:
+              from: 3600
+              to: 0
+            datasourceUid: alphaess
+            model:
+              refId: A
+              # Change the bucket here if INFLUX_BUCKET is not the default.
+              query: |
+                from(bucket: "alphaess")
+                  |> range(start: -1h)
+                  |> filter(fn: (r) => r._measurement == "power_readings")
+                  |> filter(fn: (r) => r._field == "soc_percent")
+                  |> last()
+                  |> map(fn: (r) => ({
+                       _time: r._time,
+                       _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0
+                     }))
+                  |> keep(columns: ["_time", "_value"])
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          # C: fire when the newest sample is older than 5 minutes. This is
+          # the collector's own backoff cap, so anything past it means the
+          # loop is failing repeatedly rather than merely between polls.
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [300]

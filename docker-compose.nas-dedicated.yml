@@ -1,9 +1,9 @@
 # NAS dedicated-Grafana overlay.
 #
 # Use this INSTEAD of docker-compose.nas.yml when you would rather run this
-# project's own bundled, auto-provisioned Grafana (which already includes the
-# netsage-sankey-panel plugin for the Energy-flow Sankey) than install the
-# plugin into the shared TeslaMate Grafana.
+# project's own bundled, auto-provisioned Grafana (which already installs the
+# volkovlabs-echarts-panel plugin used by the Energy-flow Sankey) than install
+# the plugin into the shared TeslaMate Grafana.
 #
 # It keeps the bundled Grafana enabled and just republishes it on a non-default
 # host port so it does not clash with the TeslaMate Grafana already on 3000.
