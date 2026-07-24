@@ -144,7 +144,7 @@ def send_heartbeat(url: str, timeout: float = 5) -> None:
     try:
         requests.get(url, timeout=timeout)
     except Exception as exc:
-        log.debug("Heartbeat ping failed: %s", exc)
+        log.warning("Heartbeat ping failed: %s", exc)
 
 
 def parse_fields(data: dict) -> dict:
