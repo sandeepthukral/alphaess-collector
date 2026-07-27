@@ -17,7 +17,7 @@ import signal
 import socket
 import sys
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import requests
 from influxdb_client import InfluxDBClient, Point
@@ -314,8 +314,16 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
     """
     if not url:
         return
+    # The push URL Kuma displays already carries a query string
+    # (?status=up&msg=OK&ping=), and that is what ends up in HEARTBEAT_URL.
+    # Passing params= would *append* to it rather than replace it, and Express
+    # parses repeated keys as arrays: status becomes ["up", "down"], which
+    # matches neither value, so every ping registers as DOWN and the message
+    # renders as "[object Object]". Rebuild the query instead of adding to it.
+    target = urlunsplit(
+        urlsplit(url)._replace(query=urlencode({"status": status, "msg": msg})))
     try:
-        requests.get(url, params={"status": status, "msg": msg}, timeout=timeout)
+        requests.get(target, timeout=timeout)
     except Exception as exc:
         log.warning("Heartbeat ping failed: %s", exc)
 
