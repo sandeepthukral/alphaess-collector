@@ -3,10 +3,10 @@
 Polls an AlphaESS SMILE-G3 system via the [AlphaESS Open API](https://open.alphaess.com/)
 every 30 seconds and stores power/SoC samples in InfluxDB, for visualization in Grafana.
 
-The default stack is fully self-contained: InfluxDB + collector + a bundled
-Grafana with the datasource and dashboard auto-provisioned — `docker compose
-up` and you have a working dashboard. If you already run Grafana elsewhere,
-see [Using an existing Grafana](#using-an-existing-grafana-nas-deployment).
+The stack is fully self-contained: InfluxDB + collector + a bundled Grafana
+with the datasource and dashboards auto-provisioned — `docker compose up` and
+you have a working dashboard. A single `docker-compose.yml`, everywhere.
+Deploying on a NAS? See [DEPLOY.md](DEPLOY.md).
 
 ## Data collected
 
@@ -69,17 +69,13 @@ Prints the raw API response and parsed fields without writing to InfluxDB.
 Compare against what the system is doing right now (importing vs exporting,
 charging vs discharging).
 
-## Using an existing Grafana (NAS deployment)
+## NAS deployment
 
-Alternative to the bundled Grafana: run only InfluxDB + collector and point
-an existing Grafana instance (e.g. one shared with other stacks on a NAS) at
-this InfluxDB over a shared Docker network. The
-`docker-compose.nas.yml` overlay disables the bundled Grafana and joins
-InfluxDB to that network.
-
-See [DEPLOY.md](DEPLOY.md) — full walkthrough: cloning, secrets transfer,
-shared Grafana network setup, starting with the NAS overlay, Grafana
-datasource, and dashboard import.
+The same self-contained stack runs on a NAS — one `docker-compose.yml`, the
+bundled Grafana and all provisioning included. See [DEPLOY.md](DEPLOY.md) for
+the NAS specifics: cloning, transferring secrets, host-port conflicts (e.g.
+another Grafana already on 3000), verifying the collector's link MTU after
+network changes, the nightly battery-savings task, and collection monitoring.
 
 ## AWTRIX clock display (Ulanzi TC001)
 
@@ -147,9 +143,7 @@ the SoC `+/-` charge indicator still apply.
    ```
 
 The apps join the clock's rotation automatically — no clock-side config.
-Reordering apps or hiding the time is done in the AWTRIX app settings. The
-pusher runs in every deployment mode, since it lives in the base compose file
-and the NAS overlays only override Grafana/InfluxDB.
+Reordering apps or hiding the time is done in the AWTRIX app settings.
 
 ## Battery-savings analysis
 

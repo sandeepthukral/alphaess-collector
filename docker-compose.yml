@@ -11,7 +11,7 @@ services:
       DOCKER_INFLUXDB_INIT_RETENTION: "0" # infinite
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN}
     ports:
-      - "${INFLUX_PORT:-8086}:8086" # for local inspection / Grafana outside Docker
+      - "${INFLUX_PORT:-8086}:8086" # for local inspection of the InfluxDB UI
     volumes:
       - alphaess-influxdb-data:/var/lib/influxdb2
     networks:

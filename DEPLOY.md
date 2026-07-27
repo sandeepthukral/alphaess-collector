@@ -1,14 +1,11 @@
-# Deploying with an existing Grafana (NAS)
+# Deploying on a NAS
 
-This is the secondary deployment path, for reusing a Grafana instance that
-already runs elsewhere — here, a NAS that runs TeslaMate, which has a Grafana
-container in it. (The primary, self-contained path with a bundled,
-auto-provisioned Grafana is covered in the [README](README.md).)
-
-Grafana is shared: this stack's InfluxDB joins an external Docker network
-that Grafana is also attached to, so Grafana can query it by container name.
-The `docker-compose.nas.yml` overlay sets this up and also disables the
-bundled Grafana service from the base compose file.
+The same self-contained stack described in the [README](README.md) — InfluxDB +
+collector + a bundled, auto-provisioned Grafana — runs unchanged on a NAS. There
+is one `docker-compose.yml`; no overlays, no extra `-f` flags. This page covers
+the NAS-specific bits: getting the repo and secrets onto the box, host-port
+conflicts, verifying the collector's link MTU after network changes, the nightly
+battery-savings task, and monitoring that collection is actually happening.
 
 ## 1. Clone on the NAS
 
@@ -32,55 +29,26 @@ cp .env.example .env
 ```
 
 Required values: `ALPHAESS_APP_ID`, `ALPHAESS_APP_SECRET`, `ALPHAESS_SYS_SN`,
-`INFLUX_ADMIN_PASSWORD`, `INFLUX_TOKEN` (generate with `openssl rand -hex 32`).
+`INFLUX_ADMIN_PASSWORD`, `INFLUX_TOKEN` (generate with `openssl rand -hex 32`),
+and `GRAFANA_ADMIN_PASSWORD`.
 
 Optional: to push live stats to an AWTRIX 3 clock, also set `AWTRIX_HOST` to the
 clock's LAN IP (see [AWTRIX clock display](#awtrix-clock-display) below). Leave
 it blank to skip that feature — the `awtrix-pusher` service just idles.
 
-**Port check:** if another InfluxDB (e.g. Sparky's) already uses host port
-8086, set `INFLUX_PORT=8087` (or any free port) in `.env`. This only affects
-host access to the InfluxDB UI; Grafana reaches the container over the Docker
-network regardless.
+**Port conflicts.** The stack publishes two host ports; remap either in `.env`
+if the NAS already uses it:
 
-## 4. One-time: shared Grafana network
+- Grafana on `3000` — if another Grafana is already there (e.g. TeslaMate on a
+  Synology), set `GRAFANA_PORT=3001` (or any free port).
+- InfluxDB on `8086` — if another InfluxDB uses it, set `INFLUX_PORT=8087`. This
+  only affects host access to the InfluxDB UI; Grafana reaches InfluxDB over the
+  Docker network on the container port regardless.
 
-Create the shared network and attach the existing Grafana container to it:
-
-```sh
-docker network create shared-grafana-net
-docker ps | grep -i grafana        # find the Grafana container name, the last word in the output
-docker network connect shared-grafana-net <grafana-container-name>
-```
-
-Notes:
-
-- `docker network connect` is live — no Grafana restart needed, and it does
-  not touch the TeslaMate stack's own networks or config.
-- The connection persists across container restarts, but a `docker compose up`
-  that _recreates_ the Grafana container (e.g. after a TeslaMate image update)
-  drops it — re-run the `docker network connect` command afterwards. To make
-  it permanent instead, add the network to the TeslaMate stack's
-  `docker-compose.yml` under the Grafana service:
-
-  ```yaml
-  services:
-    grafana:
-      networks:
-        - default
-        - shared-grafana-net
-  networks:
-    shared-grafana-net:
-      external: true
-  ```
-
-## 5. Start the stack
-
-Always include the NAS overlay file — it attaches InfluxDB to
-`shared-grafana-net`:
+## 3. Start the stack
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.nas.yml up -d --build
+docker compose up -d --build
 ```
 
 Check it's collecting:
@@ -90,6 +58,18 @@ docker compose logs -f collector
 ```
 
 Expected: a `Polling every 30s ...` line and no repeated `Poll failed` errors.
+
+Then open Grafana at `http://<nas-host>:3000` (or your `GRAFANA_PORT`). The
+InfluxDB datasource and all three dashboards — **AlphaESS**, **AlphaESS Energy
+Flow** (Sankey), and **Battery Savings** — are provisioned automatically, and
+the bundled Grafana installs the `volkovlabs-echarts-panel` plugin the Sankey
+needs. Nothing to configure by hand. (The Battery Savings dashboard shows "No
+data" until the pricing jobs have run — see
+[Battery-savings pricing jobs](#battery-savings-pricing-jobs) below.)
+
+> The dashboards' daily/hourly energy tables pin day boundaries to
+> `Europe/Amsterdam`. If you live elsewhere, edit the `timezone.location` lines
+> in the table panels' queries.
 
 ### AWTRIX clock display
 
@@ -112,189 +92,16 @@ The container reaches the clock over the NAS's LAN — no extra Docker network
 needed. See the [README](README.md#awtrix-clock-display-ulanzi-tc001) for the
 app/colour reference and stale-data behaviour.
 
-## 6. Verify sign conventions (once)
+## 4. Verify sign conventions (once)
 
 ```sh
 docker compose run --rm collector python collector.py --once
 ```
 
+Prints the raw API response and parsed fields without writing to InfluxDB.
 Confirmed so far (live test 2026-07-17): `pbat` negative = battery charging,
 positive = discharging. `pgrid` positive = importing from grid is the expected
 convention but was 0 during testing — verify after dark when importing.
-
-## 7. Grafana datasource
-
-In the Grafana UI (not provisioning files):
-
-1. Connections → Data sources → Add data source → **InfluxDB**
-2. **Name**: `alphaess` (so it's distinguishable from other InfluxDB
-   datasources)
-3. **Query language**: switch the dropdown from the default *InfluxQL* to
-   **Flux**. This is required — InfluxDB 2 with token auth. The form below
-   changes when you switch: the InfluxQL-specific *Database/User/Password*
-   fields disappear and Flux fields (*Organization/Token/Default Bucket*)
-   appear under **InfluxDB Details**.
-4. **HTTP → URL**: `http://influxdb:8086` (container port — always 8086 here,
-   regardless of any `INFLUX_PORT` host-port remapping in `.env`)
-5. **Auth**: leave all toggles off (Basic auth off — auth is via the token
-   below)
-6. **InfluxDB Details**:
-   - **Organization**: `home` (your `INFLUX_ORG`)
-   - **Token**: the `INFLUX_TOKEN` value from `.env`
-   - **Default Bucket**: `alphaess`
-   - **Min time interval**: `30s` (matches the poll interval; avoids Grafana
-     requesting finer resolution than the data has)
-7. **Save & test** — expect a green "datasource is working" with buckets
-   found
-
-> **Why the UI and not provisioning files:** UI-added datasources are stored
-> in Grafana's internal database in its Docker volume, which survives
-> TeslaMate image updates. TeslaMate's provisioning YAML under
-> `/etc/grafana/provisioning/` is baked into its image and gets overwritten
-> on every pull — never edit it for this.
-
-> **Warning:** never run `docker compose down -v` on the TeslaMate stack —
-> `-v` deletes its volumes, including Grafana's internal database (all
-> UI-added datasources and dashboards).
-
-## 8. First dashboard panels
-
-**Shortcut — import instead of building by hand:** the repo ships four ready
-dashboards. Import each the same way: Dashboards → **New → Import** → upload the
-JSON (or paste its contents) → in the datasource dropdown pick your `alphaess`
-datasource → Import. Skip the manual steps below if you use them. (Daily-table
-queries pin day boundaries to `Europe/Amsterdam` — edit the `timezone.location`
-lines if needed.)
-
-- [grafana/alphaess-dashboard.json](grafana/alphaess-dashboard.json) — the main
-  dashboard: all panels below plus daily/hourly energy-total tables. Needs no
-  extra plugins.
-- [grafana/alphaess-energy-flow.json](grafana/alphaess-energy-flow.json) — the
-  **Energy Flow** Sankey, on its own dashboard (defaults to Today; change the
-  day with the time picker). This one needs the `volkovlabs-echarts-panel` plugin —
-  see [Sankey plugin on the NAS](#sankey-plugin-on-the-nas) below. Without it
-  the panel shows a "plugin not found" placeholder; the main dashboard is
-  unaffected.
-- [grafana/alphaess-battery-savings.json](grafana/alphaess-battery-savings.json)
-  — the **Battery Savings** dashboard (euro value of the battery per day). Needs
-  no extra plugins, but shows "No data" until the pricing jobs have run — see
-  [Battery-savings pricing jobs](#battery-savings-pricing-jobs) below.
-- [grafana/alphaess-collector-health.json](grafana/alphaess-collector-health.json)
-  — the **Collector Health** dashboard: failed polls, outages and the errors
-  behind them, from the `collector_health` measurement. Needs no extra plugins,
-  and is empty until the collector first fails — which is the healthy state.
-
-### Sankey plugin on the NAS
-
-The **Energy Flow** dashboard (`alphaess-energy-flow.json`) is the one part of
-this stack that needs a Grafana plugin (`volkovlabs-echarts-panel`); the main
-dashboard needs none. A panel plugin is purely additive —
-it registers a new visualization type and touches nothing else (no datasources,
-dashboards, or config), so installing it into the shared TeslaMate Grafana is
-low-risk. Two ways to provide it:
-
-**Option A — install into the shared Grafana.** One-time, no edits to the
-TeslaMate stack's compose:
-
-```sh
-docker ps | grep -i grafana        # find the Grafana container name
-docker exec <grafana-container> grafana-cli plugins install volkovlabs-echarts-panel
-docker restart <grafana-container>
-```
-
-> On recent Grafana images `grafana-cli` is not on `PATH` — it was merged into
-> the main binary. If you get `"grafana-cli": executable file not found`, use
-> `grafana cli` instead:
-> `docker exec <grafana-container> grafana cli plugins install volkovlabs-echarts-panel`
-
-The plugin lives in Grafana's data volume, so it survives restarts and
-container recreation (as long as that volume persists — if it is ever wiped,
-re-run the install, same as the `docker network connect` step above). The one
-cost is the restart: a ~10–20s blip on your TeslaMate dashboards.
-
-**Option B — run a dedicated Grafana for this stack.** If you would rather not
-touch the TeslaMate container at all (not even a restart), skip the shared
-network and run this project's own bundled, auto-provisioned Grafana instead —
-it already includes the plugin. Use the dedicated overlay in place of
-`docker-compose.nas.yml`:
-
-```sh
-docker compose -f docker-compose.yml -f docker-compose.nas-dedicated.yml up -d
-# then open http://<nas-host>:3001
-```
-
-This publishes Grafana on host port 3001 (override with `GRAFANA_PORT`) so it
-does not clash with the TeslaMate Grafana on 3000. The datasource and both
-dashboards are provisioned automatically, exactly like the primary README path —
-you do
-not need steps 4–8 of this guide in that case. Trade-off: a second Grafana
-container/login on the NAS, versus keeping everything in one Grafana.
-
-To build manually instead: Dashboards → New dashboard → **Add visualization**
-→ select the `alphaess`
-datasource, then paste each query below into the raw Flux editor. After
-pasting, hit **Refresh** — the panel does not re-run the query on its own.
-
-### Panel 1 — Power overview
-
-All four power series (PV, grid, load, battery):
-
-```flux
-from(bucket: "alphaess")
-  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
-  |> filter(fn: (r) => r._measurement == "power_readings")
-  |> filter(fn: (r) => r._field == "pv_power_w" or r._field == "grid_power_w" or r._field == "load_power_w" or r._field == "battery_power_w")
-  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)
-```
-
-Panel settings (right sidebar):
-
-- Panel options → Title: `Power`
-- Standard options → Unit: **Watt (W)**
-- Legend → Values: `Last`, `Mean` (optional, shows current/average per series)
-
-**Apply** (top right) to return to the dashboard.
-
-### Panel 2 — Solar vs Load vs SoC
-
-Shows how solar production and house load drive battery SoC, plus a computed
-`net_power_w = pv − load` series: **negative = house consuming more than the
-panels produce**. Mixed units (W and %), so SoC goes on a right-hand axis via
-a field override.
-
-```flux
-from(bucket: "alphaess")
-  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
-  |> filter(fn: (r) => r._measurement == "power_readings")
-  |> filter(fn: (r) => r._field == "soc_percent" or r._field == "pv_power_w" or r._field == "load_power_w")
-  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-  |> map(fn: (r) => ({ r with
-      net_power_w: (if exists r.pv_power_w then r.pv_power_w else 0.0)
-                 - (if exists r.load_power_w then r.load_power_w else 0.0)
-  }))
-  |> keep(columns: ["_time", "soc_percent", "pv_power_w", "load_power_w", "net_power_w"])
-```
-
-The `pivot` turns the fields into columns so `map` can compute the net series.
-
-Panel settings:
-
-- Panel options → Title: `Solar vs Load vs SoC`
-- Standard options → Unit: **Watt (W)** (default for the power series)
-- Overrides tab → **Add field override** → *Fields with name* → `soc_percent`:
-  - Standard options > Unit → **Percent (0-100)**
-  - Standard options > Min → `0`, Max → `100`
-  - Axis > Placement → **Right**
-- Optional override for `net_power_w`: Graph styles > Fill opacity → ~15, so
-  the surplus/deficit area around the zero line stands out
-- Apply
-
-### Save
-
-Save icon (top right) → name the dashboard (e.g. `AlphaESS`) → Save. Set the
-auto-refresh dropdown (next to Refresh) to `30s`–`1m` for a live view. Panels
-move by dragging the title, resize by the corner.
 
 ## Battery-savings pricing jobs
 
@@ -310,19 +117,9 @@ Backfill a range once (adjust the start to how far back your `power_readings`
 go; end at yesterday — today is incomplete):
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.nas.yml \
-  run --rm collector python prices.py  --backfill 2026-07-01 2026-07-19
-docker compose -f docker-compose.yml -f docker-compose.nas.yml \
-  run --rm collector python pricing.py --backfill 2026-07-01 2026-07-19
+docker compose run --rm collector python prices.py  --backfill 2026-07-01 2026-07-19
+docker compose run --rm collector python pricing.py --backfill 2026-07-01 2026-07-19
 ```
-
-> **Always pass both `-f` files** for `run` too. A bare `docker compose run`
-> recreates InfluxDB off the base compose, dropping it from `shared-grafana-net`
-> and its `influxdb` network alias — the Grafana datasource then fails with
-> `lookup influxdb ... no such host`. If that happens, bring it back with
-> `docker compose -f docker-compose.yml -f docker-compose.nas.yml up -d`
-> (which re-attaches it _with_ the alias; a manual `docker network connect`
-> restores the network but not the alias).
 
 `pricing.py` skips days already written and only stores days with ≥98% sample
 coverage, so a range is cheap to re-run and self-heals days skipped for late
@@ -333,8 +130,7 @@ each day's SoC change in kWh.
 
 To keep `daily_cost` current, schedule [scripts/daily-savings.sh](scripts/daily-savings.sh)
 to run nightly. It cd's into the repo, computes a rolling window (yesterday plus
-the 3 days before, TZ-correct), and runs both jobs above — always with both
-compose files, so it can't break the datasource.
+the 3 days before, TZ-correct), and runs both jobs above.
 
 DSM **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined
 script**:
@@ -347,52 +143,41 @@ script**:
   /volume1/docker/alphaess-collector/scripts/daily-savings.sh
   ```
 
-Test it once by hand first (`sudo /volume1/docker/alphaess-collector/scripts/daily-savings.sh`)
-and confirm the Grafana datasource still resolves afterward. Adjust the window
-via `WINDOW_DAYS` near the top of the script.
+Test it once by hand first
+(`sudo /volume1/docker/alphaess-collector/scripts/daily-savings.sh`). Adjust the
+window via `WINDOW_DAYS` near the top of the script.
 
 ## Updating
 
 ```sh
 git pull
-docker compose -f docker-compose.yml -f docker-compose.nas.yml up -d --build
+docker compose up -d --build
 ```
 
-InfluxDB data lives in the `alphaess-influxdb-data` volume and survives
-updates. Only `down -v` on _this_ stack deletes it.
+InfluxDB data lives in the `alphaess-influxdb-data` volume and survives updates.
+Only `down -v` deletes it.
 
 ### If the pull changed `networks:` or `volumes:`
 
-`up -d` is **not** enough. Compose reconciles services (it diffs the config
-and recreates containers), but it treats networks and volumes as
-create-if-absent: when one already exists under that name it is reused and
-your changed `driver_opts` / options are ignored, with no warning and no
-error. `up -d --force-recreate` does not help either — it recreates the
-container but reattaches it to the existing network.
-
-This is deliberate. Recreating a network means disconnecting every attached
-container, including ones from other projects (here, TeslaMate's Grafana on
-`shared-grafana-net`), and recreating a volume would destroy data. So Compose
-never does either implicitly.
+`up -d` is **not** enough. Compose reconciles services (it diffs the config and
+recreates containers), but it treats networks and volumes as create-if-absent:
+when one already exists under that name it is reused and your changed
+`driver_opts` / options are ignored, with no warning and no error.
+`up -d --force-recreate` does not help either — it recreates the container but
+reattaches it to the existing network.
 
 To actually apply such a change, recreate the network:
 
 ```sh
-docker compose -f docker-compose.yml -f docker-compose.nas.yml down
-docker compose -f docker-compose.yml -f docker-compose.nas.yml up -d
+docker compose down
+docker compose up -d
 ```
 
-`down` without `-v` keeps the named volumes, and it does not touch
-`shared-grafana-net` (declared `external: true`). Afterwards confirm InfluxDB
-rejoined the shared network, or the existing Grafana loses its datasource:
+`down` without `-v` keeps the named volumes.
 
-```sh
-docker network inspect shared-grafana-net -f '{{range .Containers}}{{.Name}} {{end}}'
-```
-
-Verify the MTU specifically — this exact drift caused a silent collection
-outage on 2026-07-22, because a stale 1500 MTU only drops the large TLS
-handshake packets and shows up as intermittent
+Verify the MTU specifically — a stale `alphaess-net` MTU caused a silent
+collection outage on 2026-07-22, because a leftover 1500 MTU only drops the
+large TLS handshake packets and shows up as intermittent
 `SSL: UNEXPECTED_EOF_WHILE_READING`:
 
 ```sh
@@ -468,9 +253,9 @@ unreachable — it records the outage while it is happening. The
 **AlphaESS Collector Health** dashboard
 ([`grafana/alphaess-collector-health.json`](grafana/alphaess-collector-health.json))
 reads it: failed polls, outage count and duration, failures split by error
-class, and a table of the actual error messages. With the bundled Grafana it is
-provisioned automatically (it is bind-mounted into `dashboard-src` like the
-other dashboards); with a shared Grafana, import the JSON by hand as in step 8. That table is the answer to
+class, and a table of the actual error messages. It is provisioned
+automatically (bind-mounted into `dashboard-src` like the other dashboards).
+That table is the answer to
 "what did the alert mean", reachable from a phone instead of
 `docker compose logs`. Writes are best-effort and never fail a poll; if
 InfluxDB itself is the thing that is broken, nothing is recorded (the
@@ -479,7 +264,8 @@ heartbeat still fires, which is the point of having both).
 **3. Grafana staleness alert (read side, secondary).** The rule in
 [`grafana/provisioning/alerting/alphaess-staleness.yml`](grafana/provisioning/alerting/alphaess-staleness.yml)
 fires when the newest `power_readings` sample is more than 5 minutes old, and
-on no data at all.
+on no data at all. The bundled Grafana mounts `./grafana/provisioning`, so the
+rule is picked up automatically — nothing to install.
 
 The two live checks overlap substantially — the heartbeat already catches most
 stalls. The staleness alert adds the cases the heartbeat structurally cannot see, because
@@ -487,30 +273,6 @@ it queries the data rather than trusting the writer: a wrong bucket, a
 retention policy quietly dropping data, a Grafana datasource pointed
 elsewhere, or `HEARTBEAT_URL` simply never being set. If you run only one, run
 the heartbeat.
-
-**With `docker-compose.nas-dedicated.yml`** (this project's own Grafana) the
-rule is picked up automatically — `./grafana/provisioning` is already mounted,
-along with the datasource and all three dashboards. Nothing to do.
-
-**With `docker-compose.nas.yml`** (shared TeslaMate Grafana) the bundled
-Grafana is disabled, so the file is not mounted anywhere and the rule will
-*not* appear on its own. Mount it into the existing Grafana by adding to that
-Grafana's compose service:
-
-```yaml
-volumes:
-  - <path>/alphaess-collector/grafana/provisioning/alerting:/etc/grafana/provisioning/alerting:ro
-```
-
-then restart that container.
-
-Two things to check after installing:
-
-- The rule's `datasourceUid` is `alphaess`. In the existing Grafana the
-  InfluxDB datasource must have that uid (Connections → Data sources →
-  alphaess → the uid is in the URL). Adjust the rule if it differs.
-- The query hardcodes `bucket: "alphaess"`. Change it if `INFLUX_BUCKET` is
-  not the default.
 
 Provisioned rules route through the **default notification policy**. Point
 that at a real contact point (Alerting → Contact points), otherwise the alert
