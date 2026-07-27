@@ -401,8 +401,9 @@ docker compose exec collector cat /sys/class/net/eth0/mtu   # expect 1400
 
 The collector also logs this at startup and warns when it is too high, so
 `docker compose logs collector | head` will tell you without the exec. It
-re-checks after 3 consecutive TLS failures, so a long-running container still
-reports it.
+re-checks after 3 consecutive poll failures of any kind, as part of the
+local-vs-upstream diagnosis below, so a long-running container still reports
+it.
 
 ## Monitoring that the collector is actually collecting
 
@@ -428,6 +429,7 @@ The pings carry a status and a message, so the alert explains itself:
 |---|---|---|
 | Successful poll | `status=up&msg=OK` | — |
 | 2nd+ consecutive failure | `status=down` + the error | `ReadTimeout: HTTPSConnectionPool(host='openapi.alphaess.com'...): Read timed out. (read timeout=30)` |
+| 3rd+ consecutive failure | the error + a verdict | `SSLError: SSLEOFError(8, '[SSL: UNEXPECTED_EOF...' (3 consecutive failures) [upstream]` |
 | First poll after an outage | `status=up` + duration | `OK (recovered after 5 failures, 12m11s)` |
 
 The first failure never pushes `down` — a single failed poll is usually an
@@ -436,10 +438,21 @@ something already fixed. From the second onwards the grace period would expire
 anyway, so this only changes *what the alert says*, not when it fires.
 
 That matters because the failure modes are not equivalent and the phone should
-say which one you have: `SSLError`/TLS EOF points at the MTU problem above
-(local, fixable now), `ReadTimeout` and `HTTPError 404` on a valid path point
-at AlphaESS itself (nothing to do, it will recover). Without the message, both
-read as "no ping received" and cost a trip to the logs.
+say which one you have. The exception alone does not settle it — a TLS EOF is
+the signature of an oversized container MTU *and* of an upstream edge dropping
+connections — so on the 3rd consecutive failure the collector probes DNS for
+the API host and one unrelated HTTPS endpoint (`DIAGNOSTIC_URL`, an IP so it
+does not depend on DNS) and logs a verdict, which is appended to the alert:
+
+| Verdict | Means | What to do |
+|---|---|---|
+| `[upstream]` | DNS and unrelated HTTPS both fine | Nothing — AlphaESS is down, the collector resumes on its own |
+| `[local-network]` | Unrelated HTTPS fails too | Check the uplink; if only TLS fails, check the link MTU in the same log block |
+| `[local-dns]` | API host does not resolve | Check the container's DNS and the host's uplink |
+
+The probe runs once per outage, not per failure: the answer cannot change
+while the same run of failures continues. Without any of this, both cases read
+as "no ping received" and cost a trip to the logs.
 
 Log volume during an outage is bounded the same way: the first failure logs a
 full traceback, subsequent ones log a single line with the error. A 15-minute

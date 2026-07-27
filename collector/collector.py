@@ -14,14 +14,17 @@ import hashlib
 import logging
 import os
 import signal
+import socket
 import sys
 import time
+from urllib.parse import urlsplit
 
 import requests
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 API_BASE = "https://openapi.alphaess.com/api"
+API_HOST = urlsplit(API_BASE).hostname
 
 # Must match the com.docker.network.driver.mtu driver_opt on alphaess-net in
 # docker-compose.yml. Override with EXPECTED_MAX_MTU if that value changes.
@@ -38,6 +41,16 @@ HEARTBEAT_DOWN_AFTER_FAILURES = 2
 # power_readings: those are the physical samples, and a gap in them is exactly
 # what a failure is, so the explanation cannot live in the same series.
 HEALTH_MEASUREMENT = "collector_health"
+
+# Consecutive failures before running the network diagnosis. Late enough to
+# rule out a blip (the API is briefly flaky most weeks), early enough that the
+# verdict rides along with the alert rather than arriving after the outage.
+DIAGNOSE_AFTER_FAILURES = 3
+
+# Control endpoint for the diagnosis: unrelated to AlphaESS, and addressed by
+# IP so that reaching it does not depend on DNS -- which is tested separately.
+# Override with DIAGNOSTIC_URL where 1.1.1.1 is blocked.
+DEFAULT_DIAGNOSTIC_URL = "https://1.1.1.1/"
 
 # Kuma stores the push message and renders it into the notification; a phone
 # notification has room for the part that identifies the fault, not for the
@@ -118,6 +131,75 @@ def check_mtu(expected_max: int) -> None:
             iface, mtu, expected_max)
     else:
         log.info("Link MTU: %s=%d (expected <= %d)", iface, mtu, expected_max)
+
+
+def resolve_host(host: str) -> tuple[bool, str]:
+    """Resolve a hostname to addresses. Returns (ok, one-line description)."""
+    started = time.monotonic()
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        return False, f"DNS: {host} did not resolve ({exc})"
+    addresses = sorted({info[4][0] for info in infos})
+    elapsed_ms = (time.monotonic() - started) * 1000
+    return True, (f"DNS: {host} -> {', '.join(addresses)} "
+                  f"({elapsed_ms:.0f}ms)")
+
+
+def probe_control_url(url: str, timeout: float = 10) -> tuple[bool, str]:
+    """Fetch an endpoint unrelated to AlphaESS. Returns (ok, description).
+
+    Any HTTP status counts as success: the question is whether this container
+    can complete DNS-free egress and a TLS handshake at all, not what the
+    other end chose to answer.
+    """
+    started = time.monotonic()
+    try:
+        resp = requests.get(url, timeout=timeout)
+    except requests.RequestException as exc:
+        return False, f"Control request to {url} failed: {error_summary(exc)}"
+    elapsed_ms = (time.monotonic() - started) * 1000
+    return True, (f"Control request to {url}: HTTP {resp.status_code} "
+                  f"({elapsed_ms:.0f}ms)")
+
+
+def diagnose_network(expected_max_mtu: int, control_url: str) -> str:
+    """Decide whether a run of poll failures is this host's fault or AlphaESS's.
+
+    This is the question worth answering while an outage is happening, and the
+    one that previously required walking to a computer: the failure modes are
+    indistinguishable from the exception alone. A TLS EOF is the signature of
+    an oversized container MTU (local, fixable now) *and* of an upstream edge
+    dropping connections (nothing to do). Probing DNS and an unrelated HTTPS
+    endpoint separates them.
+
+    Returns a short slug for the alert message; the reasoning goes to the log.
+    """
+    log.warning("Diagnosing whether the fault is local or at the AlphaESS API:")
+    check_mtu(expected_max_mtu)
+    dns_ok, dns_line = resolve_host(API_HOST)
+    log.warning("%s", dns_line)
+    control_ok, control_line = probe_control_url(control_url)
+    log.warning("%s", control_line)
+
+    if not dns_ok:
+        verdict, explanation = "local-dns", (
+            "DNS for the API host is failing, so this is a local resolver or "
+            "network problem, not AlphaESS. Check the container's DNS and the "
+            "host's uplink.")
+    elif not control_ok:
+        verdict, explanation = "local-network", (
+            "An unrelated HTTPS endpoint fails too, so this host's egress is "
+            "the problem, not AlphaESS. Check the uplink first; if only TLS "
+            "fails, check the link MTU logged above.")
+    else:
+        verdict, explanation = "upstream", (
+            "DNS resolves and unrelated HTTPS works, so egress from this "
+            "container is healthy and the fault is at the AlphaESS API. "
+            "Nothing to fix here -- the collector keeps retrying and resumes "
+            "on its own.")
+    log.warning("Diagnosis (%s): %s", verdict, explanation)
+    return verdict
 
 
 def auth_headers(app_id: str, app_secret: str) -> dict:
@@ -282,6 +364,7 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
     # write. Unset -> no heartbeat, collector behaves exactly as before.
     heartbeat_url = os.environ.get("HEARTBEAT_URL", "")
     expected_max_mtu = int(env("EXPECTED_MAX_MTU", str(DEFAULT_EXPECTED_MAX_MTU)))
+    diagnostic_url = env("DIAGNOSTIC_URL", DEFAULT_DIAGNOSTIC_URL)
     check_mtu(expected_max_mtu)
 
     client = InfluxDBClient(url=influx_url, token=influx_token, org=influx_org)
@@ -302,6 +385,7 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
 
     consecutive_failures = 0
     first_failure_at = 0.0
+    verdict = ""
     while running:
         started = time.monotonic()
         try:
@@ -328,6 +412,7 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                     {"failures": consecutive_failures,
                      "outage_seconds": round(outage_seconds, 1)})
             consecutive_failures = 0
+            verdict = ""
         except Exception as exc:
             consecutive_failures += 1
             summary = error_summary(exc)
@@ -343,20 +428,20 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                 # hundreds of identical frames. The first one already carries
                 # the stack; the rest only need to say what failed.
                 log.error("Poll failed (%d consecutive): %s",
-                          consecutive_failures, error_summary(exc))
+                          consecutive_failures, summary)
+            # Runs once per outage, not on every failure: the answer cannot
+            # change while the same run of failures continues, and the probes
+            # should not become traffic of their own.
+            if consecutive_failures == DIAGNOSE_AFTER_FAILURES:
+                verdict = diagnose_network(expected_max_mtu, diagnostic_url)
             if consecutive_failures >= HEARTBEAT_DOWN_AFTER_FAILURES:
+                # The verdict is the part that says whether to get up.
+                suffix = f" [{verdict}]" if verdict else ""
                 send_heartbeat(
                     heartbeat_url, status="down",
-                    msg=f"{error_summary(exc)} "
-                        f"({consecutive_failures} consecutive failures)")
-            # A TLS EOF is the signature of an oversized MTU on this network,
-            # so re-run the check once the failures look persistent rather
-            # than transient. Only on the 3rd failure: enough to rule out a
-            # blip, and it does not repeat for the rest of the outage.
-            if consecutive_failures == 3 and isinstance(exc, requests.exceptions.SSLError):
-                log.warning("Repeated TLS failures against the AlphaESS API; "
-                            "re-checking link MTU (a common cause):")
-                check_mtu(expected_max_mtu)
+                    msg=f"{summary} "
+                        f"({consecutive_failures} consecutive failures)"
+                        f"{suffix}")
 
         # Back off on repeated failures to avoid hammering the API,
         # capped at 5 minutes.
