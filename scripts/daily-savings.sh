@@ -5,11 +5,6 @@
 #   - prices.py writes are idempotent (same hourly timestamps overwrite)
 #   - pricing.py skips days already written and retries days previously skipped
 #     (late-published prices / low coverage), so the window is self-healing.
-#
-# Always invokes docker compose with BOTH files so InfluxDB keeps its
-# `shared-grafana-net` attachment + `influxdb` network alias (a bare
-# `docker compose` recreates it off that network and breaks the Grafana
-# datasource). See DEPLOY.md.
 set -eu
 
 # DSM Task Scheduler runs with a minimal PATH; make sure docker is findable.
@@ -21,7 +16,7 @@ WINDOW_DAYS=4   # reprocess yesterday plus the 3 days before it
 
 cd "$REPO_DIR"
 
-DC="docker compose -f docker-compose.yml -f docker-compose.nas.yml"
+DC="docker compose"
 
 # Compute the local (Europe/Amsterdam) date window inside the container so the
 # TZ is correct regardless of the host clock. END = yesterday (most recent

@@ -14,10 +14,9 @@
 # a datasource pointed elsewhere, or HEARTBEAT_URL never being set. Running
 # both is intentional redundancy; if you run only one, run the heartbeat.
 #
-# Bundled Grafana picks this up automatically (docker-compose.yml mounts
-# ./grafana/provisioning). With the NAS overlay the bundled Grafana is
-# disabled, so this must be installed into the existing Grafana instead --
-# see DEPLOY.md, "Staleness alert".
+# The bundled Grafana picks this up automatically (docker-compose.yml mounts
+# ./grafana/provisioning) -- nothing to install. See DEPLOY.md, "Monitoring
+# that the collector is actually collecting".
 apiVersion: 1
 
 groups:
