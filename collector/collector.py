@@ -34,6 +34,11 @@ DEFAULT_EXPECTED_MAX_MTU = 1400
 # arrive with a reason attached.
 HEARTBEAT_DOWN_AFTER_FAILURES = 2
 
+# Measurement recording poll failures and the outages they form. Separate from
+# power_readings: those are the physical samples, and a gap in them is exactly
+# what a failure is, so the explanation cannot live in the same series.
+HEALTH_MEASUREMENT = "collector_health"
+
 # Kuma stores the push message and renders it into the notification; a phone
 # notification has room for the part that identifies the fault, not for the
 # full nested requests/urllib3/ssl chain.
@@ -170,6 +175,37 @@ def error_summary(exc: Exception) -> str:
     return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
 
 
+def write_health_event(write_api, bucket: str, sys_sn: str, event: str,
+                       fields: dict, error_class: str | None = None) -> None:
+    """Record a poll failure ("failure") or the end of an outage ("recovered").
+
+    An outage is otherwise only visible in the container log: it rotates, it
+    cannot be read from a phone, and it answers nothing about whether this has
+    happened before. InfluxDB runs on the same host, so it stays reachable
+    exactly when the AlphaESS API does not -- making it the one place an outage
+    can be recorded while it is still happening, and read back through Grafana
+    later.
+
+    Successful polls write nothing here; `power_readings` arriving *is* the
+    healthy signal, and duplicating it would double the write rate for no
+    added information.
+
+    Best-effort, like the heartbeat: bookkeeping about an outage must never
+    turn into a second one.
+    """
+    point = Point(HEALTH_MEASUREMENT).tag("sys_sn", sys_sn).tag("event", event)
+    if error_class:
+        # Bounded set (ReadTimeout, SSLError, HTTPError, RuntimeError, ...),
+        # so it is safe as a tag and lets Grafana group by failure mode.
+        point = point.tag("error_class", error_class)
+    for key, value in fields.items():
+        point = point.field(key, value)
+    try:
+        write_api.write(bucket=bucket, record=point)
+    except Exception as exc:
+        log.warning("Health event write failed: %s", exc)
+
+
 def recovery_message(failures: int, outage_seconds: float) -> str:
     """Heartbeat message for a successful poll.
 
@@ -284,12 +320,21 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
             # An outage that ends on its own is otherwise silent: the failures
             # simply stop, and nothing in the log says when, or for how long.
             if consecutive_failures:
+                outage_seconds = started - first_failure_at
                 log.info("Poll recovered after %d consecutive failures (%s)",
-                         consecutive_failures,
-                         format_duration(started - first_failure_at))
+                         consecutive_failures, format_duration(outage_seconds))
+                write_health_event(
+                    write_api, influx_bucket, sys_sn, "recovered",
+                    {"failures": consecutive_failures,
+                     "outage_seconds": round(outage_seconds, 1)})
             consecutive_failures = 0
         except Exception as exc:
             consecutive_failures += 1
+            summary = error_summary(exc)
+            write_health_event(
+                write_api, influx_bucket, sys_sn, "failure",
+                {"failures": consecutive_failures, "error": summary},
+                error_class=type(exc).__name__)
             if consecutive_failures == 1:
                 first_failure_at = started
                 log.exception("Poll failed (1 consecutive)")

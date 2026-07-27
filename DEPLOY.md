@@ -159,7 +159,7 @@ In the Grafana UI (not provisioning files):
 
 ## 8. First dashboard panels
 
-**Shortcut — import instead of building by hand:** the repo ships three ready
+**Shortcut — import instead of building by hand:** the repo ships four ready
 dashboards. Import each the same way: Dashboards → **New → Import** → upload the
 JSON (or paste its contents) → in the datasource dropdown pick your `alphaess`
 datasource → Import. Skip the manual steps below if you use them. (Daily-table
@@ -179,6 +179,10 @@ lines if needed.)
   — the **Battery Savings** dashboard (euro value of the battery per day). Needs
   no extra plugins, but shows "No data" until the pricing jobs have run — see
   [Battery-savings pricing jobs](#battery-savings-pricing-jobs) below.
+- [grafana/alphaess-collector-health.json](grafana/alphaess-collector-health.json)
+  — the **Collector Health** dashboard: failed polls, outages and the errors
+  behind them, from the `collector_health` measurement. Needs no extra plugins,
+  and is empty until the collector first fails — which is the healthy state.
 
 ### Sankey plugin on the NAS
 
@@ -408,7 +412,8 @@ process stays up while collecting nothing. Expired credentials, API errors,
 InfluxDB write failures and the MTU problem above all look identical from the
 outside.
 
-Two independent checks cover this, from opposite ends of the pipeline:
+Three checks cover this: two live signals from opposite ends of the
+pipeline, plus a record of what went wrong.
 
 **1. `HEARTBEAT_URL` (write side, primary).** Set it to an Uptime Kuma
 **Push** monitor URL and the collector pings it after each successful
@@ -442,13 +447,27 @@ outage is ~10 readable lines rather than several hundred frames of identical
 `requests`/`urllib3` stack, and `Poll recovered after N consecutive failures
 (12m11s)` marks where it ended.
 
-**2. Grafana staleness alert (read side, secondary).** The rule in
+**2. `collector_health` in InfluxDB (history, after the fact).** Every failed
+poll and every recovery is written to a `collector_health` measurement in the
+same bucket, tagged `event` (`failure`/`recovered`) and `error_class`. InfluxDB
+is local, so it keeps accepting writes precisely when the AlphaESS API is
+unreachable — it records the outage while it is happening. The
+**AlphaESS Collector Health** dashboard
+([`grafana/alphaess-collector-health.json`](grafana/alphaess-collector-health.json))
+reads it: failed polls, outage count and duration, failures split by error
+class, and a table of the actual error messages. That table is the answer to
+"what did the alert mean", reachable from a phone instead of
+`docker compose logs`. Writes are best-effort and never fail a poll; if
+InfluxDB itself is the thing that is broken, nothing is recorded (the
+heartbeat still fires, which is the point of having both).
+
+**3. Grafana staleness alert (read side, secondary).** The rule in
 [`grafana/provisioning/alerting/alphaess-staleness.yml`](grafana/provisioning/alerting/alphaess-staleness.yml)
 fires when the newest `power_readings` sample is more than 5 minutes old, and
 on no data at all.
 
-These overlap substantially — the heartbeat already catches most stalls. The
-staleness alert adds the cases the heartbeat structurally cannot see, because
+The two live checks overlap substantially — the heartbeat already catches most
+stalls. The staleness alert adds the cases the heartbeat structurally cannot see, because
 it queries the data rather than trusting the writer: a wrong bucket, a
 retention policy quietly dropping data, a Grafana datasource pointed
 elsewhere, or `HEARTBEAT_URL` simply never being set. If you run only one, run

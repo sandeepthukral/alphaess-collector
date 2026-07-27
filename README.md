@@ -21,6 +21,14 @@ with `sys_sn`:
 | `battery_power_w` | W | Positive = discharge, negative = charge (verify with `--once`) |
 | `soc_percent` | % | Battery state of charge |
 
+Measurement `collector_health` in the same bucket records why collection
+stopped, tagged with `sys_sn`, `event` (`failure` / `recovered`) and — on
+failures — `error_class`. Fields: `failures` (consecutive count), `error` (the
+message, failures only), `outage_seconds` (`recovered` only). Successful polls
+write nothing here: `power_readings` arriving is the healthy signal. Read it
+through the **AlphaESS Collector Health** dashboard
+([grafana/alphaess-collector-health.json](grafana/alphaess-collector-health.json)).
+
 ## Setup
 
 1. Register at [open.alphaess.com](https://open.alphaess.com/), add your system's
