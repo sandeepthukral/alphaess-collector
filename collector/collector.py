@@ -27,6 +27,18 @@ API_BASE = "https://openapi.alphaess.com/api"
 # docker-compose.yml. Override with EXPECTED_MAX_MTU if that value changes.
 DEFAULT_EXPECTED_MAX_MTU = 1400
 
+# Consecutive poll failures before pushing a "down" heartbeat. A single failed
+# poll is usually an upstream blip that the next poll rides out; pushing down
+# on it would page for something already fixed. From the second failure on, the
+# monitor's own grace period would trip anyway, so this only makes the alert
+# arrive with a reason attached.
+HEARTBEAT_DOWN_AFTER_FAILURES = 2
+
+# Kuma stores the push message and renders it into the notification; a phone
+# notification has room for the part that identifies the fault, not for the
+# full nested requests/urllib3/ssl chain.
+MAX_ERROR_SUMMARY_CHARS = 160
+
 log = logging.getLogger("alphaess-collector")
 
 
@@ -135,14 +147,57 @@ def get_last_power_data(app_id: str, app_secret: str, sys_sn: str) -> dict:
     return data
 
 
-def send_heartbeat(url: str, timeout: float = 5) -> None:
-    """Ping a Kuma 'Push' monitor after a successful write (a dead-man's switch
-    for the whole collect->write path). Best-effort: never let a monitoring
-    hiccup disturb collection, so all errors are swallowed."""
+def format_duration(seconds: float) -> str:
+    """Compact duration for log lines and heartbeat messages."""
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
+
+
+def error_summary(exc: Exception) -> str:
+    """One-line description of a failure, for logs and heartbeat messages.
+
+    requests wraps urllib3 wraps ssl, so `str(exc)` on a transport error runs
+    to several hundred characters across the nested causes. The real fault is
+    the innermost one, which requests renders as a trailing "(Caused by ...)"
+    -- exactly the part a naive head-truncation would throw away.
+    """
+    detail = " ".join(str(exc).split())
+    _, sep, cause = detail.partition("(Caused by ")
+    if sep:
+        detail = cause.rstrip(")")
+    if len(detail) > MAX_ERROR_SUMMARY_CHARS:
+        detail = detail[:MAX_ERROR_SUMMARY_CHARS] + "..."
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
+def recovery_message(failures: int, outage_seconds: float) -> str:
+    """Heartbeat message for a successful poll.
+
+    Kuma sends an "up" notification when pings resume but cannot say what the
+    outage was or how long it lasted, so carry that in the message itself.
+    """
+    if not failures:
+        return "OK"
+    return (f"OK (recovered after {failures} failures, "
+            f"{format_duration(outage_seconds)})")
+
+
+def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
+                   timeout: float = 5) -> None:
+    """Ping a Kuma 'Push' monitor (a dead-man's switch for the whole
+    collect->write path).
+
+    `status` and `msg` are passed through to Kuma, which renders them into the
+    notification. Without them an outage only ever reads "no ping received",
+    which says nothing about whether the API, the network or InfluxDB broke --
+    the difference between diagnosing from a phone and opening the container
+    logs. Best-effort: never let a monitoring hiccup disturb collection, so all
+    errors are swallowed.
+    """
     if not url:
         return
     try:
-        requests.get(url, timeout=timeout)
+        requests.get(url, params={"status": status, "msg": msg}, timeout=timeout)
     except Exception as exc:
         log.warning("Heartbeat ping failed: %s", exc)
 
@@ -210,6 +265,7 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
              interval, sys_sn, influx_url, influx_bucket)
 
     consecutive_failures = 0
+    first_failure_at = 0.0
     while running:
         started = time.monotonic()
         try:
@@ -221,13 +277,33 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                     point = point.field(key, value)
                 write_api.write(bucket=influx_bucket, record=point)
                 log.debug("Wrote point: %s", fields)
-                send_heartbeat(heartbeat_url)
+                send_heartbeat(heartbeat_url, msg=recovery_message(
+                    consecutive_failures, started - first_failure_at))
             else:
                 log.warning("No usable fields in response, skipping write")
+            # An outage that ends on its own is otherwise silent: the failures
+            # simply stop, and nothing in the log says when, or for how long.
+            if consecutive_failures:
+                log.info("Poll recovered after %d consecutive failures (%s)",
+                         consecutive_failures,
+                         format_duration(started - first_failure_at))
             consecutive_failures = 0
         except Exception as exc:
             consecutive_failures += 1
-            log.exception("Poll failed (%d consecutive)", consecutive_failures)
+            if consecutive_failures == 1:
+                first_failure_at = started
+                log.exception("Poll failed (1 consecutive)")
+            else:
+                # A full traceback per poll buries a 15-minute outage in
+                # hundreds of identical frames. The first one already carries
+                # the stack; the rest only need to say what failed.
+                log.error("Poll failed (%d consecutive): %s",
+                          consecutive_failures, error_summary(exc))
+            if consecutive_failures >= HEARTBEAT_DOWN_AFTER_FAILURES:
+                send_heartbeat(
+                    heartbeat_url, status="down",
+                    msg=f"{error_summary(exc)} "
+                        f"({consecutive_failures} consecutive failures)")
             # A TLS EOF is the signature of an oversized MTU on this network,
             # so re-run the check once the failures look persistent rather
             # than transient. Only on the 3rd failure: enough to rule out a

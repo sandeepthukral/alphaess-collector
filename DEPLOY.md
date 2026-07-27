@@ -417,6 +417,31 @@ the Kuma monitor's grace period above `POLL_INTERVAL_SECONDS`; allow for the
 5-minute backoff cap, so ~10 minutes is a sensible floor or you will get
 false alarms on a transient blip.
 
+The pings carry a status and a message, so the alert explains itself:
+
+| When | Push | Notification reads |
+|---|---|---|
+| Successful poll | `status=up&msg=OK` | — |
+| 2nd+ consecutive failure | `status=down` + the error | `ReadTimeout: HTTPSConnectionPool(host='openapi.alphaess.com'...): Read timed out. (read timeout=30)` |
+| First poll after an outage | `status=up` + duration | `OK (recovered after 5 failures, 12m11s)` |
+
+The first failure never pushes `down` — a single failed poll is usually an
+upstream blip the next poll rides out, and paging on it means being woken for
+something already fixed. From the second onwards the grace period would expire
+anyway, so this only changes *what the alert says*, not when it fires.
+
+That matters because the failure modes are not equivalent and the phone should
+say which one you have: `SSLError`/TLS EOF points at the MTU problem above
+(local, fixable now), `ReadTimeout` and `HTTPError 404` on a valid path point
+at AlphaESS itself (nothing to do, it will recover). Without the message, both
+read as "no ping received" and cost a trip to the logs.
+
+Log volume during an outage is bounded the same way: the first failure logs a
+full traceback, subsequent ones log a single line with the error. A 15-minute
+outage is ~10 readable lines rather than several hundred frames of identical
+`requests`/`urllib3` stack, and `Poll recovered after N consecutive failures
+(12m11s)` marks where it ended.
+
 **2. Grafana staleness alert (read side, secondary).** The rule in
 [`grafana/provisioning/alerting/alphaess-staleness.yml`](grafana/provisioning/alerting/alphaess-staleness.yml)
 fires when the newest `power_readings` sample is more than 5 minutes old, and
