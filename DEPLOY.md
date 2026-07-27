@@ -468,7 +468,9 @@ unreachable — it records the outage while it is happening. The
 **AlphaESS Collector Health** dashboard
 ([`grafana/alphaess-collector-health.json`](grafana/alphaess-collector-health.json))
 reads it: failed polls, outage count and duration, failures split by error
-class, and a table of the actual error messages. That table is the answer to
+class, and a table of the actual error messages. With the bundled Grafana it is
+provisioned automatically (it is bind-mounted into `dashboard-src` like the
+other dashboards); with a shared Grafana, import the JSON by hand as in step 8. That table is the answer to
 "what did the alert mean", reachable from a phone instead of
 `docker compose logs`. Writes are best-effort and never fail a poll; if
 InfluxDB itself is the thing that is broken, nothing is recorded (the

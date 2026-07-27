@@ -574,7 +574,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"collector_health\" and r.event == \"failure\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumns: [\"_value\"])\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 100)\n  |> keep(columns: [\"_time\", \"error_class\", \"failures\", \"error\"])\n  |> yield(name: \"recent_failures\")",
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"collector_health\" and r.event == \"failure\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 100)\n  |> keep(columns: [\"_time\", \"error_class\", \"failures\", \"error\"])\n  |> yield(name: \"recent_failures\")",
           "refId": "A"
         }
       ],
@@ -694,7 +694,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"collector_health\" and r.event == \"recovered\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumns: [\"_value\"])\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 100)\n  |> keep(columns: [\"_time\", \"failures\", \"outage_seconds\"])\n  |> yield(name: \"outages\")",
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"collector_health\" and r.event == \"recovered\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> sort(columns: [\"_time\"], desc: true)\n  |> limit(n: 100)\n  |> keep(columns: [\"_time\", \"failures\", \"outage_seconds\"])\n  |> yield(name: \"outages\")",
           "refId": "A"
         }
       ],
