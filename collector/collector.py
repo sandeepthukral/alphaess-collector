@@ -14,18 +14,48 @@ import hashlib
 import logging
 import os
 import signal
+import socket
 import sys
 import time
+from urllib.parse import urlsplit
 
 import requests
 from influxdb_client import InfluxDBClient, Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 API_BASE = "https://openapi.alphaess.com/api"
+API_HOST = urlsplit(API_BASE).hostname
 
 # Must match the com.docker.network.driver.mtu driver_opt on alphaess-net in
 # docker-compose.yml. Override with EXPECTED_MAX_MTU if that value changes.
 DEFAULT_EXPECTED_MAX_MTU = 1400
+
+# Consecutive poll failures before pushing a "down" heartbeat. A single failed
+# poll is usually an upstream blip that the next poll rides out; pushing down
+# on it would page for something already fixed. From the second failure on, the
+# monitor's own grace period would trip anyway, so this only makes the alert
+# arrive with a reason attached.
+HEARTBEAT_DOWN_AFTER_FAILURES = 2
+
+# Measurement recording poll failures and the outages they form. Separate from
+# power_readings: those are the physical samples, and a gap in them is exactly
+# what a failure is, so the explanation cannot live in the same series.
+HEALTH_MEASUREMENT = "collector_health"
+
+# Consecutive failures before running the network diagnosis. Late enough to
+# rule out a blip (the API is briefly flaky most weeks), early enough that the
+# verdict rides along with the alert rather than arriving after the outage.
+DIAGNOSE_AFTER_FAILURES = 3
+
+# Control endpoint for the diagnosis: unrelated to AlphaESS, and addressed by
+# IP so that reaching it does not depend on DNS -- which is tested separately.
+# Override with DIAGNOSTIC_URL where 1.1.1.1 is blocked.
+DEFAULT_DIAGNOSTIC_URL = "https://1.1.1.1/"
+
+# Kuma stores the push message and renders it into the notification; a phone
+# notification has room for the part that identifies the fault, not for the
+# full nested requests/urllib3/ssl chain.
+MAX_ERROR_SUMMARY_CHARS = 160
 
 log = logging.getLogger("alphaess-collector")
 
@@ -103,6 +133,75 @@ def check_mtu(expected_max: int) -> None:
         log.info("Link MTU: %s=%d (expected <= %d)", iface, mtu, expected_max)
 
 
+def resolve_host(host: str) -> tuple[bool, str]:
+    """Resolve a hostname to addresses. Returns (ok, one-line description)."""
+    started = time.monotonic()
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except OSError as exc:
+        return False, f"DNS: {host} did not resolve ({exc})"
+    addresses = sorted({info[4][0] for info in infos})
+    elapsed_ms = (time.monotonic() - started) * 1000
+    return True, (f"DNS: {host} -> {', '.join(addresses)} "
+                  f"({elapsed_ms:.0f}ms)")
+
+
+def probe_control_url(url: str, timeout: float = 10) -> tuple[bool, str]:
+    """Fetch an endpoint unrelated to AlphaESS. Returns (ok, description).
+
+    Any HTTP status counts as success: the question is whether this container
+    can complete DNS-free egress and a TLS handshake at all, not what the
+    other end chose to answer.
+    """
+    started = time.monotonic()
+    try:
+        resp = requests.get(url, timeout=timeout)
+    except requests.RequestException as exc:
+        return False, f"Control request to {url} failed: {error_summary(exc)}"
+    elapsed_ms = (time.monotonic() - started) * 1000
+    return True, (f"Control request to {url}: HTTP {resp.status_code} "
+                  f"({elapsed_ms:.0f}ms)")
+
+
+def diagnose_network(expected_max_mtu: int, control_url: str) -> str:
+    """Decide whether a run of poll failures is this host's fault or AlphaESS's.
+
+    This is the question worth answering while an outage is happening, and the
+    one that previously required walking to a computer: the failure modes are
+    indistinguishable from the exception alone. A TLS EOF is the signature of
+    an oversized container MTU (local, fixable now) *and* of an upstream edge
+    dropping connections (nothing to do). Probing DNS and an unrelated HTTPS
+    endpoint separates them.
+
+    Returns a short slug for the alert message; the reasoning goes to the log.
+    """
+    log.warning("Diagnosing whether the fault is local or at the AlphaESS API:")
+    check_mtu(expected_max_mtu)
+    dns_ok, dns_line = resolve_host(API_HOST)
+    log.warning("%s", dns_line)
+    control_ok, control_line = probe_control_url(control_url)
+    log.warning("%s", control_line)
+
+    if not dns_ok:
+        verdict, explanation = "local-dns", (
+            "DNS for the API host is failing, so this is a local resolver or "
+            "network problem, not AlphaESS. Check the container's DNS and the "
+            "host's uplink.")
+    elif not control_ok:
+        verdict, explanation = "local-network", (
+            "An unrelated HTTPS endpoint fails too, so this host's egress is "
+            "the problem, not AlphaESS. Check the uplink first; if only TLS "
+            "fails, check the link MTU logged above.")
+    else:
+        verdict, explanation = "upstream", (
+            "DNS resolves and unrelated HTTPS works, so egress from this "
+            "container is healthy and the fault is at the AlphaESS API. "
+            "Nothing to fix here -- the collector keeps retrying and resumes "
+            "on its own.")
+    log.warning("Diagnosis (%s): %s", verdict, explanation)
+    return verdict
+
+
 def auth_headers(app_id: str, app_secret: str) -> dict:
     timestamp = str(int(time.time()))
     sign = hashlib.sha512(f"{app_id}{app_secret}{timestamp}".encode()).hexdigest()
@@ -135,14 +234,88 @@ def get_last_power_data(app_id: str, app_secret: str, sys_sn: str) -> dict:
     return data
 
 
-def send_heartbeat(url: str, timeout: float = 5) -> None:
-    """Ping a Kuma 'Push' monitor after a successful write (a dead-man's switch
-    for the whole collect->write path). Best-effort: never let a monitoring
-    hiccup disturb collection, so all errors are swallowed."""
+def format_duration(seconds: float) -> str:
+    """Compact duration for log lines and heartbeat messages."""
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
+
+
+def error_summary(exc: Exception) -> str:
+    """One-line description of a failure, for logs and heartbeat messages.
+
+    requests wraps urllib3 wraps ssl, so `str(exc)` on a transport error runs
+    to several hundred characters across the nested causes. The real fault is
+    the innermost one, which requests renders as a trailing "(Caused by ...)"
+    -- exactly the part a naive head-truncation would throw away.
+    """
+    detail = " ".join(str(exc).split())
+    _, sep, cause = detail.partition("(Caused by ")
+    if sep:
+        detail = cause.rstrip(")")
+    if len(detail) > MAX_ERROR_SUMMARY_CHARS:
+        detail = detail[:MAX_ERROR_SUMMARY_CHARS] + "..."
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
+def write_health_event(write_api, bucket: str, sys_sn: str, event: str,
+                       fields: dict, error_class: str | None = None) -> None:
+    """Record a poll failure ("failure") or the end of an outage ("recovered").
+
+    An outage is otherwise only visible in the container log: it rotates, it
+    cannot be read from a phone, and it answers nothing about whether this has
+    happened before. InfluxDB runs on the same host, so it stays reachable
+    exactly when the AlphaESS API does not -- making it the one place an outage
+    can be recorded while it is still happening, and read back through Grafana
+    later.
+
+    Successful polls write nothing here; `power_readings` arriving *is* the
+    healthy signal, and duplicating it would double the write rate for no
+    added information.
+
+    Best-effort, like the heartbeat: bookkeeping about an outage must never
+    turn into a second one.
+    """
+    point = Point(HEALTH_MEASUREMENT).tag("sys_sn", sys_sn).tag("event", event)
+    if error_class:
+        # Bounded set (ReadTimeout, SSLError, HTTPError, RuntimeError, ...),
+        # so it is safe as a tag and lets Grafana group by failure mode.
+        point = point.tag("error_class", error_class)
+    for key, value in fields.items():
+        point = point.field(key, value)
+    try:
+        write_api.write(bucket=bucket, record=point)
+    except Exception as exc:
+        log.warning("Health event write failed: %s", exc)
+
+
+def recovery_message(failures: int, outage_seconds: float) -> str:
+    """Heartbeat message for a successful poll.
+
+    Kuma sends an "up" notification when pings resume but cannot say what the
+    outage was or how long it lasted, so carry that in the message itself.
+    """
+    if not failures:
+        return "OK"
+    return (f"OK (recovered after {failures} failures, "
+            f"{format_duration(outage_seconds)})")
+
+
+def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
+                   timeout: float = 5) -> None:
+    """Ping a Kuma 'Push' monitor (a dead-man's switch for the whole
+    collect->write path).
+
+    `status` and `msg` are passed through to Kuma, which renders them into the
+    notification. Without them an outage only ever reads "no ping received",
+    which says nothing about whether the API, the network or InfluxDB broke --
+    the difference between diagnosing from a phone and opening the container
+    logs. Best-effort: never let a monitoring hiccup disturb collection, so all
+    errors are swallowed.
+    """
     if not url:
         return
     try:
-        requests.get(url, timeout=timeout)
+        requests.get(url, params={"status": status, "msg": msg}, timeout=timeout)
     except Exception as exc:
         log.warning("Heartbeat ping failed: %s", exc)
 
@@ -191,6 +364,7 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
     # write. Unset -> no heartbeat, collector behaves exactly as before.
     heartbeat_url = os.environ.get("HEARTBEAT_URL", "")
     expected_max_mtu = int(env("EXPECTED_MAX_MTU", str(DEFAULT_EXPECTED_MAX_MTU)))
+    diagnostic_url = env("DIAGNOSTIC_URL", DEFAULT_DIAGNOSTIC_URL)
     check_mtu(expected_max_mtu)
 
     client = InfluxDBClient(url=influx_url, token=influx_token, org=influx_org)
@@ -210,6 +384,8 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
              interval, sys_sn, influx_url, influx_bucket)
 
     consecutive_failures = 0
+    first_failure_at = 0.0
+    verdict = ""
     while running:
         started = time.monotonic()
         try:
@@ -221,21 +397,51 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                     point = point.field(key, value)
                 write_api.write(bucket=influx_bucket, record=point)
                 log.debug("Wrote point: %s", fields)
-                send_heartbeat(heartbeat_url)
+                send_heartbeat(heartbeat_url, msg=recovery_message(
+                    consecutive_failures, started - first_failure_at))
             else:
                 log.warning("No usable fields in response, skipping write")
+            # An outage that ends on its own is otherwise silent: the failures
+            # simply stop, and nothing in the log says when, or for how long.
+            if consecutive_failures:
+                outage_seconds = started - first_failure_at
+                log.info("Poll recovered after %d consecutive failures (%s)",
+                         consecutive_failures, format_duration(outage_seconds))
+                write_health_event(
+                    write_api, influx_bucket, sys_sn, "recovered",
+                    {"failures": consecutive_failures,
+                     "outage_seconds": round(outage_seconds, 1)})
             consecutive_failures = 0
+            verdict = ""
         except Exception as exc:
             consecutive_failures += 1
-            log.exception("Poll failed (%d consecutive)", consecutive_failures)
-            # A TLS EOF is the signature of an oversized MTU on this network,
-            # so re-run the check once the failures look persistent rather
-            # than transient. Only on the 3rd failure: enough to rule out a
-            # blip, and it does not repeat for the rest of the outage.
-            if consecutive_failures == 3 and isinstance(exc, requests.exceptions.SSLError):
-                log.warning("Repeated TLS failures against the AlphaESS API; "
-                            "re-checking link MTU (a common cause):")
-                check_mtu(expected_max_mtu)
+            summary = error_summary(exc)
+            write_health_event(
+                write_api, influx_bucket, sys_sn, "failure",
+                {"failures": consecutive_failures, "error": summary},
+                error_class=type(exc).__name__)
+            if consecutive_failures == 1:
+                first_failure_at = started
+                log.exception("Poll failed (1 consecutive)")
+            else:
+                # A full traceback per poll buries a 15-minute outage in
+                # hundreds of identical frames. The first one already carries
+                # the stack; the rest only need to say what failed.
+                log.error("Poll failed (%d consecutive): %s",
+                          consecutive_failures, summary)
+            # Runs once per outage, not on every failure: the answer cannot
+            # change while the same run of failures continues, and the probes
+            # should not become traffic of their own.
+            if consecutive_failures == DIAGNOSE_AFTER_FAILURES:
+                verdict = diagnose_network(expected_max_mtu, diagnostic_url)
+            if consecutive_failures >= HEARTBEAT_DOWN_AFTER_FAILURES:
+                # The verdict is the part that says whether to get up.
+                suffix = f" [{verdict}]" if verdict else ""
+                send_heartbeat(
+                    heartbeat_url, status="down",
+                    msg=f"{summary} "
+                        f"({consecutive_failures} consecutive failures)"
+                        f"{suffix}")
 
         # Back off on repeated failures to avoid hammering the API,
         # capped at 5 minutes.

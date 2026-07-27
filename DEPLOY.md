@@ -159,7 +159,7 @@ In the Grafana UI (not provisioning files):
 
 ## 8. First dashboard panels
 
-**Shortcut — import instead of building by hand:** the repo ships three ready
+**Shortcut — import instead of building by hand:** the repo ships four ready
 dashboards. Import each the same way: Dashboards → **New → Import** → upload the
 JSON (or paste its contents) → in the datasource dropdown pick your `alphaess`
 datasource → Import. Skip the manual steps below if you use them. (Daily-table
@@ -179,6 +179,10 @@ lines if needed.)
   — the **Battery Savings** dashboard (euro value of the battery per day). Needs
   no extra plugins, but shows "No data" until the pricing jobs have run — see
   [Battery-savings pricing jobs](#battery-savings-pricing-jobs) below.
+- [grafana/alphaess-collector-health.json](grafana/alphaess-collector-health.json)
+  — the **Collector Health** dashboard: failed polls, outages and the errors
+  behind them, from the `collector_health` measurement. Needs no extra plugins,
+  and is empty until the collector first fails — which is the healthy state.
 
 ### Sankey plugin on the NAS
 
@@ -397,8 +401,9 @@ docker compose exec collector cat /sys/class/net/eth0/mtu   # expect 1400
 
 The collector also logs this at startup and warns when it is too high, so
 `docker compose logs collector | head` will tell you without the exec. It
-re-checks after 3 consecutive TLS failures, so a long-running container still
-reports it.
+re-checks after 3 consecutive poll failures of any kind, as part of the
+local-vs-upstream diagnosis below, so a long-running container still reports
+it.
 
 ## Monitoring that the collector is actually collecting
 
@@ -408,7 +413,8 @@ process stays up while collecting nothing. Expired credentials, API errors,
 InfluxDB write failures and the MTU problem above all look identical from the
 outside.
 
-Two independent checks cover this, from opposite ends of the pipeline:
+Three checks cover this: two live signals from opposite ends of the
+pipeline, plus a record of what went wrong.
 
 **1. `HEARTBEAT_URL` (write side, primary).** Set it to an Uptime Kuma
 **Push** monitor URL and the collector pings it after each successful
@@ -417,13 +423,64 @@ the Kuma monitor's grace period above `POLL_INTERVAL_SECONDS`; allow for the
 5-minute backoff cap, so ~10 minutes is a sensible floor or you will get
 false alarms on a transient blip.
 
-**2. Grafana staleness alert (read side, secondary).** The rule in
+The pings carry a status and a message, so the alert explains itself:
+
+| When | Push | Notification reads |
+|---|---|---|
+| Successful poll | `status=up&msg=OK` | — |
+| 2nd+ consecutive failure | `status=down` + the error | `ReadTimeout: HTTPSConnectionPool(host='openapi.alphaess.com'...): Read timed out. (read timeout=30)` |
+| 3rd+ consecutive failure | the error + a verdict | `SSLError: SSLEOFError(8, '[SSL: UNEXPECTED_EOF...' (3 consecutive failures) [upstream]` |
+| First poll after an outage | `status=up` + duration | `OK (recovered after 5 failures, 12m11s)` |
+
+The first failure never pushes `down` — a single failed poll is usually an
+upstream blip the next poll rides out, and paging on it means being woken for
+something already fixed. From the second onwards the grace period would expire
+anyway, so this only changes *what the alert says*, not when it fires.
+
+That matters because the failure modes are not equivalent and the phone should
+say which one you have. The exception alone does not settle it — a TLS EOF is
+the signature of an oversized container MTU *and* of an upstream edge dropping
+connections — so on the 3rd consecutive failure the collector probes DNS for
+the API host and one unrelated HTTPS endpoint (`DIAGNOSTIC_URL`, an IP so it
+does not depend on DNS) and logs a verdict, which is appended to the alert:
+
+| Verdict | Means | What to do |
+|---|---|---|
+| `[upstream]` | DNS and unrelated HTTPS both fine | Nothing — AlphaESS is down, the collector resumes on its own |
+| `[local-network]` | Unrelated HTTPS fails too | Check the uplink; if only TLS fails, check the link MTU in the same log block |
+| `[local-dns]` | API host does not resolve | Check the container's DNS and the host's uplink |
+
+The probe runs once per outage, not per failure: the answer cannot change
+while the same run of failures continues. Without any of this, both cases read
+as "no ping received" and cost a trip to the logs.
+
+Log volume during an outage is bounded the same way: the first failure logs a
+full traceback, subsequent ones log a single line with the error. A 15-minute
+outage is ~10 readable lines rather than several hundred frames of identical
+`requests`/`urllib3` stack, and `Poll recovered after N consecutive failures
+(12m11s)` marks where it ended.
+
+**2. `collector_health` in InfluxDB (history, after the fact).** Every failed
+poll and every recovery is written to a `collector_health` measurement in the
+same bucket, tagged `event` (`failure`/`recovered`) and `error_class`. InfluxDB
+is local, so it keeps accepting writes precisely when the AlphaESS API is
+unreachable — it records the outage while it is happening. The
+**AlphaESS Collector Health** dashboard
+([`grafana/alphaess-collector-health.json`](grafana/alphaess-collector-health.json))
+reads it: failed polls, outage count and duration, failures split by error
+class, and a table of the actual error messages. That table is the answer to
+"what did the alert mean", reachable from a phone instead of
+`docker compose logs`. Writes are best-effort and never fail a poll; if
+InfluxDB itself is the thing that is broken, nothing is recorded (the
+heartbeat still fires, which is the point of having both).
+
+**3. Grafana staleness alert (read side, secondary).** The rule in
 [`grafana/provisioning/alerting/alphaess-staleness.yml`](grafana/provisioning/alerting/alphaess-staleness.yml)
 fires when the newest `power_readings` sample is more than 5 minutes old, and
 on no data at all.
 
-These overlap substantially — the heartbeat already catches most stalls. The
-staleness alert adds the cases the heartbeat structurally cannot see, because
+The two live checks overlap substantially — the heartbeat already catches most
+stalls. The staleness alert adds the cases the heartbeat structurally cannot see, because
 it queries the data rather than trusting the writer: a wrong bucket, a
 retention policy quietly dropping data, a Grafana datasource pointed
 elsewhere, or `HEARTBEAT_URL` simply never being set. If you run only one, run
