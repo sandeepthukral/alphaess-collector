@@ -47,6 +47,24 @@ HEALTH_MEASUREMENT = "collector_health"
 # verdict rides along with the alert rather than arriving after the outage.
 DIAGNOSE_AFTER_FAILURES = 3
 
+# Ceiling on the exponential backoff between failed polls.
+#
+# This is not only a politeness setting: it sets how long an outage silences
+# the collector, and therefore how big a gap a run of failed polls leaves in
+# power_readings. pricing.py excludes a whole day whose largest gap exceeds
+# PRICING_MAX_GAP_S (1200 s by default), so a cap set too high converts a
+# handful of failed polls into a lost day of savings data.
+#
+# At 120 s the gap after k consecutive failures is 30 + 60 + 120 * (k - 1):
+# 570 s at five failures, and eleven failures before the 1200 s gate trips.
+# The previous 300 s reached 1050 s at five failures and tripped the gate at
+# six -- observed live on four days in 2026-07, each sitting one failed poll
+# below the cliff. See MIGRATION.md, "Follow-ups this migration surfaced".
+#
+# Raise it only together with PRICING_MAX_GAP_S, and see the ladder in
+# tests/test_collector_backoff.py before changing either.
+DEFAULT_MAX_BACKOFF_S = 120
+
 # Control endpoint for the diagnosis: unrelated to AlphaESS, and addressed by
 # IP so that reaching it does not depend on DNS -- which is tested separately.
 # Override with DIAGNOSTIC_URL where 1.1.1.1 is blocked.
@@ -260,6 +278,35 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
 
 
+def backoff_seconds(interval: int, consecutive_failures: int,
+                    max_backoff: float = DEFAULT_MAX_BACKOFF_S) -> float:
+    """How long to wait before the next poll.
+
+    `interval` while healthy; doubling per consecutive failure once one has
+    happened, capped at `max_backoff`. The exponent stops at 4 so the cap is
+    reached in a bounded number of steps regardless of `interval`.
+
+    Pure, because the resulting gap in power_readings is what decides whether
+    pricing.py keeps the day -- see DEFAULT_MAX_BACKOFF_S.
+    """
+    if not consecutive_failures:
+        return interval
+    return min(interval * 2 ** min(consecutive_failures, 4), max_backoff)
+
+
+def gap_after_failures(interval: int, failures: int,
+                       max_backoff: float = DEFAULT_MAX_BACKOFF_S) -> float:
+    """Gap left in power_readings by `failures` failed polls, then a success.
+
+    The loop subtracts each attempt's own duration from its sleep, so a cycle
+    lasts exactly `backoff_seconds(...)` and the gap is their sum: one healthy
+    interval to the first failed attempt, then one backoff per failure until
+    the poll that succeeds.
+    """
+    return sum(backoff_seconds(interval, n, max_backoff)
+               for n in range(failures + 1))
+
+
 def error_summary(exc: Exception) -> str:
     """One-line description of a failure, for logs and heartbeat messages.
 
@@ -394,6 +441,11 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
     if interval < 10:
         log.warning("POLL_INTERVAL_SECONDS=%d below API floor of 10s, using 10", interval)
         interval = 10
+    max_backoff = int(env("MAX_BACKOFF_SECONDS", str(DEFAULT_MAX_BACKOFF_S)))
+    if max_backoff < interval:
+        log.warning("MAX_BACKOFF_SECONDS=%d below the poll interval of %ds, using %d",
+                    max_backoff, interval, interval)
+        max_backoff = interval
     # Optional: URL of a Kuma "Push" monitor, pinged after each successful
     # write. Unset -> no heartbeat, collector behaves exactly as before.
     heartbeat_url = os.environ.get("HEARTBEAT_URL", "")
@@ -485,11 +537,10 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                         f"({consecutive_failures} consecutive failures)"
                         f"{suffix}")
 
-        # Back off on repeated failures to avoid hammering the API,
-        # capped at 5 minutes.
-        sleep_for = interval
-        if consecutive_failures:
-            sleep_for = min(interval * 2 ** min(consecutive_failures, 4), 300)
+        # Back off on repeated failures to avoid hammering the API, capped so
+        # that an outage does not grow a gap big enough to cost a whole day of
+        # savings data -- see DEFAULT_MAX_BACKOFF_S.
+        sleep_for = backoff_seconds(interval, consecutive_failures, max_backoff)
         elapsed = time.monotonic() - started
         remaining = max(sleep_for - elapsed, 0)
         deadline = time.monotonic() + remaining
