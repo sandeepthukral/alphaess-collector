@@ -507,14 +507,32 @@ send its author looking in the wrong repository.
 
 **Shared infrastructure** (added 2026-07-28):
 
-- [ ] #10 Dashboards provisioned into the `AlphaESS` folder
+- [x] #10 Dashboards provisioned into the `AlphaESS` folder — PR #18, applied by PR #19
 - [ ] #11 Provisioning namespacing — drop `isDefault`, document the per-project prefix
 - [ ] #12 Separate bucket for the second project
-- [ ] #13 Second project uses `http://influxdb:8086`, not the host port — a `DEPLOY.md` note
-- [ ] #14 `name: alphaess-net` + ownership/lifecycle note — **do first**, the other repo will hardcode it
+- [x] #13 Second project uses `http://influxdb:8086`, not the host port — `DEPLOY.md`, "Sharing the stack" (PR #18)
+- [x] #14 `name: alphaess-net` + ownership/lifecycle note — PR #18
 - [ ] Housekeeping — stale "capped at 5 minutes" in `DEPLOY.md` and the alert rule
+- [x] Housekeeping — dashboard tags: already consistent (`alphaess` on all four), no change needed
 
 ### Notes on the completed items
+
+**#10 / #13 / #14** — shipped in PR #18, with PR #19 supplying the part that made
+#10 take effect. Two Grafana behaviours cost a deployment round each and are worth
+remembering before touching provisioning again:
+
+1. Grafana **skips a provisioned dashboard whose checksum is unchanged**, and this
+   repo's Grafana entrypoint regenerates the JSON byte-identically at every start.
+   So a change to `dashboards.yml` alone — folder or anything else — is applied to
+   new installs and silently ignored on existing ones.
+2. A provisioned dashboard **cannot be deleted**, from the UI or the API, so
+   delete-and-recreate is not available as a workaround. `disableDeletion` governs
+   whether provisioning removes a dashboard when its file disappears, not whether
+   an operator may remove one.
+
+The lever is the file's bytes: bumping the top-level `"version"` in each dashboard
+JSON changes the checksum, and a dashboard the provisioner actually processes is
+written with the provider's current settings. Verified on the NAS.
 
 **#1** — `price_coverage` is a new field on the `daily_cost` measurement, gated at
 `PRICING_MIN_PRICE_COVERAGE` (default 0.999). Days with incomplete prices are now *excluded* rather
