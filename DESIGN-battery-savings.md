@@ -227,6 +227,7 @@ For each **complete** day not already processed at the current `model_version`:
 | `delta_soc_percent` | SoC at 24:00 − 00:00 (borrow/bank indicator) |
 | `delta_soc_kwh` | same in kWh — only if `BATTERY_CAPACITY_KWH` is configured |
 | `coverage` | fraction of expected (DST-aware) samples present |
+| `price_coverage` | fraction of the local day covered by price intervals |
 | `max_gap_s` | longest sample gap |
 | `sample_count`, `span_s` | raw sample diagnostics |
 | `balance_residual_kwh` | ∫‖pv+grid+battery−load‖ dt (quality) |
@@ -245,11 +246,33 @@ For each **complete** day not already processed at the current `model_version`:
   one long contiguous gap distorts a specific price slot, so it's gated
   separately. Both thresholds are configurable (`PRICING_MIN_COVERAGE`,
   `PRICING_MAX_GAP_S`).
+- **Price coverage is gated separately, and near-absolutely (≥ 99.9%,
+  `PRICING_MIN_PRICE_COVERAGE`).** Sample coverage and price coverage fail
+  independently, and only the first is visible in the samples: energy landing in
+  an hour with no price row is *discarded* by the integration, not
+  approximated. A day priced for 12 of its 24 hours therefore costs out at
+  exactly half the true figure in both models — with `coverage` still reading
+  1.000 — and once written it is never revisited (see Caching / idempotency).
+  Unlike sample coverage there is no interpolation to lean on, so the threshold
+  admits float error on the boundary arithmetic and nothing else. The rolling
+  window in `scripts/daily-savings.sh` makes this self-healing: a day excluded
+  today because the day-ahead auction had not published is simply recomputed on
+  a later run.
 
 ### Caching / idempotency
 
 - `pricing.py` skips days that already have a `daily_cost` row **at the current
   `model_version`**; bumping the version reprocesses.
+- The dashboard reads one version at a time (its **Model version** variable), so
+  a bump must be mirrored in `grafana/alphaess-battery-savings.json` or every
+  panel keeps showing the previous version's rows — stale numbers rather than an
+  empty dashboard, which is why `tests/test_model_version_consistency.py` pins
+  the two together.
+- Rows at superseded versions are left in place rather than deleted: they cost
+  one point per day, they are invisible while the dashboard is set to the
+  current version, and they are the only record of what the earlier model
+  claimed. **Version 2** added the price-coverage gate; a day present at 1 but
+  absent at 2 is one whose prices could not be verified as complete.
 - Idempotent writes (overwrite the day's point), so re-runs are safe.
 - Never cache a day whose prices were still provisional (won't happen for the
   previous complete day, but guard `--backfill` against missing price intervals).

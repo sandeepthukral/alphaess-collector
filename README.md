@@ -169,14 +169,69 @@ docker compose run --rm collector python pricing.py --backfill 2026-07-01 2026-0
 ```
 
 `pricing.py` skips days already written and only stores days with ≥98% sample
-coverage, so re-running a range is cheap and self-healing (days skipped for late
-prices or gaps are retried once the data lands). Optional: set
-`BATTERY_CAPACITY_KWH` in `.env` to also express each day's SoC change in kWh.
+coverage *and* essentially complete prices, so re-running a range is cheap and
+self-healing (days skipped for late prices or gaps are retried once the data
+lands). Optional: set `BATTERY_CAPACITY_KWH` in `.env` to also express each
+day's SoC change in kWh.
+
+### Migrating existing history to model_version 2
+
+The price-coverage gate arrived with `MODEL_VERSION = "2"`. Rows written before
+it (version 1) carry no evidence that their prices were complete, so a day that
+was priced for only part of its hours is understated there with nothing to show
+for it. The arithmetic itself did not change: a fully-priced day computes
+identically at 1 and 2.
+
+Recomputing republishes every day that can be verified, at version 2, and
+simply omits the ones that cannot. The version-1 rows are left untouched and
+become invisible to the dashboard, so nothing has to be deleted:
+
+```sh
+# 1. make sure prices are complete for the whole range
+docker compose run --rm collector python prices.py  --backfill 2026-07-01 2026-07-27
+# 2. recompute. No --force needed: no version-2 row exists yet, so every day
+#    is reprocessed.
+docker compose run --rm collector python pricing.py --backfill 2026-07-01 2026-07-27
+```
+
+A day that appears at version 1 but not version 2 is one whose prices could not
+be completed — flip the dashboard's **Model version** variable to `1` to see
+what it used to claim.
+
+### Auditing stored days
+
+`--audit` is read-only. It re-checks every stored day at the current
+`MODEL_VERSION` against today's gate and reports any whose underlying data has
+changed since it was written (prices deleted, samples pruned), printing the
+`influx delete` command for each — a rerun cannot fix those, because
+`process_day` leaves an excluded day's existing row untouched.
+
+```sh
+docker compose run --rm collector python pricing.py --audit
+```
 
 To keep it current, schedule [scripts/daily-savings.sh](scripts/daily-savings.sh)
 nightly — it reprocesses a rolling window of recent complete days. See
 [DEPLOY.md](DEPLOY.md#nightly-battery-savings-update) for the DSM Task Scheduler
 setup.
+
+## Development
+
+Tests cover the parts that fail silently: the energy integration and pricing
+model, the complete-day quality gate, the collector's failure handling, and the
+AWTRIX display formatting. Nothing here needs Docker, InfluxDB, or network
+access.
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+
+.venv/bin/pytest                                     # tests
+.venv/bin/ruff check collector awtrix-pusher tests   # lint
+```
+
+Both run in CI on every push and pull request
+([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Notes
 
