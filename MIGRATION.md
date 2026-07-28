@@ -41,6 +41,11 @@ A day that ends up present at version 1 but missing at version 2 is precisely a
 day whose prices could not be verified as complete — one that was silently
 understated before.
 
+**Outcome on this data: there were none.** `price_coverage` measured 1.000 on
+every day, so the new check rejected nothing, and the two versions agree
+exactly. 2026-07-17 is excluded under *both* versions, on sample coverage —
+a check that predates this round.
+
 **No `.env` changes are required.** The new `PRICING_MIN_PRICE_COVERAGE` knob
 defaults to `0.999`.
 
@@ -308,6 +313,20 @@ file. Set the variable to `2` in the UI and save the dashboard.
 ### 9. Compare the two versions
 
 Flip **Model version** to `1`, note the all-time total, flip back to `2`.
+
+**2026-07-17 will not appear under version 1 either.** The pre-change gate at
+`b4d500e` already had `MIN_COVERAGE = 0.98` and rejected on it — sample
+coverage was never the new check. Only `price_coverage` was added, and it
+measured 1.000 on all 11 days, so the new gate rejected nothing the old one had
+not already rejected. Expect the two versions to agree exactly.
+
+That is the strongest available result rather than a disappointing one: it
+confirms on real data that the arithmetic is unchanged and that no day in this
+history was ever understated by missing prices. The recompute was needed
+because the version tag moved, not because any figure was wrong.
+
+A lower day count under version 1 means only that fewer days had been
+backfilled before today — not a discrepancy.
 
 - [ ] Difference understood: any gap is days that version 2 refused to verify
 - [ ] Version-1 day count minus version-2 day count = ________
