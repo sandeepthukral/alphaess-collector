@@ -439,20 +439,21 @@ Not blockers. Raised by the step-7 output, recorded so they are not lost.
    threshold and starts silently excluding days:
 
    ```sh
-   sudo docker compose run --rm collector python -c "
-   import os
-   from influxdb_client import InfluxDBClient
-   c = InfluxDBClient(url=os.environ['INFLUX_URL'], token=os.environ['INFLUX_TOKEN'],
-                      org=os.environ['INFLUX_ORG'])
-   q = f'''from(bucket: \"{os.environ['INFLUX_BUCKET']}\")
-     |> range(start: 2026-07-17T00:00:00Z)
-     |> filter(fn: (r) => r._measurement == \"collector_health\")'''
-   for t in c.query_api().query(q):
-       for r in t.records:
-           print(r.get_time(), r.values.get('event'), r.values.get('error_class'),
-                 r.get_field(), r.get_value())
-   "
+   cd /volume1/docker/alphaess-collector
+   set -a; . ./.env; set +a
+
+   sudo docker compose exec -T influxdb influx query \
+     -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" \
+     "from(bucket: \"$INFLUX_BUCKET\")
+        |> range(start: 2026-07-17T00:00:00Z)
+        |> filter(fn: (r) => r._measurement == \"collector_health\")
+        |> keep(columns: [\"_time\", \"event\", \"error_class\", \"_field\", \"_value\"])"
    ```
+
+   > Use the `influx` CLI here rather than `python -c`. A pasted multi-line
+   > `python -c` picks up the terminal's continuation indentation and dies with
+   > `IndentationError` before it runs; the shell ignores leading whitespace, and
+   > Flux ignores it inside the quoted query.
 
    If the gaps cluster at the same wall-clock time, suspect something local (a
    NAS task, a container restart) rather than the AlphaESS API. Either way,
