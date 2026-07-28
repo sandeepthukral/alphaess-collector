@@ -9,7 +9,8 @@ adding steps the outcome revealed. It is not a plan written once up front; it is
 expected to change as we go. The revision log at the bottom records what changed
 and why.
 
-- **Status:** in progress — steps 0–10 done, next is step 11 (nightly job)
+- **Status:** complete — all steps done 2026-07-28. Two follow-ups recorded
+  below; neither blocks anything.
 - **Last updated:** 2026-07-28
 - **On the NAS, every `docker` / `docker compose` command needs `sudo`.** All
   commands below are written that way. Shell variables (`$INFLUX_TOKEN`, `$PWD`)
@@ -374,8 +375,42 @@ by hand rather than waiting.
 sudo sh /volume1/docker/alphaess-collector/scripts/daily-savings.sh
 ```
 
-- [ ] Runs clean, processes its 4-day window
+- [x] Runs clean, processes its 4-day window
 - [ ] Re-running `pricing.py --audit` still reports `0 stale`
+
+Confirmed 2026-07-28. Refreshed 96 price rows for 07-24…07-27 (an idempotent
+overwrite — same measurement, tags and timestamps), then logged `already
+processed at model_version=2, skipping` for all four days. The nightly job is
+compatible with the version bump: nothing rewritten, nothing duplicated.
+
+Note the script logs local time (`22:48:01` CEST) while the containers log UTC
+(`20:48:03`). Same moment, two clocks — worth remembering when correlating logs
+against an overnight run.
+
+---
+
+## Outcome
+
+Ran end to end on 2026-07-28 with no rollback and no surprises.
+
+| | |
+| - | - |
+| Days recomputed at version 2 | 10 (2026-07-18 … 07-27) |
+| Days excluded | 1 — 2026-07-17, sample coverage 0.559 |
+| Total saving | €17.82, ~€1.78/day |
+| Version 1 vs version 2 | identical on every figure |
+| Audit | 10 OK, 0 stale |
+| Nightly job | skips correctly, nothing rewritten |
+
+**The gate change altered nothing in this history.** `price_coverage` measured
+1.000 on all 11 days, so the check added this round rejected no day the old
+code had accepted. 2026-07-17 fails on *sample* coverage, which predates this
+work. The recompute was needed because the version tag moved, not because any
+figure was wrong — and version 1 and version 2 agreeing to the cent is the
+evidence for that.
+
+The gate is therefore protection against future gaps rather than a correction
+of past ones. Which makes the first follow-up below the one that matters.
 
 ---
 
@@ -519,6 +554,7 @@ Queued, deliberately not part of this migration:
 | ---- | ------ |
 | 2026-07-28 | Created. Covers the price-coverage gate, `MODEL_VERSION` 1 → 2, and the collector failure-domain split. |
 | 2026-07-28 | Step 0 rewritten. It wrongly described the work as an uncommitted tree on `simplify-nas-deploy`; that branch was merged as PR #15 and is not part of this round. Now names the four commits on `review-quality-gate-and-tests`. |
+| 2026-07-28 | Migration complete. Steps 8–11 confirmed: dashboard matches the CLI exactly, v1 and v2 agree to the cent, audit clean, nightly job skips correctly. Added an Outcome summary. |
 | 2026-07-28 | Steps 6 and 7 run and recorded: 264 price rows, 10 days written, 1 excluded (2026-07-17, sample coverage 0.559), €17.82 total. Added a Follow-ups section for the two things the output surfaced — a recurring ~17-minute collection gap sitting at 87% of `MAX_GAP_S`, and a 10–20× step change in import/export on 07-26. |
 | 2026-07-28 | Step 1 marked done (backup taken hours earlier, still valid — nothing has written since). Step 2 gained a warning and an expected SHA: a pull from before PR #16 merged returns "Already up to date" while leaving the old code in place, which would make steps 3–7 look successful and write version-1 rows. |
 | 2026-07-28 | Rollback expanded: names the exact commit to return to (`b4d500e`), adds per-commit partial reverts, an optional scoped delete of the version-2 rows, the restore procedure, and a note that the nightly job resumes writing version-1 rows afterwards. |
