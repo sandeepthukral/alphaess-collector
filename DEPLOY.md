@@ -253,27 +253,33 @@ files look untouched, the update is skipped, and the folder in
 already there. A fresh install lands in the right folder. An upgrade does not,
 and logs nothing to explain it.
 
-Delete the dashboards and let provisioning recreate them. They are defined by the
-files in `grafana/`, so this is not destructive:
+**Deleting them is not the answer** — Grafana refuses (*"provisioned dashboard
+cannot be deleted"*), from the UI and the API alike, and no setting changes that.
+`disableDeletion` governs whether *provisioning* removes a dashboard when its file
+disappears; it does not grant you permission to delete one by hand.
+
+Change the file instead. Bump the top-level `"version"` in each dashboard JSON:
 
 ```sh
-set -a; . ./.env; set +a
-
-for uid in alphaess-main alphaess-energy-flow alphaess-battery-savings alphaess-collector-health; do
-  curl -s -u "$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD" \
-    -X DELETE "http://localhost:${GRAFANA_PORT:-3000}/api/dashboards/uid/$uid"
-  echo
-done
-
-sudo docker compose restart grafana
+grep -n '^  "version":' grafana/*.json
 ```
 
-Ticking them in the Dashboards list and clicking **Delete** does the same thing;
-`disableDeletion` is not set, so removing provisioned dashboards is allowed.
+That is enough — the checksum is over the file's bytes, so any change makes the
+provisioner stop skipping it, and a dashboard it actually processes is written
+into the provider's current folder. Commit the bump so every deployment converges
+on the same state, then:
+
+```sh
+sudo docker compose restart grafana
+sudo docker compose logs grafana 2>&1 | grep -i 'provision' | tail
+```
 
 > `allowUiUpdates: true` means a dashboard saved from the Grafana UI has drifted
-> from the file on disk. Recreation comes from the file, so export anything you
-> edited in the UI and want to keep **before** deleting.
+> from the file on disk. Re-provisioning overwrites it from the file, so export
+> anything you edited in the UI and want to keep **before** restarting.
+
+The same trick applies to any provisioned dashboard change that Grafana appears to
+ignore, not just folders.
 
 ## Monitoring that the collector is actually collecting
 

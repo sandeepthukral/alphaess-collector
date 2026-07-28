@@ -253,9 +253,11 @@ after the change shipped and the dashboards stayed in the root. Grafana skips a
 provisioned dashboard whose checksum is unchanged, and the Grafana entrypoint
 rewrites the JSON byte-identically on every start, so the files look untouched and
 the new folder is never applied to dashboards that already exist. Fresh installs
-are fine; upgrades are not, and nothing is logged. Delete the dashboards and let
-provisioning recreate them (`DEPLOY.md`, "If the pull changed the dashboard
-folder").
+are fine; upgrades are not, and nothing is logged. Nor can the dashboards simply be
+deleted and recreated — Grafana refuses to delete a provisioned dashboard from the
+UI or the API. Bumping the top-level `"version"` in each JSON changes the checksum
+and is what actually applies the folder (`DEPLOY.md`, "If the pull changed the
+dashboard folder").
 
 Two further caveats: `allowUiUpdates: true` is set, so a dashboard saved from the
 UI has drifted from the file and recreation will discard those edits. And the

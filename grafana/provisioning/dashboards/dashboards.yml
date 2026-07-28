@@ -15,9 +15,13 @@ providers:
     # files look untouched and the new folder is never applied. Fresh installs
     # land in the folder correctly; existing ones stay where they were, with
     # nothing in the log to say why. Observed on 2026-07-28 upgrading to this
-    # setting. To apply a folder change, delete the dashboards and let
-    # provisioning recreate them -- see DEPLOY.md, "If the pull changed the
-    # dashboard folder".
+    # setting.
+    #
+    # Deleting them is not a workaround: Grafana refuses to delete a provisioned
+    # dashboard from either the UI or the API. Bump the top-level "version" in
+    # each dashboard JSON instead -- that changes the checksum, so the file is
+    # processed and lands in this folder. See DEPLOY.md, "If the pull changed
+    # the dashboard folder".
     folder: AlphaESS
     type: file
     allowUiUpdates: true
