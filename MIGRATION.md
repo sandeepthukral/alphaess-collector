@@ -131,14 +131,21 @@ matches). Confirm with `sudo docker volume ls | grep influxdb` if unsure.
 ```sh
 cd /volume1/docker/alphaess-collector
 git pull
-git log --oneline -1
+
+# Did the code actually arrive? Both must print.
+grep -n 'MODEL_VERSION = "2"' collector/pricing.py
+grep -n 'def diagnose_write' collector/collector.py
 ```
 
-Expected: `ef64a65 Merge pull request #16 …`. If you get "Already up to date"
-but the SHA is not `ef64a65`, you are on a branch or detached HEAD — `git
-status` will say which, and `git checkout main && git pull` fixes it.
+Check for the code, not a commit SHA — this runbook keeps getting doc-only
+commits, so the tip SHA moves without the code changing. `ef64a65` (PR #16) is
+where the code landed; anything at or after it is fine.
 
-- [ ] `git log --oneline -1` shows `ef64a65`
+If the greps print nothing but `git pull` said "Already up to date", you are on
+a branch or a detached HEAD. `git status` will say which; `git checkout main &&
+git pull` fixes it.
+
+- [ ] Both greps print a match
 - [ ] Working tree updated, no local modifications lost
 
 ### 3. Rebuild the images and restart
