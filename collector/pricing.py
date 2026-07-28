@@ -28,7 +28,6 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from zoneinfo import ZoneInfo
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
@@ -40,12 +39,29 @@ DAILY_MEASUREMENT = "daily_cost"
 
 # Bump when the model or stored schema changes; days computed at an older
 # version are reprocessed rather than skipped.
-MODEL_VERSION = "1"
+#
+# 2: added the price-coverage gate. The arithmetic is unchanged -- a day that
+#    was fully priced computes bit-identically at 1 and 2 -- but version 1 could
+#    not distinguish a fully-priced day from a partially-priced one, so a v1 row
+#    carries no evidence that its prices were complete. Recomputing under v2
+#    republishes every day that can be verified and simply omits those that
+#    cannot, which orphans the unverifiable v1 rows instead of requiring them to
+#    be hunted down and deleted. Keep the dashboard's `model_version` variable
+#    in step (grafana/alphaess-battery-savings.json).
+MODEL_VERSION = "2"
 
 # Complete-day gate.
 POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_SECONDS", "30"))
 MIN_COVERAGE = float(os.environ.get("PRICING_MIN_COVERAGE", "0.98"))
 MAX_GAP_S = float(os.environ.get("PRICING_MAX_GAP_S", "1200"))  # 20 min
+
+# Minimum fraction of the day that must be covered by price intervals. Unlike
+# sample coverage this is held to ~1.0: energy in an unpriced hour is silently
+# dropped by integrate_by_interval, so a day missing an hour of prices is not
+# a slightly-noisier result, it is a wrong one (that hour's cost reads as zero
+# in both models). The tolerance exists only to absorb float error on the
+# boundary arithmetic, not to admit genuinely missing hours.
+MIN_PRICE_COVERAGE = float(os.environ.get("PRICING_MIN_PRICE_COVERAGE", "0.999"))
 
 # Optional: convert ΔSoC% to kWh for the borrow/bank indicator.
 BATTERY_CAPACITY_KWH = os.environ.get("BATTERY_CAPACITY_KWH")
@@ -123,7 +139,12 @@ def integrate_by_interval(samples: list[Sample], power_fn, intervals: list[dict]
             continue
         p0, p1 = power_fn(a), power_fn(b)
 
-        def interp(t):
+        # The ramp parameters are bound as defaults rather than closed over:
+        # interp is rebuilt per segment and only used inside this iteration, so
+        # late binding is harmless today, but it is one refactor (collecting the
+        # closures into a list, say) away from silently pricing every segment
+        # with the last segment's slope.
+        def interp(t, p0=p0, p1=p1, t0=t0, span=span):
             return p0 + (p1 - p0) * ((t - t0).total_seconds() / span)
 
         cuts = [t for t in boundaries if t0 < t < t1]
@@ -139,6 +160,34 @@ def integrate_by_interval(samples: list[Sample], power_fn, intervals: list[dict]
 # --------------------------------------------------------------------------
 # Pricing
 # --------------------------------------------------------------------------
+
+def priced_seconds(intervals: list[dict], win_start: dt.datetime,
+                   win_end: dt.datetime) -> float:
+    """Seconds of [win_start, win_end) covered by at least one price interval.
+
+    Overlapping intervals are merged rather than summed. A duplicate hour --
+    which InfluxDB can hold when the same slot is written under two different
+    tag sets -- would otherwise inflate the total past the length of the day
+    and mask a genuine hole elsewhere.
+    """
+    spans = sorted(
+        (max(iv["from"], win_start), min(iv["till"], win_end))
+        for iv in intervals
+        if iv["till"] > win_start and iv["from"] < win_end
+    )
+    covered = 0.0
+    merged_start = merged_end = None
+    for start, end in spans:
+        if merged_end is None or start > merged_end:
+            if merged_end is not None:
+                covered += (merged_end - merged_start).total_seconds()
+            merged_start, merged_end = start, end
+        elif end > merged_end:
+            merged_end = end
+    if merged_end is not None:
+        covered += (merged_end - merged_start).total_seconds()
+    return covered
+
 
 def import_price(iv: dict) -> float:
     """All-in consumption price (€/kWh)."""
@@ -168,7 +217,10 @@ def compute_day(samples: list[Sample], intervals: list[dict], day: dt.date) -> d
         ia, ea, ic, ec = ia / 1000, ea / 1000, ic / 1000, ec / 1000  # Wh -> kWh
         cost1 += ia * pi - ea * pe
         cost2 += ic * pi - ec * pe
-        imp1 += ia; exp1 += ea; imp2 += ic; exp2 += ec
+        imp1 += ia
+        exp1 += ea
+        imp2 += ic
+        exp2 += ec
 
     # Data-quality metrics. Coverage is time-based: normal cadence drift and a
     # skipped poll or two never count as missing; only real outages (gaps beyond
@@ -182,6 +234,16 @@ def compute_day(samples: list[Sample], intervals: list[dict], day: dt.date) -> d
     outage = sum(g - POLL_INTERVAL_S for g in gaps if g > 3 * POLL_INTERVAL_S)
     coverage = max(0.0, 1.0 - (head + tail + outage) / day_len) if day_len else 0.0
     span_s = (samples[-1].time - samples[0].time).total_seconds()
+
+    # Price coverage is tracked separately from sample coverage because the two
+    # fail independently and only one of them is visible in the samples. Energy
+    # in an hour with no price is dropped by integrate_by_interval, so a day
+    # priced for 12 of its 24 hours produces a cost that is simply half of the
+    # real one -- with sample coverage still reading 1.000. Without this metric
+    # that day is indistinguishable from a correct one, and once written it is
+    # skipped forever by _already_done.
+    price_coverage = (priced_seconds(intervals, win_start, win_end) / day_len
+                      if day_len else 0.0)
 
     # Energy-balance residual (kWh of |pv + grid + battery - load| integrated).
     residual = 0.0
@@ -202,6 +264,7 @@ def compute_day(samples: list[Sample], intervals: list[dict], day: dt.date) -> d
         "delta_soc_percent": round(samples[-1].soc - samples[0].soc, 2),
         "balance_residual_kwh": round(residual, 4),
         "coverage": round(coverage, 4),
+        "price_coverage": round(price_coverage, 4),
         "max_gap_s": round(max_gap, 1),
         "sample_count": len(samples),
         "span_s": round(span_s, 1),
@@ -214,14 +277,21 @@ def compute_day(samples: list[Sample], intervals: list[dict], day: dt.date) -> d
 
 
 def day_window_utc(day: dt.date) -> tuple[dt.datetime, dt.datetime]:
-    start = dt.datetime.combine(day, dt.time(), NL_TZ).astimezone(dt.timezone.utc)
-    end = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(), NL_TZ).astimezone(dt.timezone.utc)
+    start = dt.datetime.combine(day, dt.time(), NL_TZ).astimezone(dt.UTC)
+    end = dt.datetime.combine(day + dt.timedelta(days=1), dt.time(), NL_TZ).astimezone(dt.UTC)
     return start, end
 
 
 def gate(result: dict) -> tuple[bool, str]:
     if result["coverage"] < MIN_COVERAGE:
         return False, f"coverage {result['coverage']:.3f} < {MIN_COVERAGE}"
+    # Checked before max_gap because a partially-priced day is wrong rather
+    # than merely thin, and the operator action differs: rerun once the
+    # day-ahead prices land, instead of investigating a collector outage.
+    if result["price_coverage"] < MIN_PRICE_COVERAGE:
+        return False, (f"price coverage {result['price_coverage']:.3f} < "
+                       f"{MIN_PRICE_COVERAGE} (prices missing for "
+                       f"{(1 - result['price_coverage']) * 24:.1f}h of the day)")
     if result["max_gap_s"] > MAX_GAP_S:
         return False, f"max gap {result['max_gap_s']:.0f}s > {MAX_GAP_S:.0f}s"
     return True, "ok"
@@ -346,7 +416,9 @@ def process_day(day, samples, intervals, dry_run, write_ctx) -> None:
 
     result = compute_day(samples, intervals, day)
     ok, why = gate(result)
-    quality = (f"coverage={result['coverage']:.3f} max_gap={result['max_gap_s']:.0f}s "
+    quality = (f"coverage={result['coverage']:.3f} "
+               f"price_coverage={result['price_coverage']:.3f} "
+               f"max_gap={result['max_gap_s']:.0f}s "
                f"residual={result['balance_residual_kwh']:.3f}kWh")
     if not ok:
         log.warning("%s: EXCLUDED (%s) [%s]", day, why, quality)
@@ -413,10 +485,137 @@ from(bucket: "{bucket}")
         and r.sys_sn == "{sys_sn}" and r.model_version == "{MODEL_VERSION}")
   |> limit(n:1)
 '''
+    return any(table.records for table in query_api.query(flux))
+
+
+# --------------------------------------------------------------------------
+# Audit
+# --------------------------------------------------------------------------
+
+_STORED_DAYS_FLUX = """
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "{meas}" and r.sys_sn == "{sys_sn}"
+        and r._field == "saving")
+  |> keep(columns: ["_time", "model_version"])
+  |> sort(columns: ["_time"])
+"""
+
+
+def stored_days(query_api, bucket, sys_sn, start, stop) -> list[tuple[dt.date, str]]:
+    """Local days that already have a `daily_cost` row, with their model_version.
+
+    The row is timestamped at the local midnight that opens the day, so
+    converting back through NL_TZ recovers the day it describes -- taking
+    .date() on the raw UTC instant would name the previous day for most of the
+    year.
+    """
+    flux = _STORED_DAYS_FLUX.format(
+        bucket=bucket, meas=DAILY_MEASUREMENT, sys_sn=sys_sn,
+        start=start.isoformat(), stop=stop.isoformat(),
+    )
+    found = set()
     for table in query_api.query(flux):
-        if table.records:
-            return True
-    return False
+        for rec in table.records:
+            time = rec.get_time()
+            if time is None:
+                continue
+            found.add((time.astimezone(NL_TZ).date(),
+                       rec.values.get("model_version", "")))
+    return sorted(found)
+
+
+def audit_day(day, samples, intervals) -> tuple[str, str]:
+    """Judge a stored row against what today's rules and data would produce.
+
+    Returns (status, detail). "stale" means a row exists for a day that would
+    now be rejected -- process_day returns early on a gate failure without
+    touching what is already stored, so a rerun (even with --force) leaves the
+    old figure in place. Those rows are the ones that need deleting by hand.
+    """
+    if not samples:
+        return "stale", "no power samples for this day"
+    if not intervals:
+        return "stale", "no prices stored for this day"
+    result = compute_day(samples, intervals, day)
+    ok, why = gate(result)
+    if ok:
+        return "ok", (f"price_coverage={result['price_coverage']:.3f} "
+                      f"saving=EUR{result['saving']:.4f}")
+    return "stale", why
+
+
+def run_audit(days: list[dt.date] | None) -> None:
+    """Report stored `daily_cost` rows that today's gate would refuse to write.
+
+    Answers the question a rerun cannot: --force recomputes and overwrites a
+    day it accepts, but a day it now *rejects* keeps whatever was written under
+    the old rules. This lists exactly those rows.
+    """
+    client = InfluxDBClient(url=env("INFLUX_URL"), token=env("INFLUX_TOKEN"), org=env("INFLUX_ORG"))
+    bucket = env("INFLUX_BUCKET")
+    sys_sn = env("ALPHAESS_SYS_SN")
+    query_api = client.query_api()
+    try:
+        if days:
+            window = (day_window_utc(days[0])[0], day_window_utc(days[-1])[1])
+        else:
+            # Everything ever written. The measurement holds one row per day,
+            # so a wide range is cheap.
+            window = (dt.datetime(2020, 1, 1, tzinfo=dt.UTC),
+                      dt.datetime.now(dt.UTC) + dt.timedelta(days=1))
+        rows = stored_days(query_api, bucket, sys_sn, *window)
+        wanted = set(days) if days else None
+
+        stale = []
+        checked = 0
+        superseded = 0
+        for day, model_version in rows:
+            if wanted is not None and day not in wanted:
+                continue
+            # Rows at an older model_version are orphaned by design -- the
+            # dashboard reads one version at a time -- so they are counted and
+            # left alone rather than reported as problems.
+            if model_version != MODEL_VERSION:
+                superseded += 1
+                continue
+            checked += 1
+            start, end = day_window_utc(day)
+            samples = load_samples_influx(query_api, bucket, sys_sn, start, end)
+            intervals = load_prices_influx(query_api, bucket, start, end)
+            status, detail = audit_day(day, samples, intervals)
+            if status == "ok":
+                log.info("%s: OK [%s]", day, detail)
+            else:
+                stale.append((day, detail))
+                log.warning("%s: STALE -- %s", day, detail)
+
+        log.info("Audited %d stored day(s) at model_version=%s: %d OK, %d stale",
+                 checked, MODEL_VERSION, checked - len(stale), len(stale))
+        if superseded:
+            log.info(
+                "%d row(s) remain at an earlier model_version. They are "
+                "invisible to the dashboard while it is set to %s, and can be "
+                "left in place or deleted at leisure.", superseded, MODEL_VERSION)
+        if stale:
+            log.warning(
+                "%d stored row(s) would be rejected by today's gate, which "
+                "means the data behind them changed after they were written. A "
+                "rerun will not correct them -- process_day leaves an excluded "
+                "day's existing row untouched. Delete them, then re-run "
+                "pricing.py for those days:", len(stale))
+            for day, _detail in stale:
+                start, end = day_window_utc(day)
+                # Scoped to this model_version so the predicate cannot also
+                # take out rows kept from an earlier one for comparison.
+                log.warning(
+                    "  influx delete --bucket %s --start %s --stop %s "
+                    "--predicate '_measurement=\"%s\" AND sys_sn=\"%s\" AND "
+                    "model_version=\"%s\"'",
+                    bucket, start.isoformat(), end.isoformat(),
+                    DAILY_MEASUREMENT, sys_sn, MODEL_VERSION)
+    finally:
+        client.close()
 
 
 def daterange(start: dt.date, end: dt.date):
@@ -451,7 +650,16 @@ def main() -> None:
     p.add_argument("--csv", metavar="PATH", help="Read samples from a CSV export; prices fetched live; implies dry-run.")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--force", action="store_true", help="Reprocess even if already done.")
+    p.add_argument("--audit", action="store_true",
+                   help="Report stored days that today's quality gate would "
+                        "reject. Read-only. Defaults to every stored day; "
+                        "narrow with --date/--backfill.")
     args = p.parse_args()
+
+    if args.audit:
+        # No --date/--backfill means "everything ever written", not "yesterday".
+        run_audit(resolve_days(args) if (args.date or args.backfill) else None)
+        return
 
     days = resolve_days(args)
     if args.csv:

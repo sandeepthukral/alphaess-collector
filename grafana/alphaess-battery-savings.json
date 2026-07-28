@@ -1034,21 +1034,26 @@
     "list": [
       {
         "current": {
-          "text": "1",
-          "value": "1"
+          "text": "2",
+          "value": "2"
         },
-        "description": "daily_cost model_version to read. Bump in pricing.py when the model changes; set the same value here so old and new rows are not double-counted.",
+        "description": "daily_cost model_version to read. Bump in pricing.py when the model changes; set the same value here so old and new rows are not double-counted. 2 = price-coverage gate (days are stored only when their prices are complete); 1 = pre-gate rows, kept for comparison.",
         "hide": 0,
         "label": "Model version",
         "name": "model_version",
         "options": [
           {
-            "selected": true,
+            "selected": false,
             "text": "1",
             "value": "1"
+          },
+          {
+            "selected": true,
+            "text": "2",
+            "value": "2"
           }
         ],
-        "query": "1",
+        "query": "1,2",
         "skipUrlSync": false,
         "type": "custom"
       }
