@@ -116,8 +116,11 @@ The volume name above is correct as long as the repo sits in a directory called
 matches). Confirm with `sudo docker volume ls | grep influxdb` if unsure.
 
 - [x] Backup taken and copied off the container — 2026-07-28, a few hours
-      before the code landed. Still valid: nothing has written to InfluxDB
-      since, and the recompute in step 7 has not run yet.
+      before the code landed. The collector has kept polling since, so the
+      backup is missing those hours of `power_readings`. Good enough: rollback
+      here is a code operation, nothing in steps 3–11 deletes or rewrites data,
+      and step 7 only adds rows. Re-take it only if you want the belt and
+      braces — `influx backup` is online and costs about a minute.
 - [x] Backup file/directory exists and is non-empty
 
 ### 2. Pull the code
