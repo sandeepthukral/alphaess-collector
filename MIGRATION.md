@@ -9,7 +9,7 @@ adding steps the outcome revealed. It is not a plan written once up front; it is
 expected to change as we go. The revision log at the bottom records what changed
 and why.
 
-- **Status:** in progress — step 1 done, resuming at step 2
+- **Status:** in progress — steps 0–7 done, next is step 8 (check the dashboard)
 - **Last updated:** 2026-07-28
 - **On the NAS, every `docker` / `docker compose` command needs `sudo`.** All
   commands below are written that way. Shell variables (`$INFLUX_TOKEN`, `$PWD`)
@@ -148,8 +148,8 @@ If the greps print nothing but `git pull` said "Already up to date", you are on
 a branch or a detached HEAD. `git status` will say which; `git checkout main &&
 git pull` fixes it.
 
-- [ ] Both greps print a match
-- [ ] Working tree updated, no local modifications lost
+- [X] Both greps print a match
+- [X] Working tree updated, no local modifications lost
 
 ### 3. Rebuild the images and restart
 
@@ -162,8 +162,8 @@ sudo docker compose up -d --build collector awtrix-pusher
 sudo docker compose restart grafana
 ```
 
-- [ ] Both images rebuilt (build output shows the `COPY` layers re-running)
-- [ ] Grafana restarted
+- [X] Both images rebuilt (build output shows the `COPY` layers re-running)
+- [X] Grafana restarted
 
 ### 4. Confirm the collector is healthy again
 
@@ -253,9 +253,35 @@ sudo docker compose run --rm collector python pricing.py --backfill 2026-07-17 2
 Each accepted day logs `wrote daily_cost`. Days that cannot be verified log
 `EXCLUDED (price coverage … )` and are skipped — expected, and the whole point.
 
-- [ ] Completed
-- [ ] Count of days written: ________
-- [ ] Count of days excluded: ________
+- [x] Completed
+- [x] Count of days written: **10** (07-18 → 07-27)
+- [x] Count of days excluded: **1** — 2026-07-17, `coverage 0.559 < 0.98`
+
+Excluded on *sample* coverage, exactly as anticipated: collection began at
+10:34 CEST that day. `price_coverage` was 1.000 on all 11 days, so the new gate
+rejected nothing on price grounds, and `residual=0.000kWh` throughout — the
+integration balances.
+
+Ten-day total saving **€17.82**, ~€1.78/day.
+
+#### Two things this run surfaced
+
+**Max gap sits close to the limit on four days.** 07-18 (1052 s), 07-21
+(1038 s), 07-23 (916 s), 07-27 (1047 s) against a `MAX_GAP_S` of 1200 s — about
+87% of the threshold, clustered near the same duration rather than scattered.
+That looks like a recurring daily event, not random API flakiness. These days
+pass today, but a slightly longer outage drops one off the dashboard with no
+warning beyond a log line. Worth reading `collector_health` for those dates to
+find the `error_class`. Tracked as follow-up, not a blocker.
+
+**Consumption changed sharply on 07-26.** Import/export goes from 0.31–1.14 /
+0.43–4.41 kWh on 07-18…07-25 to 15.48/22.32 (07-26) and 17.96/19.06 (07-27) —
+10–20× on both sides, with savings rising to €6.04 and €3.88. Benign if there
+is a known cause; noted here so the step-9 comparison is not read as a model
+artefact.
+
+**07-19 saved −€0.07.** Not a fault: the no-battery counterfactual would have
+exported 17.84 kWh into good prices, beating what storing it returned.
 
 ### 8. Check the dashboard
 
@@ -302,6 +328,40 @@ sudo sh /volume1/docker/alphaess-collector/scripts/daily-savings.sh
 
 - [ ] Runs clean, processes its 4-day window
 - [ ] Re-running `pricing.py --audit` still reports `0 stale`
+
+---
+
+## Follow-ups this migration surfaced
+
+Not blockers. Raised by the step-7 output, recorded so they are not lost.
+
+1. **Recurring ~17-minute collection gap.** Four of ten days peaked at
+   916–1052 s against a 1200 s limit. Find the cause before it crosses the
+   threshold and starts silently excluding days:
+
+   ```sh
+   sudo docker compose run --rm collector python -c "
+   import os
+   from influxdb_client import InfluxDBClient
+   c = InfluxDBClient(url=os.environ['INFLUX_URL'], token=os.environ['INFLUX_TOKEN'],
+                      org=os.environ['INFLUX_ORG'])
+   q = f'''from(bucket: \"{os.environ['INFLUX_BUCKET']}\")
+     |> range(start: 2026-07-17T00:00:00Z)
+     |> filter(fn: (r) => r._measurement == \"collector_health\")'''
+   for t in c.query_api().query(q):
+       for r in t.records:
+           print(r.get_time(), r.values.get('event'), r.values.get('error_class'),
+                 r.get_field(), r.get_value())
+   "
+   ```
+
+   If the gaps cluster at the same wall-clock time, suspect something local (a
+   NAS task, a container restart) rather than the AlphaESS API. Either way,
+   raising `PRICING_MAX_GAP_S` is the wrong first move — it would hide the
+   symptom.
+
+2. **Step change in consumption on 2026-07-26.** Confirm there is a known
+   cause, so the dashboard's totals are not read as a model artefact.
 
 ---
 
@@ -411,6 +471,7 @@ Queued, deliberately not part of this migration:
 | ---- | ------ |
 | 2026-07-28 | Created. Covers the price-coverage gate, `MODEL_VERSION` 1 → 2, and the collector failure-domain split. |
 | 2026-07-28 | Step 0 rewritten. It wrongly described the work as an uncommitted tree on `simplify-nas-deploy`; that branch was merged as PR #15 and is not part of this round. Now names the four commits on `review-quality-gate-and-tests`. |
+| 2026-07-28 | Steps 6 and 7 run and recorded: 264 price rows, 10 days written, 1 excluded (2026-07-17, sample coverage 0.559), €17.82 total. Added a Follow-ups section for the two things the output surfaced — a recurring ~17-minute collection gap sitting at 87% of `MAX_GAP_S`, and a 10–20× step change in import/export on 07-26. |
 | 2026-07-28 | Step 1 marked done (backup taken hours earlier, still valid — nothing has written since). Step 2 gained a warning and an expected SHA: a pull from before PR #16 merged returns "Already up to date" while leaving the old code in place, which would make steps 3–7 look successful and write version-1 rows. |
 | 2026-07-28 | Rollback expanded: names the exact commit to return to (`b4d500e`), adds per-commit partial reverts, an optional scoped delete of the version-2 rows, the restore procedure, and a note that the nightly job resumes writing version-1 rows afterwards. |
 | 2026-07-28 | Every `docker` / `docker compose` command prefixed with `sudo`, and step 11's script invocation too — the NAS account is not in a docker group, so the runbook as written would have failed on the first command. |
