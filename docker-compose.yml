@@ -116,6 +116,14 @@ services:
 
 networks:
   alphaess-net:
+    # Pinned rather than left to Compose, which would derive it from the
+    # directory name (alphaess-collector_alphaess-net) and change it if this
+    # checkout were ever renamed or cloned elsewhere. Other compose projects on
+    # the same host join this network by name as `external: true`, so the name
+    # is a published interface -- see DEPLOY.md, "Sharing the stack".
+    #
+    # Joining it is also what confers the MTU cap below.
+    name: alphaess-net
     # Cap the bridge MTU to clear path-MTU limits on some hosts (e.g. Synology
     # NAS uplinks / VPN/PPPoE), where the default 1500 causes large TLS
     # handshake packets to the AlphaESS API to be dropped, surfacing as

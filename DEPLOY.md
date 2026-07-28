@@ -190,6 +190,57 @@ re-checks after 3 consecutive poll failures of any kind, as part of the
 local-vs-upstream diagnosis below, so a long-running container still reports
 it.
 
+## Sharing the stack with another project
+
+Another compose project on the same NAS can use this InfluxDB and Grafana rather
+than running its own.
+
+**This repository owns InfluxDB, Grafana, their volumes, and `alphaess-net`.**
+The other project declares all of them external and defines none of its own. Two
+compose files each defining an `influxdb` service on one host does not announce
+itself as a mistake — it just produces two databases, two volumes, and half the
+data in each.
+
+On the other side:
+
+```yaml
+services:
+  your-service:
+    environment:
+      # The service name on the shared network. NOT http://<nas-ip>:8086 --
+      # that works, which is the problem: it routes over the LAN and puts the
+      # token in cleartext on every write, in a .env nobody revisits.
+      INFLUX_URL: http://influxdb:8086
+    restart: unless-stopped   # depends_on cannot reach another compose project
+    networks:
+      - alphaess-net
+
+networks:
+  alphaess-net:
+    external: true
+```
+
+Three things worth knowing before you write that file:
+
+- **Joining `alphaess-net` is what confers the 1400 MTU cap.** A container that
+  creates its own network gets the default 1500 and inherits the TLS problem
+  described above from scratch — intermittent
+  `SSL: UNEXPECTED_EOF_WHILE_READING` against whatever external HTTPS API it
+  calls, days apart, with nothing pointing at the network.
+
+- **Give it its own bucket and a token scoped to that bucket.** Not
+  `INFLUX_TOKEN` — that is the admin token, and it can drop the `alphaess`
+  bucket and all of its history.
+
+- **`docker compose down` here stops the shared services** out from under the
+  other project, which keeps running and failing. `down -v` destroys both
+  projects' data. Note that the MTU procedure above prescribes exactly that
+  `down`/`up` cycle.
+
+Grafana dashboards from the other project should be provisioned into their own
+folder, with their own provider name, mount path, and dashboard UIDs — Grafana
+resolves collisions silently, by dropping or overwriting.
+
 ## Monitoring that the collector is actually collecting
 
 The poll loop catches every exception and backs off (capped at 5 minutes)
