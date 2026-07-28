@@ -202,6 +202,26 @@ def diagnose_network(expected_max_mtu: int, control_url: str) -> str:
     return verdict
 
 
+def diagnose_write(influx_url: str) -> str:
+    """Verdict for a run of failures on the InfluxDB write, not the API fetch.
+
+    diagnose_network must not be used here. Its probes ask whether egress to
+    the internet works, and InfluxDB is a compose service on this same host --
+    so DNS and the control endpoint both succeed while writes keep failing, and
+    it returns "upstream": "the fault is at the AlphaESS API. Nothing to fix
+    here." That is exactly backwards, on the one message that decides whether
+    the operator gets up. The API is very likely fine; what is broken is local
+    and needs looking at.
+    """
+    log.warning(
+        "Diagnosis (local-influxdb): the AlphaESS fetch succeeded and the "
+        "InfluxDB write at %s failed, so samples are being collected and "
+        "dropped. This is local: check `docker compose ps influxdb`, its "
+        "logs, the token/org/bucket, and free disk on the volume.",
+        influx_url)
+    return "local-influxdb"
+
+
 def auth_headers(app_id: str, app_secret: str) -> dict:
     timestamp = str(int(time.time()))
     sign = hashlib.sha512(f"{app_id}{app_secret}{timestamp}".encode()).hexdigest()
@@ -258,7 +278,8 @@ def error_summary(exc: Exception) -> str:
 
 
 def write_health_event(write_api, bucket: str, sys_sn: str, event: str,
-                       fields: dict, error_class: str | None = None) -> None:
+                       fields: dict, error_class: str | None = None,
+                       stage: str | None = None) -> None:
     """Record a poll failure ("failure") or the end of an outage ("recovered").
 
     An outage is otherwise only visible in the container log: it rotates, it
@@ -280,6 +301,11 @@ def write_health_event(write_api, bucket: str, sys_sn: str, event: str,
         # Bounded set (ReadTimeout, SSLError, HTTPError, RuntimeError, ...),
         # so it is safe as a tag and lets Grafana group by failure mode.
         point = point.tag("error_class", error_class)
+    if stage:
+        # "fetch" or "write" -- which half of the poll broke. The exception
+        # class alone does not say: a ReadTimeout is equally at home talking to
+        # AlphaESS and to InfluxDB, and the two demand opposite responses.
+        point = point.tag("stage", stage)
     for key, value in fields.items():
         point = point.field(key, value)
     try:
@@ -396,6 +422,10 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
     verdict = ""
     while running:
         started = time.monotonic()
+        # Which half of the poll is in flight. An exception says what went
+        # wrong but not where, and the two halves fail for unrelated reasons
+        # with unrelated fixes -- see diagnose_write.
+        stage = "fetch"
         try:
             data = get_last_power_data(app_id, app_secret, sys_sn)
             fields = parse_fields(data)
@@ -403,6 +433,7 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                 point = Point("power_readings").tag("sys_sn", sys_sn)
                 for key, value in fields.items():
                     point = point.field(key, value)
+                stage = "write"
                 write_api.write(bucket=influx_bucket, record=point)
                 log.debug("Wrote point: %s", fields)
                 send_heartbeat(heartbeat_url, msg=recovery_message(
@@ -427,27 +458,30 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
             write_health_event(
                 write_api, influx_bucket, sys_sn, "failure",
                 {"failures": consecutive_failures, "error": summary},
-                error_class=type(exc).__name__)
+                error_class=type(exc).__name__, stage=stage)
             if consecutive_failures == 1:
                 first_failure_at = started
-                log.exception("Poll failed (1 consecutive)")
+                log.exception("Poll failed at %s (1 consecutive)", stage)
             else:
                 # A full traceback per poll buries a 15-minute outage in
                 # hundreds of identical frames. The first one already carries
                 # the stack; the rest only need to say what failed.
-                log.error("Poll failed (%d consecutive): %s",
-                          consecutive_failures, summary)
+                log.error("Poll failed at %s (%d consecutive): %s",
+                          stage, consecutive_failures, summary)
             # Runs once per outage, not on every failure: the answer cannot
             # change while the same run of failures continues, and the probes
             # should not become traffic of their own.
             if consecutive_failures == DIAGNOSE_AFTER_FAILURES:
-                verdict = diagnose_network(expected_max_mtu, diagnostic_url)
+                verdict = (diagnose_network(expected_max_mtu, diagnostic_url)
+                           if stage == "fetch" else diagnose_write(influx_url))
             if consecutive_failures >= HEARTBEAT_DOWN_AFTER_FAILURES:
-                # The verdict is the part that says whether to get up.
+                # The verdict is the part that says whether to get up; the
+                # stage is what says where to look, and is known from the
+                # first failure rather than only from the third.
                 suffix = f" [{verdict}]" if verdict else ""
                 send_heartbeat(
                     heartbeat_url, status="down",
-                    msg=f"{summary} "
+                    msg=f"{stage}: {summary} "
                         f"({consecutive_failures} consecutive failures)"
                         f"{suffix}")
 
