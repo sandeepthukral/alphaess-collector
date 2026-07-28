@@ -9,7 +9,7 @@ adding steps the outcome revealed. It is not a plan written once up front; it is
 expected to change as we go. The revision log at the bottom records what changed
 and why.
 
-- **Status:** in progress — steps 0–7 done, next is step 8 (check the dashboard)
+- **Status:** in progress — steps 0–8 done, next is step 9 (compare v1 vs v2)
 - **Last updated:** 2026-07-28
 - **On the NAS, every `docker` / `docker compose` command needs `sudo`.** All
   commands below are written that way. Shell variables (`$INFLUX_TOKEN`, `$PWD`)
@@ -287,9 +287,19 @@ exported 17.84 kWh into good prices, beating what storing it returned.
 
 Open the battery-savings dashboard.
 
-- [ ] The **Model version** picker offers `1` and `2`, and is set to `2`
-- [ ] "Days analysed to date" is close to the days-written count from step 7
-- [ ] Totals look plausible against what you remember
+- [x] The **Model version** picker offers `1` and `2`, and is set to `2`
+- [x] "Days analysed to date" is close to the days-written count from step 7
+- [x] Totals look plausible against what you remember
+
+Confirmed 2026-07-28. Every panel reproduces the step-7 CLI output exactly:
+€17.82 total, 10 days, per-day coverage matching (98.8 / 100.0 / 98.6 …),
+residual 0.000 kWh on every row, and 07-19 rendering its −€0.071 in red. The
+provisioned JSON won — no `allowUiUpdates` conflict to resolve.
+
+Also on the dashboard: **36.3 kWh grid import avoided** at an effective
+**€0.491/kWh**, which is high because the battery displaces imports at
+expensive hours specifically. The **−41.6% ΔSoC on 07-26** is the same event as
+the consumption step change in the follow-ups, not a separate anomaly.
 
 If the picker still shows only `1`: `dashboards.yml` sets `allowUiUpdates: true`,
 so a copy previously saved from the Grafana UI can win over the provisioned
