@@ -302,11 +302,18 @@ buckets are only a boundary if the tokens are scoped to them. The token handed t
 the second project should be **write-only on its own bucket**, and if its
 dashboards live in this Grafana, a **read-only** token for the datasource.
 
-Also affects #3: with the bucket name hardcoded in four dashboards and the alert
-rule, this repo cannot cleanly follow its own `INFLUX_BUCKET` setting today.
+**Fix order:** #12 (create the second bucket) → #5 (mint scoped tokens) → hand the
+second project only its own.
 
-**Fix order:** #3 (template the bucket) → #12 (create the second bucket) → #5
-(mint scoped tokens for both projects) → hand the second project only its own.
+**#3 is not a prerequisite** — corrected 2026-07-28, having earlier claimed it was.
+Templating the bucket lets *this* repo follow its own `INFLUX_BUCKET` setting. The
+second project gets a different bucket by `influx bucket create` and a token scoped
+to it; these dashboards go on reading `alphaess` regardless. The two are
+independent, and sequencing #3 first would put the slowest item in front of the one
+that actually blocks handing over credentials.
+
+#3 remains worth doing on its own merits — a `INFLUX_BUCKET` set to anything else
+today blanks every panel and makes the staleness rule fire permanently.
 
 ### 13. Keep InfluxDB traffic on the Docker network, not the host port
 
@@ -463,11 +470,13 @@ after both sides depend on the current names.
    the other repository later.
 1. **#10 dashboard folder** — one line, immediate benefit, and it establishes the
    folder-per-project convention before there is a second project to argue with.
-2. **#3 template the bucket** → **#12 separate buckets** → **#5 scoped tokens**.
-   The real work, and a prerequisite for handing the second project any credential.
-   Do not give it `INFLUX_TOKEN` in the meantime; if it needs to write before this
-   lands, mint it a throwaway bucket-scoped token by hand and treat replacing that
-   token as the migration's first step.
+2. **#12 separate bucket** → **#5 scoped tokens**. The only chain that blocks
+   handing the second project a credential, and short: `influx bucket create`, two
+   `influx auth create` calls, and a `.env` change on each side. Do not give it
+   `INFLUX_TOKEN` in the meantime.
+
+   (**#3 is *not* part of this chain** — see #12. It was listed as a prerequisite
+   here until 2026-07-28; it isn't one.)
 3. **#6 password fallback** and **#11 `isDefault` / namespacing** — small, and both
    are about removing ways for the two projects to interfere. The password one is
    now the more urgent half of #6, since Grafana stays the one LAN-facing service.
@@ -493,7 +502,7 @@ send its author looking in the wrong repository.
 
 - [x] #1 Price-coverage gate — `priced_seconds()`, `price_coverage` field, `gate()` check
 - [x] #2 Fetch/write failure-domain split — `stage` tracking + `diagnose_write()`
-- [ ] #3 Hardcoded bucket in dashboards — **prerequisite for #12**
+- [ ] #3 Hardcoded bucket in dashboards (48 refs across 4 dashboards + the alert rule) — independent of #12
 - [ ] #4 `daily-savings.sh` date parsing
 - [ ] #5 Scoped InfluxDB tokens — **blocks handing the second project credentials**
 - [ ] #6 Grafana password default ~~+ loopback binding~~ (binding half reversed, see #6)
