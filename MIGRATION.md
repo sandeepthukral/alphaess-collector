@@ -230,8 +230,17 @@ sudo docker compose run --rm collector python prices.py --backfill 2026-07-17 20
 Watch for `No prices returned for …` lines — those days cannot be computed and
 will be excluded in the next step. That is the correct outcome, not a failure.
 
-- [ ] Completed
-- [ ] Any days reported as having no prices noted here: ________
+Result, 2026-07-28: `Done: 264 price rows across 11 day(s)` — 24 rows for every
+day, no gaps. 24 per day also confirms no DST transition in this range.
+
+- [x] Completed
+- [x] Any days reported as having no prices: **none**
+
+So `price_coverage` will be exactly 1.0000 for all 11 days and the new gate
+will exclude nothing on price grounds. That also means the existing version-1
+rows were not understated — the recompute should reproduce the old numbers
+rather than change them. The only expected exclusion remains 2026-07-17, on
+sample coverage.
 
 ### 7. Recompute `daily_cost` at model_version 2
 
