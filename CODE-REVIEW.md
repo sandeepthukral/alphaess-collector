@@ -4,13 +4,20 @@ Date: 2026-07-28
 Reviewer: senior staff engineering review (correctness, security, testing)
 Scope: full repository at commit `cce4419` (branch `simplify-nas-deploy`), ~6.6k lines / 22 files.
 
-> **Scope change, 2026-07-28.** A second project — a separate repository, developed
-> on a different machine — will write to this InfluxDB and render dashboards in
-> this Grafana. That makes the NAS stack *shared infrastructure* rather than one
-> application's private backing store, and it changes the verdict on three existing
-> findings (#3, #5, #6) and adds four new ones (#10–#13). Those are collected under
-> [Shared infrastructure](#shared-infrastructure-second-project). **#6's loopback
-> recommendation is now wrong and is reversed there.**
+> **Scope change, 2026-07-28.** A second project — a separate repository, *developed*
+> on another machine but **deployed as its own container on this same NAS** — will
+> write to this InfluxDB and render dashboards in this Grafana. That makes the stack
+> *shared infrastructure* rather than one application's private backing store: it
+> changes the verdict on three existing findings (#3, #5, #6) and adds five new ones
+> (#10–#14), collected under
+> [Shared infrastructure](#shared-infrastructure-second-project).
+>
+> The deployment topology is what decides most of it. Because both projects run on
+> one Docker daemon, the second project reaches InfluxDB over the **internal Docker
+> network** at `http://influxdb:8086` — not across the LAN. Nothing shared has to be
+> published to a host port at all, except Grafana for your browser. #6's loopback
+> recommendation therefore mostly *stands*, and the sharing is a lifecycle and
+> namespacing problem (#14, #10, #11) rather than a network exposure one.
 
 ## Overall
 
@@ -123,16 +130,18 @@ proxy with org-admin credentials.
 **Fix:** create scoped tokens after `influx setup` and use those. At minimum, don't give the admin
 token to Grafana.
 
-> **Promoted to the top of the list by the second project (2026-07-28).** The
-> second machine needs InfluxDB credentials. If it gets `INFLUX_TOKEN`, then a
-> laptop on the LAN — running code from a different repository, at a different
-> stage of maturity — holds a token that can drop the `alphaess` bucket and
+> **Promoted by the second project (2026-07-28).** The second project needs
+> InfluxDB credentials. If it gets `INFLUX_TOKEN`, a container running code from
+> a different repository — at a different stage of maturity, not covered by this
+> review or these tests — holds a token that can drop the `alphaess` bucket and
 > every day of history in it. There is no undo: this stack has no backup
 > schedule, only the one-off taken during the model_version 2 migration.
 >
-> This is no longer "least privilege as good practice". It is the only thing
-> that would contain a bug in code that isn't reviewed here. **The second
-> project must never receive `INFLUX_TOKEN`.**
+> The token never leaves the NAS, so this is not about interception. It is about
+> **blast radius**: scoped tokens are the only thing that would contain a bug or
+> a mistaken `influx delete` on the other side of the boundary. **The second
+> project must not receive `INFLUX_TOKEN`** — it should get a token that can
+> write only its own bucket.
 
 ### 6. Grafana defaults to `admin`/`admin` and binds to all interfaces
 
@@ -144,30 +153,26 @@ the token from #5. Same for InfluxDB on `0.0.0.0:8086`. On a NAS that's the enti
 default (`127.0.0.1:${GRAFANA_PORT:-3000}:3000`) with a note in `DEPLOY.md` for users who genuinely
 want LAN access.
 
-> **Partly reversed by the second project (2026-07-28).**
+> **Refined by the second project (2026-07-28).** Both halves survive, but they
+> now apply to different services.
 >
 > **The password half stands, and matters more than before.** Grafana's admin
-> account now guards two projects' dashboards, and the datasource proxy behind
-> it can issue arbitrary Flux. Drop `:-admin`.
+> account guards two projects' dashboards, and the datasource proxy behind it can
+> issue arbitrary Flux against every bucket. Drop `:-admin`.
 >
-> **The loopback half is now wrong.** The second project runs on a different
-> machine and must reach InfluxDB on `${INFLUX_PORT}` — and its author will want
-> Grafana on `${GRAFANA_PORT}` too. Binding either to `127.0.0.1` breaks that
-> outright, and the workaround (an SSH tunnel per service, per machine) is not
-> something a homelab keeps working.
+> **The binding half splits by service**, because the second project is a
+> container on this same NAS and reaches InfluxDB over the Docker network at
+> `http://influxdb:8086`. The published host port is not how it connects:
 >
-> LAN exposure is therefore a **requirement**, not an oversight, and the review's
-> original reasoning has to be answered a different way:
+> | Service | Who needs the host port | Recommendation |
+> | --- | --- | --- |
+> | InfluxDB `:8086` | Nobody routinely. Both projects use the internal network; this repo's own admin work goes through `docker compose exec influxdb influx …`. | Bind `127.0.0.1:${INFLUX_PORT:-8086}:8086`. Keeps the UI reachable via an SSH tunnel when you want it, closed the rest of the time. |
+> | Grafana `:3000` | Your browser, from another machine. | **Leave on the LAN.** This is the one genuine exposure, and an SSH tunnel is not a reasonable ask for routine dashboard viewing. |
 >
-> - Scoped tokens (#5) instead of network isolation. This is now the primary
->   control rather than defence in depth.
-> - A real Grafana password, no fallback — the half of #6 that survives.
-> - `INFLUX_PORT`/`GRAFANA_PORT` bound to the LAN interface explicitly rather
->   than by default, so the exposure is a decision recorded in `.env` and not an
->   accident of Docker's default publish behaviour.
->
-> Note what remains true: the token still crosses the LAN over plain HTTP
-> (#13).
+> So the original recommendation was right about InfluxDB and wrong about Grafana.
+> Grafana is then the single LAN-facing surface, holding a token that can read and
+> write everything (#5) behind a password that currently defaults to `admin` —
+> which is precisely why the password half is the more urgent of the two.
 
 ### 7. `sysSn` leaks into the heartbeat URL and logs
 
@@ -209,21 +214,21 @@ Non-root users are set — good. Missing:
 
 ## Shared infrastructure (second project)
 
-Added 2026-07-28. A separate repository on a different machine will write to this
-InfluxDB and render dashboards in this Grafana.
+Added 2026-07-28. A separate repository — developed on another machine, deployed as
+its own container on this same NAS — will write to this InfluxDB and render
+dashboards in this Grafana.
 
 The stack was built on an assumption that is no longer true: that one application
 owns it. Nothing here is a bug today — every item is a collision that appears the
-first time something else provisions into the same Grafana or writes to the same
-InfluxDB. They are cheap to prevent now and awkward to unpick afterwards, because
-by then both sides are live.
+first time something else provisions into the same Grafana, writes to the same
+InfluxDB, or comes up beside these containers. They are cheap to prevent now and
+awkward to unpick afterwards, because by then both sides are live and holding data.
 
 **Decide first, because everything below depends on it: this repository owns the
-stack.** `docker-compose.yml` here defines the InfluxDB and Grafana services and
-their volumes. The second project must *connect to* them, not bring its own — two
-compose files each declaring an `influxdb` service on the same host is a fight
-over ports and volume names that ends in data loss. Write that down in `DEPLOY.md`
-in both repositories.
+stack.** `docker-compose.yml` here defines InfluxDB, Grafana, their volumes, and
+`alphaess-net`. The second project declares all of them `external` and defines none
+of its own. Write that down in `DEPLOY.md` in both repositories — the failure mode
+is not dramatic, it is two databases quietly holding half the data each.
 
 ### 10. Dashboards are provisioned into the root, not into a folder
 
@@ -295,22 +300,66 @@ rule, this repo cannot cleanly follow its own `INFLUX_BUCKET` setting today.
 **Fix order:** #3 (template the bucket) → #12 (create the second bucket) → #5
 (mint scoped tokens for both projects) → hand the second project only its own.
 
-### 13. The InfluxDB token crosses the LAN in cleartext
+### 13. Keep InfluxDB traffic on the Docker network, not the host port
 
-The second machine will reach InfluxDB at `http://<nas>:8086`. InfluxDB
-authenticates with a bearer token in an HTTP header, so on plain HTTP that token is
-readable by anything on the network path, and it is a long-lived credential with no
-rotation story.
+InfluxDB authenticates with a long-lived bearer token in a plain HTTP header. On
+the internal bridge network that is fine — the traffic never leaves the host.
 
-Consequence of the LAN exposure that #6 now requires, so it cannot be solved by
-closing the port. Scoping the token (#5, #12) bounds the damage rather than
-preventing the disclosure.
+The risk is the second project being configured the easy way, with
+`INFLUX_URL=http://<nas-ip>:8086` (the address you would naturally reach for while
+developing on another machine) instead of `http://influxdb:8086`. That works, so
+nothing complains, and it quietly puts an admin-capable token on the LAN in
+cleartext on every write — permanently, because it is in a `.env` nobody revisits.
 
-**Fix:** accept it with the blast radius reduced to one bucket, which is the
-proportionate answer for a trusted home LAN — *provided* #5 is actually done. If
-the LAN is not trusted (guest wifi, shared flat, IoT devices on the same subnet),
-terminate TLS in front of InfluxDB instead. Either way this is a reason to do #5
-first rather than a separate piece of work.
+**Fix:** the second project joins `alphaess-net` (#14) and uses the service name.
+Say so explicitly in its `DEPLOY.md`, with the reason, because the host-IP form is
+the one that will otherwise get copied from a development machine into production.
+
+With that done, the only LAN-facing surface is Grafana (#6), and #13 needs no
+further work.
+
+### 14. Two compose projects, one set of shared services
+
+The second project is a separate `docker-compose.yml` in a separate directory on
+the same Docker daemon. Compose isolates projects by default, which is what makes
+the sharing work — and also what makes each of these silently *not* work:
+
+- **The network name is generated.** `alphaess-net` has no `name:` key, so Docker
+  creates it as `alphaess-collector_alphaess-net` — derived from this repo's
+  directory name. The second project must join it as `external`, which means
+  hardcoding a name that changes if this directory is ever renamed. **Add an
+  explicit `name: alphaess-net`** so the identifier is stable and intentional.
+
+- **MTU is inherited, and only if it joins.** `driver_opts` caps the bridge at
+  1400 to stop large TLS handshakes being dropped on Synology uplinks — the root
+  cause of a real outage here. A container joining `alphaess-net` gets that fix for
+  free. One that creates its own network gets the default 1500 and is exposed to
+  the same failure, which presents as intermittent
+  `SSL: UNEXPECTED_EOF_WHILE_READING` against whatever external API it calls, days
+  apart, with nothing pointing at the network. If the second project talks to an
+  external HTTPS API, this is the highest-value thing to tell its author.
+
+  Note the existing caveat in `docker-compose.yml`: `driver_opts` only apply at
+  network *creation*. If the second project ever declares the network non-external
+  and Docker recreates it, the cap is silently lost.
+
+- **No `depends_on` across projects.** The second project cannot wait for InfluxDB
+  to be healthy. It needs `restart: unless-stopped` and code that tolerates
+  InfluxDB being absent at startup — the same discipline the collector already has.
+
+- **Lifecycle coupling runs one way and is easy to forget.** `docker compose down`
+  in *this* directory stops InfluxDB and Grafana out from under the second project,
+  which will keep running and failing. `docker compose down -v` destroys both
+  projects' data, and the `driver_opts` comment already instructs a `down`/`up`
+  cycle for MTU changes — a documented procedure that now has a side effect on
+  something the runbook never mentions.
+
+**Fix:** state in `DEPLOY.md` that this repository owns InfluxDB, Grafana, and
+`alphaess-net`; that the second project declares all three as external and adds
+none of its own; and that `down -v` here is destructive to both. Add `name:
+alphaess-net`. Two compose files each defining an `influxdb` service on one host is
+the outcome to design against — it ends in two databases, two volumes, and data
+split across them.
 
 ---
 
@@ -400,24 +449,35 @@ changed: it is no longer "worst bug first" but **"what gets harder once the seco
 project is live"**. Anything touching shared identifiers is cheap now and expensive
 after both sides depend on the current names.
 
+0. **#14 `name: alphaess-net`** — one line, and it must exist *before* the second
+   project writes its compose file, because that file will hardcode whatever the
+   network is called. Getting this wrong is the only item here that forces edits in
+   the other repository later.
 1. **#10 dashboard folder** — one line, immediate benefit, and it establishes the
    folder-per-project convention before there is a second project to argue with.
 2. **#3 template the bucket** → **#12 separate buckets** → **#5 scoped tokens**.
-   This chain is the real work, and it is a prerequisite for handing the second
-   project any credential at all. Do not give it `INFLUX_TOKEN` in the meantime;
-   if it needs to start writing before this lands, mint it a throwaway
-   bucket-scoped token by hand and treat that as the migration's first step.
+   The real work, and a prerequisite for handing the second project any credential.
+   Do not give it `INFLUX_TOKEN` in the meantime; if it needs to write before this
+   lands, mint it a throwaway bucket-scoped token by hand and treat replacing that
+   token as the migration's first step.
 3. **#6 password fallback** and **#11 `isDefault` / namespacing** — small, and both
-   are about removing ways for the two projects to interfere.
-4. **#7 `sysSn` redaction** — unchanged in priority; a leak to a third-party
+   are about removing ways for the two projects to interfere. The password one is
+   now the more urgent half of #6, since Grafana stays the one LAN-facing service.
+4. **The `DEPLOY.md` ownership note** (#13, #14) — cheap, and it is what stops the
+   second project being pointed at `http://<nas-ip>:8086` or declaring its own
+   `influxdb`. Worth doing early precisely because it costs nothing.
+5. **#7 `sysSn` redaction** — unchanged in priority; a leak to a third-party
    monitor, and self-contained.
-5. **#9 log rotation** — unbounded disk on a NAS now filling from two projects.
+6. **#9 log rotation** — unbounded disk on a NAS now filling from two projects.
    The rest of #9 (`cap_drop`, `read_only`) is lower value.
-6. **#4 `daily-savings.sh` parsing**, **#8 Flux binding** — neither is currently
+7. **#4 `daily-savings.sh` parsing**, **#8 Flux binding** — neither is currently
    reachable by an attacker or a realistic input; do them when convenient.
 
-#13 (cleartext token) is deliberately absent: it is resolved by doing #5, or
-consciously accepted, not worked on separately.
+**#6's InfluxDB loopback binding is deliberately *not* in this list.** It is right,
+but it should land only once the second project is confirmed to be joining
+`alphaess-net` and using `http://influxdb:8086`. Doing it first would break that
+project the moment it was configured the other way — and the resulting error would
+send its author looking in the wrong repository.
 
 ---
 
@@ -442,7 +502,8 @@ consciously accepted, not worked on separately.
 - [ ] #10 Dashboards provisioned into the `AlphaESS` folder
 - [ ] #11 Provisioning namespacing — drop `isDefault`, document the per-project prefix
 - [ ] #12 Separate bucket for the second project
-- [ ] #13 Cleartext token on the LAN — accepted once #5 is done, or TLS if the LAN is untrusted
+- [ ] #13 Second project uses `http://influxdb:8086`, not the host port — a `DEPLOY.md` note
+- [ ] #14 `name: alphaess-net` + ownership/lifecycle note — **do first**, the other repo will hardcode it
 - [ ] Housekeeping — stale "capped at 5 minutes" in `DEPLOY.md` and the alert rule
 
 ### Notes on the completed items
