@@ -9,7 +9,7 @@ adding steps the outcome revealed. It is not a plan written once up front; it is
 expected to change as we go. The revision log at the bottom records what changed
 and why.
 
-- **Status:** in progress — steps 0–8 done, next is step 9 (compare v1 vs v2)
+- **Status:** in progress — steps 0–9 done, next is step 10 (audit)
 - **Last updated:** 2026-07-28
 - **On the NAS, every `docker` / `docker compose` command needs `sudo`.** All
   commands below are written that way. Shell variables (`$INFLUX_TOKEN`, `$PWD`)
@@ -328,8 +328,18 @@ because the version tag moved, not because any figure was wrong.
 A lower day count under version 1 means only that fewer days had been
 backfilled before today — not a discrepancy.
 
-- [ ] Difference understood: any gap is days that version 2 refused to verify
-- [ ] Version-1 day count minus version-2 day count = ________
+- [x] Difference understood: any gap is days that version 2 refused to verify
+- [x] Version-1 day count minus version-2 day count = **0**
+
+Confirmed 2026-07-28. Version 1 and version 2 are identical on every figure —
+€17.82, 10 days, 36.3 kWh avoided, €0.491/kWh — and every row of the daily
+breakdown matches to the cent. The arithmetic is bit-identical on real data,
+as the pre-deployment synthetic comparison predicted.
+
+**This also proves the panels really filter on `${model_version}`.** Both
+version-1 and version-2 rows now exist for the same ten days, so a panel that
+failed to filter would total €35.64. Both settings read €17.82, so the filter
+is working against a live database, not merely present in the JSON.
 
 ### 10. Run the audit
 
