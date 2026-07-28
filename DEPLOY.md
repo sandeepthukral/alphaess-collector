@@ -190,6 +190,52 @@ re-checks after 3 consecutive poll failures of any kind, as part of the
 local-vs-upstream diagnosis below, so a long-running container still reports
 it.
 
+## Scoped tokens
+
+`INFLUX_TOKEN` is the admin token. It can create and drop buckets, mint other
+tokens, and delete data. Nothing but InfluxDB's own first-start initialisation and
+your manual `influx` CLI work should ever hold it.
+
+Every service gets a token scoped to what it actually does:
+
+| Token | Permissions | Why |
+|---|---|---|
+| `INFLUX_TOKEN_COLLECTOR` | read + write `alphaess` | Writes `power_readings` and `collector_health`. Read as well, because this image also runs `pricing.py`, which queries `daily_cost` to skip days it has already computed and reads `power_readings`/`market_price` to compute them. |
+| `INFLUX_TOKEN_PUSHER` | read `alphaess` | Only ever reads the newest sample. |
+| `INFLUX_TOKEN_GRAFANA` | read on every bucket it charts | Read-only. Anyone who reaches the Grafana UI can issue arbitrary Flux through the datasource proxy, so this is the one most worth keeping narrow. |
+
+None of them have a fallback: compose fails to start and names the missing
+variable. A service that quietly reverted to the admin token would defeat the
+point.
+
+Mint them once, after the stack has started for the first time. `influx auth
+create` needs bucket **IDs**, not names:
+
+```sh
+cd /volume1/docker/alphaess-collector
+set -a; . ./.env; set +a
+
+ALPHAESS_ID=$(sudo docker compose exec -T influxdb influx bucket list \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" --name "$INFLUX_BUCKET" --hide-headers | awk '{print $1}')
+echo "alphaess bucket id: $ALPHAESS_ID"
+
+sudo docker compose exec -T influxdb influx auth create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "collector: rw alphaess" \
+  --read-bucket "$ALPHAESS_ID" --write-bucket "$ALPHAESS_ID"
+
+sudo docker compose exec -T influxdb influx auth create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "awtrix-pusher: r alphaess" \
+  --read-bucket "$ALPHAESS_ID"
+```
+
+Copy each printed token into the matching `.env` variable, then `sudo docker
+compose up -d`. The Grafana token is created the same way but should list a
+`--read-bucket` for every bucket it charts — see below.
+
+> Tokens are shown in full only when created. If you lose one, delete it
+> (`influx auth list` / `influx auth delete`) and mint a replacement; there is no
+> way to read it back.
+
 ## Sharing the stack with another project
 
 Another compose project on the same NAS can use this InfluxDB and Grafana rather
@@ -230,7 +276,61 @@ Three things worth knowing before you write that file:
 
 - **Give it its own bucket and a token scoped to that bucket.** Not
   `INFLUX_TOKEN` — that is the admin token, and it can drop the `alphaess`
-  bucket and all of its history.
+  bucket and all of its history. Retention is a per-bucket property, so a
+  project that needs a different retention than `alphaess`'s infinite one has no
+  alternative to its own bucket.
+
+### The `planning` bucket
+
+The first such project. 400-day retention, measurement `plan`, tag `plan_run`,
+~770 points/day.
+
+```sh
+set -a; . ./.env; set +a
+
+sudo docker compose exec -T influxdb influx bucket create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -n planning -r 400d
+
+PLANNING_ID=$(sudo docker compose exec -T influxdb influx bucket list \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" --name planning --hide-headers | awk '{print $1}')
+
+# For the planning project itself: read alphaess, write planning.
+sudo docker compose exec -T influxdb influx auth create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "planning: r alphaess, w planning" \
+  --read-bucket "$ALPHAESS_ID" --write-bucket "$PLANNING_ID"
+
+# For Grafana: read-only on both, so Flux can join across them.
+sudo docker compose exec -T influxdb influx auth create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "grafana: r alphaess, r planning" \
+  --read-bucket "$ALPHAESS_ID" --read-bucket "$PLANNING_ID"
+```
+
+The second token goes in `INFLUX_TOKEN_GRAFANA` here; the first goes in the
+planning project's own `.env` and never appears in this repository.
+
+> **The planning token cannot read `planning`.** That is deliberate, but it means
+> the project cannot query back what it has written — no idempotent "skip runs
+> already computed", no audit of its own rows. `pricing.py` in this repo relies on
+> exactly that pattern. If the planning code needs it, add read:
+>
+> ```sh
+> sudo docker compose exec -T influxdb influx auth create \
+>   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "planning: r alphaess, rw planning" \
+>   --read-bucket "$ALPHAESS_ID" --read-bucket "$PLANNING_ID" --write-bucket "$PLANNING_ID"
+> ```
+
+**Retention and cardinality.** `plan_run` grows without bound, which is normally
+an InfluxDB anti-pattern — every distinct tag value is a new series. The 400-day
+retention is what makes it safe: InfluxDB drops whole expired shard groups and
+their series leave the index with them, so cardinality settles at roughly
+`runs_per_day × 400 × series_per_run` rather than growing forever. At ~770
+points/day this stays small. Revisit if `plan_run` ever produces more than a few
+thousand retained values.
+
+Two details worth knowing: a 400-day retention uses 7-day shard groups, so data
+is removed up to a week after it expires rather than to the day; and retention
+cannot be enforced per measurement, only per bucket — anything written to
+`planning` inherits the 400 days.
 
 - **`docker compose down` here stops the shared services** out from under the
   other project, which keeps running and failing. `down -v` destroys both
