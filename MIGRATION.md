@@ -376,7 +376,9 @@ sudo sh /volume1/docker/alphaess-collector/scripts/daily-savings.sh
 ```
 
 - [x] Runs clean, processes its 4-day window
-- [ ] Re-running `pricing.py --audit` still reports `0 stale`
+- [x] Re-running `pricing.py --audit` still reports `0 stale` — and every
+      saving is identical to the pre-nightly audit to four decimals, so the
+      price re-fetch rewrote the same values rather than merely appearing to
 
 Confirmed 2026-07-28. Refreshed 96 price rows for 07-24…07-27 (an idempotent
 overwrite — same measurement, tags and timestamps), then logged `already
