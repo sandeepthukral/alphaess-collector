@@ -77,10 +77,13 @@ docker compose cp influxdb:/tmp/influx-backup ./influx-backup-$(date +%F)
 ls -la ./influx-backup-$(date +%F)
 ```
 
-The `-t` is explicit because the container's CLI config is created during first
-setup and is easy to have lost across recreates; passing the token avoids
-depending on it. If `influx backup` fails anyway, snapshot the volume instead —
-this needs no auth at all and is just as good for rollback:
+This is an **online** backup — InfluxDB keeps serving, the collector keeps
+writing, nothing is lost. Prefer it. The `-t` is explicit because the
+container's CLI config is created during first setup and is easy to have lost
+across recreates; passing the token avoids depending on it.
+
+Only if `influx backup` fails, snapshot the volume instead. This needs no auth
+at all, but it **stops the database**, and that is not free:
 
 ```sh
 docker compose stop influxdb
@@ -90,6 +93,19 @@ docker run --rm \
   tar czf /backup/influx-volume-$(date +%F).tgz -C /data .
 docker compose start influxdb
 ```
+
+> **Keep the stop under ~15 minutes.** The collector writes with `SYNCHRONOUS`
+> options — there is no client-side queue, so every poll attempted while
+> InfluxDB is down raises and that sample is gone for good. The resulting hole
+> in `power_readings` is then judged by the very gate you are deploying:
+> `MAX_GAP_S` is 1200 s, so a gap over **20 minutes excludes that whole day**
+> from `daily_cost`. Backoff makes it worse — once the database is back the
+> collector may still be sleeping up to 300 s before it retries, so budget the
+> stop at 20 min *minus* 5 min of backoff. (`MIN_COVERAGE` 0.98 ≈ 29 min is the
+> looser of the two limits; max-gap is the one that bites.) If the tar looks
+> like it will run long, `docker compose stop collector` first and start it
+> afterwards — the gap is no smaller, but you are not also fighting backoff on
+> the way out.
 
 The volume name above is correct as long as the repo sits in a directory called
 `alphaess-collector` (Compose derives the project name from it, and the NAS path
@@ -266,3 +282,4 @@ Queued, deliberately not part of this migration:
 | ---- | ------ |
 | 2026-07-28 | Created. Covers the price-coverage gate, `MODEL_VERSION` 1 → 2, and the collector failure-domain split. |
 | 2026-07-28 | Step 0 rewritten. It wrongly described the work as an uncommitted tree on `simplify-nas-deploy`; that branch was merged as PR #15 and is not part of this round. Now names the four commits on `review-quality-gate-and-tests`. |
+| 2026-07-28 | Step 1: made explicit that `influx backup` is online and the volume-tar fallback is not. Added the downtime budget — writes are `SYNCHRONOUS` with no queue, so samples lost during a stop are permanent, and a gap over `MAX_GAP_S` (20 min) excludes that day from `daily_cost`. |
