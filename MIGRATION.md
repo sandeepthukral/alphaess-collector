@@ -61,11 +61,11 @@ top of `main`:
 | `fix(collector):` | fetch/write failure split |
 | `docs:` | review findings, this runbook |
 
-Pushed and awaiting review. Merge it to `main` before pulling on the NAS —
-step 2 pulls `main`, so nothing below takes effect until it lands.
+Merged to `main` via PR #16, so step 2's plain `git pull` picks it up — the NAS
+stays on `main`, no branch to check out.
 
-- [ ] Branch pushed
-- [ ] Merged to `main`
+- [x] Branch pushed
+- [x] Merged to `main` (PR #16)
 
 ### 1. Back up the InfluxDB volume
 
@@ -76,8 +76,8 @@ same measurement the dashboard reads, so take the backup anyway.
 cd /volume1/docker/alphaess-collector
 set -a; . ./.env; set +a          # so $INFLUX_TOKEN is available below
 
-sudo docker compose exec influxdb influx backup /tmp/influx-backup -t "$INFLUX_TOKEN"
-sudo docker compose cp influxdb:/tmp/influx-backup ./influx-backup-$(date +%F)
+sudo docker compose exec influxdb influx backup /tmp/influx-backup -t "$INFLUX_TOKEN";
+sudo docker compose cp influxdb:/tmp/influx-backup ./influx-backup-$(date +%F);
 ls -la ./influx-backup-$(date +%F)
 ```
 
@@ -257,15 +257,90 @@ sudo sh /volume1/docker/alphaess-collector/scripts/daily-savings.sh
 
 ## Rollback
 
-Nothing here is destructive, so rollback is mostly "put the old code back":
+Nothing in this migration deletes or rewrites anything. The recompute only
+*adds* version-2 rows beside the version-1 rows, which stay exactly as they
+were. So rollback is putting the old code back, and the data follows.
 
-1. `git checkout <previous-commit>` in the repo directory.
-2. `sudo docker compose up -d --build collector awtrix-pusher && sudo docker compose restart grafana`.
-3. The dashboard returns to reading version 1, and every version-1 row is still
-   there — the recompute only *added* version-2 rows alongside them.
+**The commit to return to is `b4d500e`** — `main` immediately before this round
+was merged (PR #15, "Collapse deployment to a single self-contained compose
+file"). Confirm before relying on it:
 
-Restoring the InfluxDB backup from step 1 is only needed if something outside
-this runbook went wrong.
+```sh
+cd /volume1/docker/alphaess-collector
+git log --oneline b4d500e -1     # expect: Merge pull request #15 …
+```
+
+### Full rollback
+
+```sh
+cd /volume1/docker/alphaess-collector
+git checkout b4d500e
+sudo docker compose up -d --build collector awtrix-pusher
+sudo docker compose restart grafana
+```
+
+`MODEL_VERSION` returns to `1` and the dashboard variable returns to `1` with
+it — they move together, which is the whole reason they are pinned by a test.
+Every panel reads the version-1 rows again and the numbers are what they were
+before you started. The version-2 rows stay in the database, orphaned and
+invisible. That is fine; leave them.
+
+Note you are now on a detached HEAD. To get back onto the shipped code later:
+`git checkout main && git pull`.
+
+### Rolling back only part of it
+
+The four commits are independent, so you can drop one without the others:
+
+| Problem | Revert |
+| ------- | ------ |
+| Days you expected are missing from the dashboard | `git revert 136598d` (the pricing gate) |
+| Collector misbehaving on failure | `git revert 7489457` (the fetch/write split) |
+
+Then rebuild as above. Reverting the pricing commit also returns the dashboard
+variable to `1`, since both live in that commit.
+
+### If you want the version-2 rows gone
+
+Not required — they cost a few kilobytes and nothing reads them after a
+rollback. Only if you want a clean database, and **after** confirming the
+backup from step 1 is good:
+
+```sh
+cd /volume1/docker/alphaess-collector
+set -a; . ./.env; set +a
+
+sudo docker compose exec influxdb influx delete \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -b "$INFLUX_BUCKET" \
+  --start 1970-01-01T00:00:00Z --stop $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  --predicate '_measurement="daily_cost" AND model_version="2"'
+```
+
+`model_version` is a tag, so this predicate cannot touch version-1 rows or any
+other measurement. It is still a delete — read it twice before running it.
+
+### Restoring the backup
+
+Only if something went wrong outside this runbook. Nothing in steps 0–11 needs
+it.
+
+```sh
+sudo docker compose stop influxdb collector awtrix-pusher
+sudo docker compose start influxdb
+sudo docker compose exec influxdb influx restore /tmp/influx-backup \
+  -t "$INFLUX_TOKEN" --full
+sudo docker compose start collector awtrix-pusher
+```
+
+If you took the volume-tar fallback instead, restore that by stopping influxdb
+and untarring over the volume — and mind the same downtime budget as step 1.
+
+### After any rollback
+
+`scripts/daily-savings.sh` runs nightly and will start writing version-1 rows
+again for recent days. That is correct behaviour for the old code, not a
+symptom. If you rolled back mid-migration and later roll forward, rerun step 7
+for the affected range.
 
 ---
 
@@ -286,5 +361,6 @@ Queued, deliberately not part of this migration:
 | ---- | ------ |
 | 2026-07-28 | Created. Covers the price-coverage gate, `MODEL_VERSION` 1 → 2, and the collector failure-domain split. |
 | 2026-07-28 | Step 0 rewritten. It wrongly described the work as an uncommitted tree on `simplify-nas-deploy`; that branch was merged as PR #15 and is not part of this round. Now names the four commits on `review-quality-gate-and-tests`. |
+| 2026-07-28 | Rollback expanded: names the exact commit to return to (`b4d500e`), adds per-commit partial reverts, an optional scoped delete of the version-2 rows, the restore procedure, and a note that the nightly job resumes writing version-1 rows afterwards. |
 | 2026-07-28 | Every `docker` / `docker compose` command prefixed with `sudo`, and step 11's script invocation too — the NAS account is not in a docker group, so the runbook as written would have failed on the first command. |
 | 2026-07-28 | Step 1: made explicit that `influx backup` is online and the volume-tar fallback is not. Added the downtime budget — writes are `SYNCHRONOUS` with no queue, so samples lost during a stop are permanent, and a gap over `MAX_GAP_S` (20 min) excludes that day from `daily_cost`. |
