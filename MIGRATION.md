@@ -181,8 +181,22 @@ Expect the startup line (`Polling every 30s for sysSn=…`) and no repeating
 failures. On failure the log lines now name the stage — `Poll failed at fetch`
 or `Poll failed at write`.
 
-- [ ] Collector polling normally
-- [ ] Link MTU line looks right (no warning about exceeding `EXPECTED_MAX_MTU`)
+- [x] Collector polling normally
+- [x] Link MTU line looks right (no warning about exceeding `EXPECTED_MAX_MTU`)
+
+Confirmed 2026-07-28:
+
+```
+Link MTU: eth0=1400 (expected <= 1400)
+Polling every 30s for sysSn=… -> http://influxdb:8086 bucket=alphaess
+```
+
+Two lines and then silence is the pass condition — successful polls log nothing,
+so a quiet log means clean collection. Started `20:37:14`, and step 5's query
+reported the last sample at `20:37:15.040`: its first write after the rebuild.
+
+Note this log cannot diagnose the gap in follow-up 1 — it only reaches back to
+the rebuild. Use the `collector_health` query, which reads stored history.
 
 ### 5. Find the first day of collected data
 
