@@ -238,6 +238,16 @@ Both run in CI on every push and pull request
 - Poll interval floor is 10 s (API rate limit guidance); default is 30 s.
   Check the daily call quota on your open.alphaess.com dashboard.
 - On repeated API failures the collector backs off exponentially, capped at
-  5 minutes.
+  `MAX_BACKOFF_SECONDS` (default 120 s).
+
+  > **`MAX_BACKOFF_SECONDS` and `PRICING_MAX_GAP_S` are coupled.** The backoff
+  > cap sets how long an outage silences the collector, so it sets how big a
+  > gap failed polls leave in `power_readings` — and `pricing.py` discards any
+  > day whose largest gap exceeds `PRICING_MAX_GAP_S` (1200 s). At 120 s, a run
+  > of *k* failed polls leaves `30 + 60 + 120 × (k − 1)` seconds, so eleven
+  > consecutive failures still fit under the gate. Raising the cap for API
+  > politeness costs whole days of savings data unless you raise the gate too.
+  > [tests/test_collector_backoff.py](tests/test_collector_backoff.py) asserts
+  > the two stay compatible.
 - No downsampling: at 30 s intervals a year of data is ~1M points — small
   enough to keep at full resolution forever.
