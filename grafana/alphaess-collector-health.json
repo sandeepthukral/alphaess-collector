@@ -721,6 +721,6 @@
   "timezone": "browser",
   "title": "AlphaESS Collector Health",
   "uid": "alphaess-collector-health",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

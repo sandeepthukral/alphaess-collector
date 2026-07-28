@@ -248,12 +248,20 @@ rule already creates. One line, and it is reproducible — a folder created by h
 in the UI is lost on any rebuild that starts from an empty Grafana volume, whereas
 a provisioned one is not.
 
-Grafana moves an existing provisioned dashboard into the new folder on the next
-start, keyed by UID, so nothing needs recreating. Two caveats: `allowUiUpdates:
-true` is set, so any dashboard edited and saved in the UI may have drifted from the
-file on disk and will be overwritten by the move — check for local edits worth
-keeping first. And the folder is matched by *title*, so it must read exactly
-`AlphaESS` in both files.
+**Setting it is not sufficient on an existing install** — corrected 2026-07-28,
+after the change shipped and the dashboards stayed in the root. Grafana skips a
+provisioned dashboard whose checksum is unchanged, and the Grafana entrypoint
+rewrites the JSON byte-identically on every start, so the files look untouched and
+the new folder is never applied to dashboards that already exist. Fresh installs
+are fine; upgrades are not, and nothing is logged. Nor can the dashboards simply be
+deleted and recreated — Grafana refuses to delete a provisioned dashboard from the
+UI or the API. Bumping the top-level `"version"` in each JSON changes the checksum
+and is what actually applies the folder (`DEPLOY.md`, "If the pull changed the
+dashboard folder").
+
+Two further caveats: `allowUiUpdates: true` is set, so a dashboard saved from the
+UI has drifted from the file and recreation will discard those edits. And the
+folder is matched by *title*, so it must read exactly `AlphaESS` in both files.
 
 The second project should provision its own dashboards into its own named folder,
 by the same mechanism.

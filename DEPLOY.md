@@ -241,6 +241,46 @@ Grafana dashboards from the other project should be provisioned into their own
 folder, with their own provider name, mount path, and dashboard UIDs — Grafana
 resolves collisions silently, by dropping or overwriting.
 
+### If the pull changed the dashboard folder
+
+Same shape of trap as `networks:` above, and just as quiet: `up -d` reprovisions,
+but **existing dashboards do not move**.
+
+Grafana skips a provisioned dashboard whose checksum has not changed, and the
+Grafana entrypoint rewrites the JSON byte-identically on every start — so the
+files look untouched, the update is skipped, and the folder in
+`provisioning/dashboards/dashboards.yml` is never applied to dashboards that are
+already there. A fresh install lands in the right folder. An upgrade does not,
+and logs nothing to explain it.
+
+**Deleting them is not the answer** — Grafana refuses (*"provisioned dashboard
+cannot be deleted"*), from the UI and the API alike, and no setting changes that.
+`disableDeletion` governs whether *provisioning* removes a dashboard when its file
+disappears; it does not grant you permission to delete one by hand.
+
+Change the file instead. Bump the top-level `"version"` in each dashboard JSON:
+
+```sh
+grep -n '^  "version":' grafana/*.json
+```
+
+That is enough — the checksum is over the file's bytes, so any change makes the
+provisioner stop skipping it, and a dashboard it actually processes is written
+into the provider's current folder. Commit the bump so every deployment converges
+on the same state, then:
+
+```sh
+sudo docker compose restart grafana
+sudo docker compose logs grafana 2>&1 | grep -i 'provision' | tail
+```
+
+> `allowUiUpdates: true` means a dashboard saved from the Grafana UI has drifted
+> from the file on disk. Re-provisioning overwrites it from the file, so export
+> anything you edited in the UI and want to keep **before** restarting.
+
+The same trick applies to any provisioned dashboard change that Grafana appears to
+ignore, not just folders.
+
 ## Monitoring that the collector is actually collecting
 
 The poll loop catches every exception and backs off (capped at 5 minutes)
