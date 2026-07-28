@@ -436,7 +436,10 @@ Not blockers. Raised by the step-7 output, recorded so they are not lost.
 
 1. **Recurring ~17-minute collection gap.** Four of ten days peaked at
    916–1052 s against a 1200 s limit. Find the cause before it crosses the
-   threshold and starts silently excluding days:
+   threshold and starts silently excluding days.
+
+   Locate the gaps from the raw samples — `elapsed()` prints the end of every
+   gap over five minutes, with its length:
 
    ```sh
    cd /volume1/docker/alphaess-collector
@@ -446,11 +449,13 @@ Not blockers. Raised by the step-7 output, recorded so they are not lost.
      -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" \
      "from(bucket: \"$INFLUX_BUCKET\")
         |> range(start: 2026-07-17T00:00:00Z)
-        |> filter(fn: (r) => r._measurement == \"collector_health\")
-        |> keep(columns: [\"_time\", \"event\", \"error_class\", \"_field\", \"_value\"])"
+        |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"soc_percent\")
+        |> keep(columns: [\"_time\"])
+        |> elapsed(unit: 1s)
+        |> filter(fn: (r) => r.elapsed > 300)"
    ```
 
-   > Use the `influx` CLI here rather than `python -c`. A pasted multi-line
+   > Use the `influx` CLI rather than `python -c`. A pasted multi-line
    > `python -c` picks up the terminal's continuation indentation and dies with
    > `IndentationError` before it runs; the shell ignores leading whitespace, and
    > Flux ignores it inside the quoted query.
@@ -459,6 +464,26 @@ Not blockers. Raised by the step-7 output, recorded so they are not lost.
    NAS task, a container restart) rather than the AlphaESS API. Either way,
    raising `PRICING_MAX_GAP_S` is the wrong first move — it would hide the
    symptom.
+
+   **Do not use `collector_health` for this.** Two reasons, both found the hard
+   way on 2026-07-28:
+
+   - It was introduced by `d926afe` on **2026-07-27 12:06 CEST**. Every day
+     before that is invisible to it, including three of the four gap days.
+   - `write_health` writes *to InfluxDB* (collector.py:283). If InfluxDB is
+     unreachable or the collector container is not running, the health record is
+     lost along with the samples — exactly the cases that produce a long gap. A
+     gap with no health rows is therefore expected, not evidence about cause.
+
+   What it did show, on 07-27: two `failure` rows 19 s apart, both
+   `RuntimeError: API error code=6007 msg=Sign check error`, both reporting
+   `failures=1`, with no `recovered` row. A single running process cannot
+   produce that — after one failure the counter is 1 and backoff sleeps
+   `min(30 × 2¹, 300)` = 60 s (collector.py:492), so the next failure would be
+   ~60 s later and counted as 2. Two independent counts of 1 mean two separate
+   process starts: a restart between them, or a second collector running
+   alongside the first. `6007` is a signature/auth rejection — clock skew or a
+   bad AppSecret, not a network fault. Worth resolving on its own.
 
 2. **Step change in consumption on 2026-07-26.** Confirm there is a known
    cause, so the dashboard's totals are not read as a model artefact.
