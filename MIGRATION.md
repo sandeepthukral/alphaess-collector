@@ -201,12 +201,30 @@ for fn in ('first', 'last'):
 "
 ```
 
-- [ ] Range noted: `START = ________`  `END = ________` (END = yesterday)
+Query result, 2026-07-28:
+
+```
+first 2026-07-17 08:34:41.191090+00:00
+last  2026-07-28 20:37:15.040659+00:00
+```
+
+- [x] Range noted: `START = 2026-07-17`  `END = 2026-07-27` (END = yesterday;
+      today is incomplete and has no full day to price)
+
+Both scripts take **dates only** (`YYYY-MM-DD`) — they parse with
+`date.fromisoformat`, which rejects a timestamp. The range is inclusive at both
+ends, and the days are local NL days, not UTC.
+
+**Expect `2026-07-17` to be excluded at step 7.** Collection started 08:34 UTC
+= 10:34 CEST, so that day is missing its first ~10.5 hours — past both
+`MAX_GAP_S` (20 min) and `MIN_COVERAGE` (0.98). Its prices are still worth
+fetching in step 6, which does not care about sample coverage. That leaves
+**10 complete days**, 07-18 → 07-27, as the realistic yield.
 
 ### 6. Ensure prices are complete for the whole range
 
 ```sh
-sudo docker compose run --rm collector python prices.py --backfill START END
+sudo docker compose run --rm collector python prices.py --backfill 2026-07-17 2026-07-27
 ```
 
 Watch for `No prices returned for …` lines — those days cannot be computed and
@@ -220,7 +238,7 @@ will be excluded in the next step. That is the correct outcome, not a failure.
 No `--force` needed: no version-2 row exists yet, so every day is reprocessed.
 
 ```sh
-sudo docker compose run --rm collector python pricing.py --backfill START END
+sudo docker compose run --rm collector python pricing.py --backfill 2026-07-17 2026-07-27
 ```
 
 Each accepted day logs `wrote daily_cost`. Days that cannot be verified log
