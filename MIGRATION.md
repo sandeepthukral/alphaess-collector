@@ -460,10 +460,45 @@ Not blockers. Raised by the step-7 output, recorded so they are not lost.
    > `IndentationError` before it runs; the shell ignores leading whitespace, and
    > Flux ignores it inside the quoted query.
 
-   If the gaps cluster at the same wall-clock time, suspect something local (a
-   NAS task, a container restart) rather than the AlphaESS API. Either way,
-   raising `PRICING_MAX_GAP_S` is the wrong first move — it would hide the
-   symptom.
+   **Answered, 2026-07-28.** The four gaps end at:
+
+   | UTC | Local (CEST) | Gap |
+   |---|---|---|
+   | 2026-07-18T00:13:33Z | 02:13 | 1051 s |
+   | 2026-07-21T18:16:35Z | 20:16 | 1037 s |
+   | 2026-07-22T22:45:48Z | 00:45 (local day 07-23) | 916 s |
+   | 2026-07-27T05:30:18Z | 07:30 | 1046 s |
+
+   Scattered across the clock, so not a NAS task. But the *durations* cluster,
+   and they are the collector's own backoff ladder. `remaining = sleep_for -
+   elapsed` (collector.py:494) absorbs the attempt into the sleep, so each cycle
+   is exactly `sleep_for` and the gap from the last good sample is:
+
+   | Consecutive failures | Gap |
+   |---|---|
+   | 3 | 30 + 60 + 120 + 240 = 450 s |
+   | 4 | + 300 = 750 s |
+   | 5 | + 300 = **1050 s** |
+   | 6 | + 300 = **1350 s** |
+
+   1051 / 1046 / 1037 are the 5-failure rung to within a second. 916 s is a
+   variant where attempts overran their own sleep window.
+
+   So the risk is a step, not a slide: `MAX_GAP_S` is 1200 and the next rung is
+   1350. **One additional failed poll takes a day from fine to entirely
+   excluded**, with nothing in between — and four of ten days already sit on the
+   last rung before it.
+
+   The trigger (five failed polls, at random hours) is ordinary upstream
+   flakiness and cannot be fixed here. What inflates it into a 17.5-minute hole
+   is the backoff cap of 300 s (collector.py:492, a bare literal), six times
+   longer than the gate downstream tolerates. Lowering it to 120 s gives
+   `30 + 60 + 120 × (k − 1)`: 570 s at five failures, and **11** consecutive
+   failures rather than 6 before the gate trips, at one call every two minutes
+   instead of every five.
+
+   Raising `PRICING_MAX_GAP_S` remains the wrong move — it would hide the
+   symptom rather than shorten the outage.
 
    **Do not use `collector_health` for this.** Two reasons, both found the hard
    way on 2026-07-28:
