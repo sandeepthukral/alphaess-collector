@@ -4,6 +4,14 @@ Date: 2026-07-28
 Reviewer: senior staff engineering review (correctness, security, testing)
 Scope: full repository at commit `cce4419` (branch `simplify-nas-deploy`), ~6.6k lines / 22 files.
 
+> **Scope change, 2026-07-28.** A second project — a separate repository, developed
+> on a different machine — will write to this InfluxDB and render dashboards in
+> this Grafana. That makes the NAS stack *shared infrastructure* rather than one
+> application's private backing store, and it changes the verdict on three existing
+> findings (#3, #5, #6) and adds four new ones (#10–#13). Those are collected under
+> [Shared infrastructure](#shared-infrastructure-second-project). **#6's loopback
+> recommendation is now wrong and is reversed there.**
+
 ## Overall
 
 The engineering quality here is above average for a homelab project — the comments explain *why*
@@ -82,6 +90,13 @@ least carries a "change the bucket here" comment; the dashboards don't.
 **Fix:** use a Grafana constant/template variable (`${bucket}`) resolved by the same `sed` pass the
 entrypoint already runs for `${DS_ALPHAESS}`.
 
+> **Raised in priority by the second project (2026-07-28).** This was a
+> configurability nit while one application owned the bucket. With a second
+> project writing to the same InfluxDB, the two should be in *separate buckets*
+> (see #12) — so "the bucket name is a literal in four dashboards and one alert
+> rule" becomes the thing standing between you and tenant separation. Do this
+> before, not after, the second project starts writing.
+
 ### 4. `daily-savings.sh` date parsing is fragile
 
 `scripts/daily-savings.sh:31-32`: `echo "$DATES" | awk '{print $1}'` prints field 1 of *every* line.
@@ -108,6 +123,17 @@ proxy with org-admin credentials.
 **Fix:** create scoped tokens after `influx setup` and use those. At minimum, don't give the admin
 token to Grafana.
 
+> **Promoted to the top of the list by the second project (2026-07-28).** The
+> second machine needs InfluxDB credentials. If it gets `INFLUX_TOKEN`, then a
+> laptop on the LAN — running code from a different repository, at a different
+> stage of maturity — holds a token that can drop the `alphaess` bucket and
+> every day of history in it. There is no undo: this stack has no backup
+> schedule, only the one-off taken during the model_version 2 migration.
+>
+> This is no longer "least privilege as good practice". It is the only thing
+> that would contain a bug in code that isn't reviewed here. **The second
+> project must never receive `INFLUX_TOKEN`.**
+
 ### 6. Grafana defaults to `admin`/`admin` and binds to all interfaces
 
 `docker-compose.yml:95` — `GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}`. If `.env`
@@ -117,6 +143,31 @@ the token from #5. Same for InfluxDB on `0.0.0.0:8086`. On a NAS that's the enti
 **Fix:** drop the `:-admin` fallback so a missing password fails loudly, and bind to loopback by
 default (`127.0.0.1:${GRAFANA_PORT:-3000}:3000`) with a note in `DEPLOY.md` for users who genuinely
 want LAN access.
+
+> **Partly reversed by the second project (2026-07-28).**
+>
+> **The password half stands, and matters more than before.** Grafana's admin
+> account now guards two projects' dashboards, and the datasource proxy behind
+> it can issue arbitrary Flux. Drop `:-admin`.
+>
+> **The loopback half is now wrong.** The second project runs on a different
+> machine and must reach InfluxDB on `${INFLUX_PORT}` — and its author will want
+> Grafana on `${GRAFANA_PORT}` too. Binding either to `127.0.0.1` breaks that
+> outright, and the workaround (an SSH tunnel per service, per machine) is not
+> something a homelab keeps working.
+>
+> LAN exposure is therefore a **requirement**, not an oversight, and the review's
+> original reasoning has to be answered a different way:
+>
+> - Scoped tokens (#5) instead of network isolation. This is now the primary
+>   control rather than defence in depth.
+> - A real Grafana password, no fallback — the half of #6 that survives.
+> - `INFLUX_PORT`/`GRAFANA_PORT` bound to the LAN interface explicitly rather
+>   than by default, so the exposure is a decision recorded in `.env` and not an
+>   accident of Docker's default publish behaviour.
+>
+> Note what remains true: the token still crosses the LAN over plain HTTP
+> (#13).
 
 ### 7. `sysSn` leaks into the heartbeat URL and logs
 
@@ -153,6 +204,135 @@ Non-root users are set — good. Missing:
   indefinitely, that's an unbounded disk consumer. Add a `logging` block with `max-size`/`max-file`.
 - `GF_INSTALL_PLUGINS: volkovlabs-echarts-panel` is unpinned and fetched from the internet on every
   start — both a reproducibility and a supply-chain concern. Pin the version.
+
+---
+
+## Shared infrastructure (second project)
+
+Added 2026-07-28. A separate repository on a different machine will write to this
+InfluxDB and render dashboards in this Grafana.
+
+The stack was built on an assumption that is no longer true: that one application
+owns it. Nothing here is a bug today — every item is a collision that appears the
+first time something else provisions into the same Grafana or writes to the same
+InfluxDB. They are cheap to prevent now and awkward to unpick afterwards, because
+by then both sides are live.
+
+**Decide first, because everything below depends on it: this repository owns the
+stack.** `docker-compose.yml` here defines the InfluxDB and Grafana services and
+their volumes. The second project must *connect to* them, not bring its own — two
+compose files each declaring an `influxdb` service on the same host is a fight
+over ports and volume names that ends in data loss. Write that down in `DEPLOY.md`
+in both repositories.
+
+### 10. Dashboards are provisioned into the root, not into a folder
+
+`grafana/provisioning/dashboards/dashboards.yml:5` sets `folder: ""`, so all four
+AlphaESS dashboards land in the top-level Dashboards list.
+
+The `AlphaESS` folder visible in the UI was **not** created by that provider — it
+exists because `grafana/provisioning/alerting/alphaess-staleness.yml:25` declares
+`folder: AlphaESS`, and Grafana creates the folder named by an alert rule. So the
+folder holds the alert rule and nothing else, while the dashboards sit loose beside
+it. That is confusing with one project and unusable with two: the root list becomes
+an unsorted mix of both projects' dashboards, with no way to tell which belongs to
+what.
+
+**Fix:** set `folder: AlphaESS` in `dashboards.yml`, matching the folder the alert
+rule already creates. One line, and it is reproducible — a folder created by hand
+in the UI is lost on any rebuild that starts from an empty Grafana volume, whereas
+a provisioned one is not.
+
+Grafana moves an existing provisioned dashboard into the new folder on the next
+start, keyed by UID, so nothing needs recreating. Two caveats: `allowUiUpdates:
+true` is set, so any dashboard edited and saved in the UI may have drifted from the
+file on disk and will be overwritten by the move — check for local edits worth
+keeping first. And the folder is matched by *title*, so it must read exactly
+`AlphaESS` in both files.
+
+The second project should provision its own dashboards into its own named folder,
+by the same mechanism.
+
+### 11. Grafana provisioning has no namespacing, and collisions are silent
+
+Every provisioning identifier in this repo is either generic or unqualified. Each
+one is a collision waiting for the second project to declare the same thing:
+
+| Identifier | Where | What a collision does |
+| --- | --- | --- |
+| Datasource `name: alphaess`, `uid: alphaess` | `datasources/influxdb.yml:4-5` | Same uid from another file: one definition silently wins, and which one depends on file load order. |
+| `isDefault: true` | `datasources/influxdb.yml:8` | Two defaults: Grafana picks one. Any panel that relies on "default" rather than naming its datasource then reads the **wrong database** and shows plausible, wrong numbers. |
+| Provider `name: alphaess` | `dashboards/dashboards.yml:4` | Provider names must be unique; a duplicate makes Grafana drop one provider and its dashboards never appear. |
+| Provider path `/var/lib/grafana/dashboards` | `dashboards/dashboards.yml:8` | If the second project mounts into the same directory, both providers claim the same files and each deletes dashboards it does not recognise. |
+| Dashboard UIDs | the four `grafana/*.json` | A duplicate UID overwrites the other project's dashboard. |
+| Alert group `alphaess-health`, rule uid `alphaess-data-stale` | `alerting/alphaess-staleness.yml:23,29` | Same uid replaces the rule; the displaced alert stops evaluating, silently. |
+
+The dangerous property they share: **none of these fail loudly.** The failure is a
+dashboard that quietly vanishes, or one that renders the wrong project's data.
+
+**Fix:** the pattern for a shared Grafana is one provider, one folder, one mount
+path, and one uid prefix per project. This repo is already close — the names are
+just unqualified rather than wrong. Concretely: keep `alphaess` as the prefix here,
+document that the second project must use its own throughout, and drop
+`isDefault: true` so that no panel anywhere can depend on which datasource happens
+to be default. Every dashboard in this repo already references `${DS_ALPHAESS}`
+explicitly, so removing the default flag costs nothing.
+
+### 12. Bucket separation, and the token that goes with it
+
+The two projects should write to separate InfluxDB buckets. Same reasoning as
+separate folders — independent retention, independent tokens, and one project's
+`influx delete` typo cannot reach the other's history.
+
+This is the concrete form of #5, and the two must be done together: separate
+buckets are only a boundary if the tokens are scoped to them. The token handed to
+the second project should be **write-only on its own bucket**, and if its
+dashboards live in this Grafana, a **read-only** token for the datasource.
+
+Also affects #3: with the bucket name hardcoded in four dashboards and the alert
+rule, this repo cannot cleanly follow its own `INFLUX_BUCKET` setting today.
+
+**Fix order:** #3 (template the bucket) → #12 (create the second bucket) → #5
+(mint scoped tokens for both projects) → hand the second project only its own.
+
+### 13. The InfluxDB token crosses the LAN in cleartext
+
+The second machine will reach InfluxDB at `http://<nas>:8086`. InfluxDB
+authenticates with a bearer token in an HTTP header, so on plain HTTP that token is
+readable by anything on the network path, and it is a long-lived credential with no
+rotation story.
+
+Consequence of the LAN exposure that #6 now requires, so it cannot be solved by
+closing the port. Scoping the token (#5, #12) bounds the damage rather than
+preventing the disclosure.
+
+**Fix:** accept it with the blast radius reduced to one bucket, which is the
+proportionate answer for a trusted home LAN — *provided* #5 is actually done. If
+the LAN is not trusted (guest wifi, shared flat, IoT devices on the same subnet),
+terminate TLS in front of InfluxDB instead. Either way this is a reason to do #5
+first rather than a separate piece of work.
+
+---
+
+## Housekeeping
+
+Small, unrelated to the findings above.
+
+- **`folder: AlphaESS` in `dashboards.yml`** — the fix from #10, and the item that
+  prompted this section. Also confirm all four dashboards carry consistent `tags`,
+  so they stay findable by tag once a second project's dashboards share the list.
+- **Stale backoff references.** PR #17 lowered the backoff cap from 300 s to a
+  configurable `MAX_BACKOFF_SECONDS` (default 120 s). Two comments still say
+  "capped at 5 minutes": `DEPLOY.md:195` and
+  `grafana/provisioning/alerting/alphaess-staleness.yml:3-4`. Both describe *why*
+  the staleness alert exists, so the wrong number undermines the reasoning rather
+  than just being untidy.
+
+  Worth noting while editing them: the staleness threshold is 300 s and is
+  unrelated to the backoff cap. With the cap at 120 s the two no longer coincide,
+  which is an improvement — a single backoff sleep can no longer be as long as the
+  alert window, so the alert firing now unambiguously means "several failed polls"
+  rather than possibly "one long sleep".
 
 ---
 
@@ -211,12 +391,33 @@ themselves — assert that the integral of a ramp equals `import_wh - export_wh`
 
 ## Suggested order
 
-1. Price-coverage gate (#1) — it's silently corrupting the data you're collecting the data *for*.
-2. Diagnosis/InfluxDB conflation (#2) — makes the alerting actively misleading.
-3. Grafana password default + loopback binding (#6) and scoped tokens (#5).
-4. Test scaffolding + tests for `_accumulate` / `integrate_by_interval` / `compute_day` — these lock
-   in #1 and prevent the next one.
-5. Hardcoded bucket (#3), log rotation (#9), `sysSn` redaction (#7).
+~~1. Price-coverage gate (#1)~~ — done.
+~~2. Diagnosis/InfluxDB conflation (#2)~~ — done.
+~~4. Test scaffolding~~ — done.
+
+**Revised 2026-07-28**, for the remaining items. The ordering principle has
+changed: it is no longer "worst bug first" but **"what gets harder once the second
+project is live"**. Anything touching shared identifiers is cheap now and expensive
+after both sides depend on the current names.
+
+1. **#10 dashboard folder** — one line, immediate benefit, and it establishes the
+   folder-per-project convention before there is a second project to argue with.
+2. **#3 template the bucket** → **#12 separate buckets** → **#5 scoped tokens**.
+   This chain is the real work, and it is a prerequisite for handing the second
+   project any credential at all. Do not give it `INFLUX_TOKEN` in the meantime;
+   if it needs to start writing before this lands, mint it a throwaway
+   bucket-scoped token by hand and treat that as the migration's first step.
+3. **#6 password fallback** and **#11 `isDefault` / namespacing** — small, and both
+   are about removing ways for the two projects to interfere.
+4. **#7 `sysSn` redaction** — unchanged in priority; a leak to a third-party
+   monitor, and self-contained.
+5. **#9 log rotation** — unbounded disk on a NAS now filling from two projects.
+   The rest of #9 (`cap_drop`, `read_only`) is lower value.
+6. **#4 `daily-savings.sh` parsing**, **#8 Flux binding** — neither is currently
+   reachable by an attacker or a realistic input; do them when convenient.
+
+#13 (cleartext token) is deliberately absent: it is resolved by doing #5, or
+consciously accepted, not worked on separately.
 
 ---
 
@@ -224,14 +425,25 @@ themselves — assert that the integral of a ramp equals `import_wh - export_wh`
 
 - [x] #1 Price-coverage gate — `priced_seconds()`, `price_coverage` field, `gate()` check
 - [x] #2 Fetch/write failure-domain split — `stage` tracking + `diagnose_write()`
-- [ ] #3 Hardcoded bucket in dashboards
+- [ ] #3 Hardcoded bucket in dashboards — **prerequisite for #12**
 - [ ] #4 `daily-savings.sh` date parsing
-- [ ] #5 Scoped InfluxDB tokens
-- [ ] #6 Grafana password default + loopback binding
+- [ ] #5 Scoped InfluxDB tokens — **blocks handing the second project credentials**
+- [ ] #6 Grafana password default ~~+ loopback binding~~ (binding half reversed, see #6)
 - [ ] #7 `sysSn` redaction in `error_summary`
 - [ ] #8 Flux parameter binding
 - [ ] #9 Container hardening / log rotation
 - [x] Test scaffolding — pytest + ruff + GitHub Actions, 81 tests
+- [x] Backoff cap vs. pricing gap gate — `MAX_BACKOFF_SECONDS`, PR #17 *(not from this
+      review; found while investigating a recurring collection gap after the
+      model_version 2 migration)*
+
+**Shared infrastructure** (added 2026-07-28):
+
+- [ ] #10 Dashboards provisioned into the `AlphaESS` folder
+- [ ] #11 Provisioning namespacing — drop `isDefault`, document the per-project prefix
+- [ ] #12 Separate bucket for the second project
+- [ ] #13 Cleartext token on the LAN — accepted once #5 is done, or TLS if the LAN is untrusted
+- [ ] Housekeeping — stale "capped at 5 minutes" in `DEPLOY.md` and the alert rule
 
 ### Notes on the completed items
 
