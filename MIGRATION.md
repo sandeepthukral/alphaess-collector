@@ -9,7 +9,7 @@ adding steps the outcome revealed. It is not a plan written once up front; it is
 expected to change as we go. The revision log at the bottom records what changed
 and why.
 
-- **Status:** in progress — steps 0–9 done, next is step 10 (audit)
+- **Status:** in progress — steps 0–10 done, next is step 11 (nightly job)
 - **Last updated:** 2026-07-28
 - **On the NAS, every `docker` / `docker compose` command needs `sudo`.** All
   commands below are written that way. Shell variables (`$INFLUX_TOKEN`, `$PWD`)
@@ -352,9 +352,18 @@ sudo docker compose run --rm collector python pricing.py --audit
 Expect `Audited N stored day(s) at model_version=2: N OK, 0 stale`, plus a count
 of superseded version-1 rows, which are fine to leave in place.
 
-- [ ] `0 stale`
-- [ ] If not zero: the printed `influx delete` commands are the fix — bring the
+- [x] `0 stale`
+- [x] If not zero: the printed `influx delete` commands are the fix — bring the
       output back here before running them
+
+Confirmed 2026-07-28: `Audited 10 stored day(s) at model_version=2: 10 OK, 0
+stale`, plus `10 row(s) remain at an earlier model_version` — the superseded
+version-1 rows, correctly identified and left in place.
+
+The per-day savings the audit prints match step 7 to four decimals. Since the
+audit recomputes each day from raw data rather than reading back what was
+stored, that is an independent check that the results are reproducible and not
+merely persisted.
 
 ### 11. Confirm the nightly job still works
 
