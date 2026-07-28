@@ -241,6 +241,40 @@ Grafana dashboards from the other project should be provisioned into their own
 folder, with their own provider name, mount path, and dashboard UIDs — Grafana
 resolves collisions silently, by dropping or overwriting.
 
+### If the pull changed the dashboard folder
+
+Same shape of trap as `networks:` above, and just as quiet: `up -d` reprovisions,
+but **existing dashboards do not move**.
+
+Grafana skips a provisioned dashboard whose checksum has not changed, and the
+Grafana entrypoint rewrites the JSON byte-identically on every start — so the
+files look untouched, the update is skipped, and the folder in
+`provisioning/dashboards/dashboards.yml` is never applied to dashboards that are
+already there. A fresh install lands in the right folder. An upgrade does not,
+and logs nothing to explain it.
+
+Delete the dashboards and let provisioning recreate them. They are defined by the
+files in `grafana/`, so this is not destructive:
+
+```sh
+set -a; . ./.env; set +a
+
+for uid in alphaess-main alphaess-energy-flow alphaess-battery-savings alphaess-collector-health; do
+  curl -s -u "$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD" \
+    -X DELETE "http://localhost:${GRAFANA_PORT:-3000}/api/dashboards/uid/$uid"
+  echo
+done
+
+sudo docker compose restart grafana
+```
+
+Ticking them in the Dashboards list and clicking **Delete** does the same thing;
+`disableDeletion` is not set, so removing provisioned dashboards is allowed.
+
+> `allowUiUpdates: true` means a dashboard saved from the Grafana UI has drifted
+> from the file on disk. Recreation comes from the file, so export anything you
+> edited in the UI and want to keep **before** deleting.
+
 ## Monitoring that the collector is actually collecting
 
 The poll loop catches every exception and backs off (capped at 5 minutes)

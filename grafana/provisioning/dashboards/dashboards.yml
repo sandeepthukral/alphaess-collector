@@ -7,8 +7,17 @@ providers:
     # landed in the root while that folder held only the alert -- confusing with
     # one project, unusable once a second project's dashboards share the list.
     #
-    # Matched by title, so the two files must agree exactly. Existing dashboards
-    # move here on the next start, keyed by UID; nothing needs recreating.
+    # Matched by title, so the two files must agree exactly.
+    #
+    # !! Changing this does NOT move dashboards that already exist. Grafana
+    # skips a provisioned dashboard whose checksum is unchanged, and the
+    # entrypoint rewrites the JSON byte-identically on every start -- so the
+    # files look untouched and the new folder is never applied. Fresh installs
+    # land in the folder correctly; existing ones stay where they were, with
+    # nothing in the log to say why. Observed on 2026-07-28 upgrading to this
+    # setting. To apply a folder change, delete the dashboards and let
+    # provisioning recreate them -- see DEPLOY.md, "If the pull changed the
+    # dashboard folder".
     folder: AlphaESS
     type: file
     allowUiUpdates: true
