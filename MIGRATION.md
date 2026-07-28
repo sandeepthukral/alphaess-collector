@@ -9,7 +9,7 @@ adding steps the outcome revealed. It is not a plan written once up front; it is
 expected to change as we go. The revision log at the bottom records what changed
 and why.
 
-- **Status:** not started
+- **Status:** in progress — step 1 done, resuming at step 2
 - **Last updated:** 2026-07-28
 - **On the NAS, every `docker` / `docker compose` command needs `sudo`.** All
   commands below are written that way. Shell variables (`$INFLUX_TOKEN`, `$PWD`)
@@ -115,10 +115,18 @@ The volume name above is correct as long as the repo sits in a directory called
 `alphaess-collector` (Compose derives the project name from it, and the NAS path
 matches). Confirm with `sudo docker volume ls | grep influxdb` if unsure.
 
-- [ ] Backup taken and copied off the container
-- [ ] Backup file/directory exists and is non-empty
+- [x] Backup taken and copied off the container — 2026-07-28, a few hours
+      before the code landed. Still valid: nothing has written to InfluxDB
+      since, and the recompute in step 7 has not run yet.
+- [x] Backup file/directory exists and is non-empty
 
 ### 2. Pull the code
+
+> **If you pulled before 2026-07-28 ~20:30 CEST, pull again.** PR #16 merged at
+> that point; anything earlier is `b4d500e` or older and contains none of this
+> round. This is the one step that is not idempotent-by-luck — a stale pull
+> makes steps 3–7 appear to succeed while running the old code, and step 7
+> would then quietly write version-1 rows.
 
 ```sh
 cd /volume1/docker/alphaess-collector
@@ -126,6 +134,11 @@ git pull
 git log --oneline -1
 ```
 
+Expected: `ef64a65 Merge pull request #16 …`. If you get "Already up to date"
+but the SHA is not `ef64a65`, you are on a branch or detached HEAD — `git
+status` will say which, and `git checkout main && git pull` fixes it.
+
+- [ ] `git log --oneline -1` shows `ef64a65`
 - [ ] Working tree updated, no local modifications lost
 
 ### 3. Rebuild the images and restart
@@ -361,6 +374,7 @@ Queued, deliberately not part of this migration:
 | ---- | ------ |
 | 2026-07-28 | Created. Covers the price-coverage gate, `MODEL_VERSION` 1 → 2, and the collector failure-domain split. |
 | 2026-07-28 | Step 0 rewritten. It wrongly described the work as an uncommitted tree on `simplify-nas-deploy`; that branch was merged as PR #15 and is not part of this round. Now names the four commits on `review-quality-gate-and-tests`. |
+| 2026-07-28 | Step 1 marked done (backup taken hours earlier, still valid — nothing has written since). Step 2 gained a warning and an expected SHA: a pull from before PR #16 merged returns "Already up to date" while leaving the old code in place, which would make steps 3–7 look successful and write version-1 rows. |
 | 2026-07-28 | Rollback expanded: names the exact commit to return to (`b4d500e`), adds per-commit partial reverts, an optional scoped delete of the version-2 rows, the restore procedure, and a note that the nightly job resumes writing version-1 rows afterwards. |
 | 2026-07-28 | Every `docker` / `docker compose` command prefixed with `sudo`, and step 11's script invocation too — the NAS account is not in a docker group, so the runbook as written would have failed on the first command. |
 | 2026-07-28 | Step 1: made explicit that `influx backup` is online and the volume-tar fallback is not. Added the downtime budget — writes are `SYNCHRONOUS` with no queue, so samples lost during a stop are permanent, and a gap over `MAX_GAP_S` (20 min) excludes that day from `daily_cost`. |
