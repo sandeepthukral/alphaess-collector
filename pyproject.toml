@@ -1,0 +1,47 @@
+# Dev tooling only — the services themselves are built from the per-service
+# Dockerfiles and requirements.txt files. Nothing here ships in an image.
+
+[project]
+name = "alphaess-collector"
+version = "0.1.0"
+description = "AlphaESS -> InfluxDB collector, Frank Energie pricing, and AWTRIX pusher."
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The services import each other flat (`from prices import ...`), matching the
+# Dockerfile layout where every module lands in /app. Put both source dirs on
+# the path so tests import exactly what runs in production.
+pythonpath = ["collector", "awtrix-pusher"]
+addopts = "-q --strict-markers --strict-config"
+filterwarnings = ["error"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["collector", "awtrix-pusher", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+    "RUF",
+]
+ignore = [
+    "E501",   # line length is handled by the formatter, not enforced on comments
+    # `zip(xs, xs[1:])` is the pairwise idiom throughout the integration code.
+    # B905 would have us pass strict=, which is actively wrong here (the two
+    # sequences differ in length by one, by construction), and RUF007 wants
+    # itertools.pairwise -- a mechanical rewrite of numeric code that is now
+    # pinned by tests but has no other reason to change.
+    "B905",
+    "RUF007",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately reach into private helpers (_accumulate, _already_done).
+"tests/*" = ["SLF001"]

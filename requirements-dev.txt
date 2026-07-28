@@ -1,0 +1,7 @@
+# Development / CI only. Runtime deps live in collector/requirements.txt and
+# awtrix-pusher/requirements.txt; install those too so tests import the real
+# modules rather than stubs.
+-r collector/requirements.txt
+
+pytest==9.1.1
+ruff==0.16.0

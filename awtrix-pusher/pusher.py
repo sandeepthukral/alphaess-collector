@@ -22,7 +22,7 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import requests
 from influxdb_client import InfluxDBClient
@@ -174,7 +174,7 @@ def run_once(client: InfluxDBClient, bucket: str, base_url: str,
              push: bool = True) -> None:
     import json
     fields, newest = query_latest(client, bucket)
-    age = None if newest is None else (datetime.now(timezone.utc) - newest).total_seconds()
+    age = None if newest is None else (datetime.now(UTC) - newest).total_seconds()
     stale = newest is None or (age is not None and age > stale_after)
     apps = build_apps(fields, stale, icons)
     print(f"Latest fields: {json.dumps(fields, indent=2)}")
@@ -210,7 +210,7 @@ def run_loop(client: InfluxDBClient, bucket: str, base_url: str,
                 log.warning("No data in bucket %s, skipping push", bucket)
             else:
                 age = None if newest is None else \
-                    (datetime.now(timezone.utc) - newest).total_seconds()
+                    (datetime.now(UTC) - newest).total_seconds()
                 stale = newest is None or (age is not None and age > stale_after)
                 if stale:
                     log.warning("Data is stale (age %.0fs > %ds), dimming display",
