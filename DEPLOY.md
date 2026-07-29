@@ -32,6 +32,14 @@ Required values: `ALPHAESS_APP_ID`, `ALPHAESS_APP_SECRET`, `ALPHAESS_SYS_SN`,
 `INFLUX_ADMIN_PASSWORD`, `INFLUX_TOKEN` (generate with `openssl rand -hex 32`),
 and `GRAFANA_ADMIN_PASSWORD`.
 
+`GRAFANA_ADMIN_PASSWORD` has **no default** — Grafana is the only service
+published to the LAN, and its datasource proxy can query every bucket the Grafana
+token can read, so a missing key fails loudly instead of coming up on
+admin/admin. Same for the three `INFLUX_TOKEN_*` variables below. Compose
+interpolates the whole file on *every* subcommand, so until those five keys
+exist even `docker compose ps` will refuse, naming the one it wants — that is the
+guard working, not a broken checkout.
+
 Optional: to push live stats to an AWTRIX 3 clock, also set `AWTRIX_HOST` to the
 clock's LAN IP (see [AWTRIX clock display](#awtrix-clock-display) below). Leave
 it blank to skip that feature — the `awtrix-pusher` service just idles.
@@ -44,6 +52,22 @@ if the NAS already uses it:
 - InfluxDB on `8086` — if another InfluxDB uses it, set `INFLUX_PORT=8087`. This
   only affects host access to the InfluxDB UI; Grafana reaches InfluxDB over the
   Docker network on the container port regardless.
+
+### Changing the Grafana admin password
+
+`GF_SECURITY_ADMIN_PASSWORD` is applied **only when Grafana first initialises its
+database**. Editing `GRAFANA_ADMIN_PASSWORD` in `.env` and restarting does
+nothing to an existing install — the old password keeps working and nothing says
+so. Reset it through the CLI instead:
+
+```sh
+sudo docker compose exec grafana \
+  grafana cli --homepath /usr/share/grafana admin reset-admin-password '<new-password>'
+```
+
+(On Grafana images older than 10 the binary is `grafana-cli` rather than `grafana
+cli`.) Update `.env` to match afterwards, so a rebuild from an empty volume comes
+up with the password you actually use.
 
 ## 3. Start the stack
 
@@ -337,9 +361,32 @@ cannot be enforced per measurement, only per bucket — anything written to
   projects' data. Note that the MTU procedure above prescribes exactly that
   `down`/`up` cycle.
 
-Grafana dashboards from the other project should be provisioned into their own
-folder, with their own provider name, mount path, and dashboard UIDs — Grafana
-resolves collisions silently, by dropping or overwriting.
+### Grafana provisioning: one prefix per project
+
+Grafana resolves provisioning collisions **silently** — by dropping a provider,
+overwriting a dashboard, or picking one of two definitions by file load order.
+Nothing fails, nothing is logged; a dashboard just vanishes or charts the other
+project's data. So every identifier is namespaced by project. This repo uses
+`alphaess` throughout; the other project must pick its own prefix and use it for
+all of these:
+
+| Identifier | Here | If both projects use the same value |
+|---|---|---|
+| Datasource `name` / `uid` | `alphaess` | One definition wins, and which one depends on file load order. |
+| Dashboard provider `name` | `alphaess` | Provider names must be unique — Grafana drops one, and its dashboards never appear. |
+| Provider `options.path` | `/var/lib/grafana/dashboards` | Both providers claim the same files, and each deletes the dashboards it does not recognise. Mount somewhere else, e.g. `/var/lib/grafana/dashboards-<prefix>`. |
+| Dashboard `folder` | `AlphaESS` | Not harmful, but the point of the folder is telling the two apart. |
+| Dashboard `uid`s | `grafana/*.json` | A duplicate uid overwrites the other project's dashboard. |
+| Alert group `name` / rule `uid` | `alphaess-health` / `alphaess-data-stale` | The same rule uid replaces the rule; the displaced alert stops evaluating. |
+
+**No datasource sets `isDefault`.** Removed here on purpose: two datasources both
+claiming the default is the one collision with no visible symptom at all, since
+Grafana picks one and any panel that relies on "default" then charts the wrong
+database with plausible-looking numbers. Every panel must name its datasource —
+in this repo they all reference `${DS_ALPHAESS}` and the staleness rule names
+`datasourceUid: alphaess`, so nothing depended on the default. The other project
+should not set it either; if it does, a panel here that someone creates in the UI
+and forgets to point at `alphaess` will read *its* bucket.
 
 ### If the pull changed the dashboard folder
 

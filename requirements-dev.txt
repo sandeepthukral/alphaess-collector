@@ -5,3 +5,6 @@
 
 pytest==9.1.1
 ruff==0.16.0
+# Reading the Grafana provisioning YAML in tests/test_grafana_provisioning.py.
+# Not a runtime dependency of any service -- Grafana reads those files itself.
+PyYAML==6.0.3
