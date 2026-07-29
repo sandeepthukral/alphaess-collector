@@ -181,6 +181,55 @@ docker compose up -d --build
 InfluxDB data lives in the `alphaess-influxdb-data` volume and survives updates.
 Only `down -v` deletes it.
 
+Three kinds of change are **not** applied by that pair, each silently. If a pull
+touched one of them, read the matching section below before assuming you have
+deployed it:
+
+| What changed | Why `up -d` misses it | What to run |
+|---|---|---|
+| `networks:` / `volumes:` | Reused if one already exists under that name | `down` then `up -d` — see below |
+| A file under `grafana/provisioning/` | Read at Grafana startup only | `restart grafana` — see below |
+| A dashboard's folder or other `dashboards.yml` setting | Checksum unchanged, so the dashboard is skipped | Bump the dashboard JSON `"version"` — see below |
+
+### If the pull changed only `grafana/provisioning/`
+
+`up -d` can be a complete no-op, and it will still report success.
+
+Compose recreates a container only when the service's *resolved* config differs
+from the running one. A provisioning file is a bind mount, so editing it changes
+nothing Compose compares — and even a `docker-compose.yml` edit is invisible to
+that diff when the value it resolves to is unchanged. Dropping the
+`GRAFANA_ADMIN_PASSWORD` fallback for a `:?` guard was exactly that: the
+password string stayed the same, so `up -d grafana` printed `Container
+alphaess-collector-grafana-1  Running` and left the old process in place, with
+the new `provisioning/datasources/influxdb.yml` sitting unread inside it.
+
+Read `Running` as "did nothing". `Started` or `Recreated` means it acted.
+
+Grafana re-reads `provisioning/` only at startup, so:
+
+```sh
+sudo docker compose restart grafana
+```
+
+Datasources and alert rules are upserted on every start, so a restart is enough
+for those. Dashboards are not — they are checksum-gated, which is the next
+section.
+
+Verify rather than assume, because Grafana logs datasource provisioning below
+`info` and a successful restart looks identical to one that changed nothing:
+
+```sh
+set -a; . ./.env; set +a
+curl -s -u "admin:$GRAFANA_ADMIN_PASSWORD" \
+  "http://localhost:${GRAFANA_PORT:-3000}/api/datasources" \
+  | grep -o '"name":"[^"]*"\|"isDefault":[a-z]*'
+```
+
+A `401` here means `.env` no longer matches the password the running Grafana was
+initialised with — see [Changing the Grafana admin
+password](#changing-the-grafana-admin-password).
+
 ### If the pull changed `networks:` or `volumes:`
 
 `up -d` is **not** enough. Compose reconciles services (it diffs the config and

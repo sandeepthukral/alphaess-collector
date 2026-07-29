@@ -550,6 +550,26 @@ Two things surfaced while doing it:
    provisioning files. The only behaviour change is that a panel created by hand
    in the UI starts with no datasource selected.
 
+**Applied to the NAS 2026-07-29.** `isDefault: false` confirmed through
+`/api/datasources`. A third deployment trap turned up in the process, and it is
+the same shape as the two under #10 — a config change that reports success and
+did nothing:
+
+3. **`up -d` recreates nothing when the *resolved* config is unchanged.** The
+   `:?` guard altered how `GRAFANA_ADMIN_PASSWORD` resolves, not what it
+   resolves to, and provisioning files are bind-mounted — so Compose diffed an
+   identical spec, printed `Container ... Running`, and left the old process
+   holding the old datasource config. `restart grafana` is what applies a
+   provisioning-only change; `Running` in that output means "did nothing", while
+   `Started`/`Recreated` means it acted. Now a table plus a section in
+   `DEPLOY.md` under "Updating", alongside the `networks:`/`volumes:` and
+   dashboard-checksum cases.
+
+   The pattern across all three: **this stack has no deployment mechanism that
+   fails loudly when a change is not applied.** Verify the change at its
+   destination — the API, the UI, the log — rather than trusting the deploy
+   command's output.
+
 **#5 / #12** — shipped in PR #20 and applied to the live stack on 2026-07-29 via
 `MIGRATION-scoped-tokens.md`, which records the per-step results. Bucket `planning`
 (400 d, ID `1430ea6bb66e9cb1`) alongside `alphaess` (`a83cd3d221d6111b`); four
