@@ -480,6 +480,8 @@ after both sides depend on the current names.
 3. **#6 password fallback** and **#11 `isDefault` / namespacing** — small, and both
    are about removing ways for the two projects to interfere. The password one is
    now the more urgent half of #6, since Grafana stays the one LAN-facing service.
+   *Done 2026-07-29; see the notes below, including the one caveat — the password
+   guard binds only at first init, so the running instance is unchanged.*
 4. **The `DEPLOY.md` ownership note** (#13, #14) — cheap, and it is what stops the
    second project being pointed at `http://<nas-ip>:8086` or declaring its own
    `influxdb`. Worth doing early precisely because it costs nothing.
@@ -505,7 +507,7 @@ send its author looking in the wrong repository.
 - [ ] #3 Hardcoded bucket in dashboards (48 refs across 4 dashboards + the alert rule) — independent of #12
 - [ ] #4 `daily-savings.sh` date parsing
 - [x] #5 Scoped InfluxDB tokens — PR #20, applied on the NAS 2026-07-29 (`MIGRATION-scoped-tokens.md`)
-- [ ] #6 Grafana password default ~~+ loopback binding~~ (binding half reversed, see #6)
+- [x] #6 Grafana password default — `:?` guard, no fallback ~~+ loopback binding~~ (binding half reversed, see #6)
 - [ ] #7 `sysSn` redaction in `error_summary`
 - [ ] #8 Flux parameter binding
 - [ ] #9 Container hardening / log rotation
@@ -517,7 +519,7 @@ send its author looking in the wrong repository.
 **Shared infrastructure** (added 2026-07-28):
 
 - [x] #10 Dashboards provisioned into the `AlphaESS` folder — PR #18, applied by PR #19
-- [ ] #11 Provisioning namespacing — drop `isDefault`, document the per-project prefix
+- [x] #11 Provisioning namespacing — `isDefault` dropped, per-project prefix table in `DEPLOY.md`
 - [x] #12 Separate bucket for the second project — `planning`, 400d retention, created 2026-07-29
 - [x] #13 Second project uses `http://influxdb:8086`, not the host port — `DEPLOY.md`, "Sharing the stack" (PR #18)
 - [x] #14 `name: alphaess-net` + ownership/lifecycle note — PR #18
@@ -525,6 +527,28 @@ send its author looking in the wrong repository.
 - [x] Housekeeping — dashboard tags: already consistent (`alphaess` on all four), no change needed
 
 ### Notes on the completed items
+
+**#6 / #11** — the password half of #6 and all of #11, done together as step 3 of
+the revised order. `GRAFANA_ADMIN_PASSWORD` lost its `:-admin` fallback for a `:?`
+guard, `isDefault: true` is gone from the datasource, and `DEPLOY.md` gained the
+per-project identifier table (datasource uid, provider name, mount path, folder,
+dashboard uids, alert group/rule uid) that the second project needs.
+
+Two things surfaced while doing it:
+
+1. **`GF_SECURITY_ADMIN_PASSWORD` only applies when Grafana first initialises its
+   database.** Changing `.env` and restarting an existing install does nothing and
+   says nothing — the old password keeps working. So the guard protects fresh
+   installs; changing the password later needs `grafana cli admin
+   reset-admin-password`, now documented in `DEPLOY.md`. The live NAS instance
+   therefore keeps whatever password it was created with until that is run.
+2. **Dropping `isDefault` was free, and verified so rather than assumed.** Every
+   query node in all four dashboards names `${DS_ALPHAESS}` or a Grafana built-in
+   (`-- Grafana --`, `__expr__`), and the staleness rule names `datasourceUid:
+   alphaess` — checked by `tests/test_grafana_provisioning.py`, which also pins
+   the no-`isDefault` rule and the `AlphaESS` folder agreeing across the two
+   provisioning files. The only behaviour change is that a panel created by hand
+   in the UI starts with no datasource selected.
 
 **#5 / #12** — shipped in PR #20 and applied to the live stack on 2026-07-29 via
 `MIGRATION-scoped-tokens.md`, which records the per-step results. Bucket `planning`

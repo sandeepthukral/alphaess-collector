@@ -95,7 +95,16 @@ services:
         exec /run.sh
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      # No fallback, on purpose. Grafana is the only service published to the
+      # LAN, its admin account guards more than one project's dashboards, and
+      # the datasource proxy behind it will issue arbitrary Flux against every
+      # bucket the token can read. A `:-admin` default meant a missing or
+      # misspelled .env key came up quietly reachable with admin/admin instead
+      # of failing.
+      #
+      # Only takes effect when Grafana first initialises its database; see
+      # DEPLOY.md, "Changing the Grafana admin password" to change it later.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env -- no default, see DEPLOY.md, "Transfer secrets"}
       # ECharts panel used by the Energy Flow (Sankey) dashboard (not in core Grafana)
       GF_INSTALL_PLUGINS: volkovlabs-echarts-panel
       # Consumed by grafana/provisioning/datasources/influxdb.yml.

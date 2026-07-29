@@ -6,7 +6,18 @@ datasources:
     type: influxdb
     access: proxy
     url: http://influxdb:8086
-    isDefault: true
+    # Deliberately NOT isDefault. This Grafana is shared with other compose
+    # projects on the same host (see DEPLOY.md, "Sharing the stack"), and two
+    # datasources claiming the default is the one collision that fails
+    # invisibly: Grafana picks one, and any panel relying on "default" rather
+    # than naming its datasource then charts the wrong database and shows
+    # plausible, wrong numbers.
+    #
+    # Costs nothing here -- every panel in grafana/*.json references
+    # ${DS_ALPHAESS} and the staleness rule names datasourceUid: alphaess, so
+    # nothing in this repo ever resolved "default". Enforced by
+    # tests/test_grafana_provisioning.py. A panel created by hand in the UI now
+    # starts with no datasource selected; pick "alphaess" explicitly.
     jsonData:
       version: Flux
       organization: $INFLUX_ORG
