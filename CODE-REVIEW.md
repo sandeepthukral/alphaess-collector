@@ -504,7 +504,7 @@ send its author looking in the wrong repository.
 - [x] #2 Fetch/write failure-domain split — `stage` tracking + `diagnose_write()`
 - [ ] #3 Hardcoded bucket in dashboards (48 refs across 4 dashboards + the alert rule) — independent of #12
 - [ ] #4 `daily-savings.sh` date parsing
-- [ ] #5 Scoped InfluxDB tokens — **blocks handing the second project credentials**
+- [x] #5 Scoped InfluxDB tokens — PR #20, applied on the NAS 2026-07-29 (`MIGRATION-scoped-tokens.md`)
 - [ ] #6 Grafana password default ~~+ loopback binding~~ (binding half reversed, see #6)
 - [ ] #7 `sysSn` redaction in `error_summary`
 - [ ] #8 Flux parameter binding
@@ -518,13 +518,37 @@ send its author looking in the wrong repository.
 
 - [x] #10 Dashboards provisioned into the `AlphaESS` folder — PR #18, applied by PR #19
 - [ ] #11 Provisioning namespacing — drop `isDefault`, document the per-project prefix
-- [ ] #12 Separate bucket for the second project
+- [x] #12 Separate bucket for the second project — `planning`, 400d retention, created 2026-07-29
 - [x] #13 Second project uses `http://influxdb:8086`, not the host port — `DEPLOY.md`, "Sharing the stack" (PR #18)
 - [x] #14 `name: alphaess-net` + ownership/lifecycle note — PR #18
 - [ ] Housekeeping — stale "capped at 5 minutes" in `DEPLOY.md` and the alert rule
 - [x] Housekeeping — dashboard tags: already consistent (`alphaess` on all four), no change needed
 
 ### Notes on the completed items
+
+**#5 / #12** — shipped in PR #20 and applied to the live stack on 2026-07-29 via
+`MIGRATION-scoped-tokens.md`, which records the per-step results. Bucket `planning`
+(400 d, ID `1430ea6bb66e9cb1`) alongside `alphaess` (`a83cd3d221d6111b`); four
+scoped tokens; `INFLUX_TOKEN` now reaches only InfluxDB's own init. Cutover took
+seconds, against the 20-minute `MAX_GAP_S` budget.
+
+Three things worth remembering:
+
+1. **Compose interpolates the whole file on *every* subcommand.** Once the `:?`
+   guards landed, `docker compose exec` and even `ps` failed until the new
+   variables existed — so the InfluxDB work has to run through plain `docker exec`,
+   which needs no interpolation. The runbook was written the other way round and
+   could not reach its own step 4.
+2. **Verify tokens before cutting over, not after.** Scoping was confirmed from the
+   `Permissions` column at creation, then each token exercised while the admin
+   token was still live. The negative check — the pusher's write returning
+   `403 insufficient permissions` — is the only one that catches a token broader
+   than intended.
+3. **Write-only was too tight for the planning token.** It was minted `w planning`
+   as specified, then re-minted the same day as `rw planning` before deployment:
+   without read on its own bucket, that project can neither skip runs it has already
+   computed nor audit its own output. It still cannot write `alphaess`, which is the
+   guarantee that actually matters here.
 
 **#10 / #13 / #14** — shipped in PR #18, with PR #19 supplying the part that made
 #10 take effect. Two Grafana behaviours cost a deployment round each and are worth

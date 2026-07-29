@@ -1,6 +1,7 @@
 # Migration: scoped tokens and the `planning` bucket
 
-Status: **not started**
+Status: **complete on this stack (steps 0–6, 8); step 7 is on the planning
+project's side**
 Last updated: 2026-07-29
 
 > Every `docker` command here runs on the NAS and needs `sudo`.
@@ -15,7 +16,7 @@ component) and **#12** (a separate bucket for the second project).
 | collector | admin token | read+write `alphaess` |
 | awtrix-pusher | admin token | read `alphaess` |
 | Grafana | admin token | read `alphaess` + read `planning` |
-| planning project | — | read `alphaess`, write `planning` |
+| planning project | — | read `alphaess`, read+write `planning` |
 | `INFLUX_TOKEN` | held by four services | InfluxDB init and your CLI only |
 
 Two anchor facts:
@@ -37,7 +38,7 @@ Two anchor facts:
 
 ## Step 0 — Preconditions
 
-- [ ] On `main`, up to date, and this file present.
+- [x] On `main`, up to date, and this file present.
 
 ```sh
 cd /volume1/docker/alphaess-collector
@@ -53,7 +54,7 @@ git log --oneline -1
 > Plain `docker exec` talks to the running container directly and needs no
 > interpolation, so the InfluxDB work below happens on today's stack, untouched.
 
-- [ ] Load `.env` and find the running InfluxDB container:
+- [x] Load `.env` and find the running InfluxDB container:
 
 ```sh
 set -a; . ./.env; set +a
@@ -61,7 +62,9 @@ INFLUXC=$(sudo docker ps --format '{{.Names}}' | grep influxdb)
 echo "container=$INFLUXC bucket=$INFLUX_BUCKET org=$INFLUX_ORG token=${INFLUX_TOKEN:+set}"
 ```
 
-All four must be non-empty. If `token=` is blank, see the note below.
+All four *values on that one line* must be non-empty — it is a single `echo`, so
+one line of output is correct. A failure looks like `container=` with nothing
+after it. If `token=` is blank, see the note below.
 
 > **If `.env` contains a `HEARTBEAT_URL` with a query string**, sourcing it in a
 > shell breaks: the `&` separators make the shell background the line and treat
@@ -71,7 +74,7 @@ All four must be non-empty. If `token=` is blank, see the note below.
 > compose strips back off, so the container sees the same URL. Only the shell
 > needs the quotes; sourcing is otherwise unaffected and later lines still load.
 
-- [ ] Note the admin token still works:
+- [x] Note the admin token still works:
 
 ```sh
 sudo docker exec -i "$INFLUXC" influx bucket list -t "$INFLUX_TOKEN" -o "$INFLUX_ORG"
@@ -81,14 +84,14 @@ Expect the `alphaess` bucket listed.
 
 ## Step 1 — Create the `planning` bucket
 
-- [ ] 400-day retention, per the planning project's requirement.
+- [x] 400-day retention, per the planning project's requirement.
 
 ```sh
 sudo docker exec -i "$INFLUXC" influx bucket create \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -n planning -r 400d
 ```
 
-- [ ] Capture both bucket IDs — `influx auth create` takes IDs, not names:
+- [x] Capture both bucket IDs — `influx auth create` takes IDs, not names:
 
 ```sh
 ALPHAESS_ID=$(sudo docker exec -i "$INFLUXC" influx bucket list \
@@ -101,11 +104,14 @@ echo "alphaess=$ALPHAESS_ID planning=$PLANNING_ID"
 Both must be non-empty 16-character hex IDs. If either is blank, stop — every
 later step depends on them.
 
-_Result:_
+_Result:_ done 2026-07-29. `planning` created, retention reported as `9600h0m0s`
+(the CLI normalises `400d` to hours — the same thing), shard group duration 168h.
+Bucket IDs: `alphaess=a83cd3d221d6111b`, `planning=1430ea6bb66e9cb1`,
+org `8058d984ecb8f7e2`.
 
 ## Step 2 — Mint the tokens
 
-- [ ] Four `influx auth create` calls. Each prints its token **once**.
+- [x] Four `influx auth create` calls. Each prints its token **once**.
 
 ```sh
 sudo docker exec -i "$INFLUXC" influx auth create \
@@ -128,14 +134,34 @@ sudo docker exec -i "$INFLUXC" influx auth create \
 Copy all four somewhere before moving on. They cannot be displayed again — a lost
 token has to be deleted and replaced.
 
-_Result:_
+_Result:_ done 2026-07-29. All four minted, and the `Permissions` column of each
+confirmed the scoping at creation time. Auth IDs (for `influx auth delete`, if
+one ever needs replacing — the token values are not recorded here):
+
+| Auth ID | Description | Permissions |
+|---|---|---|
+| `1117dbe7d0d50000` | collector: rw alphaess | read + write `a83c…` |
+| `1117dbf766550000` | awtrix-pusher: r alphaess | read `a83c…` |
+| `1117dbffcc950000` | grafana: r alphaess, r planning | read `a83c…`, read `1430…` |
+| ~~`1117dc0865550000`~~ | ~~planning: r alphaess, w planning~~ | deleted 2026-07-29, replaced below |
+| `1117e38ce1150000` | planning: r alphaess, rw planning | read `a83c…`, read + write `1430…` |
+
+> The planning token was re-minted the same day with **read on its own bucket**
+> added, before it was ever deployed — the write-only version could not support an
+> idempotent "skip runs already computed" or any self-audit. The trade is real but
+> small: that project can now act on its own history, so it no longer has a
+> write-only guarantee. It still cannot write `alphaess`.
+
+> `influx auth create` prints the token **and** its permissions. Reading that
+> column back is the cheapest possible check that `--read-bucket` twice actually
+> produced two read grants, before any of step 3 runs.
 
 ## Step 3 — Verify each token before cutting over
 
 The point of the whole runbook. Test with the old tokens still live, so a mistake
 costs nothing.
 
-- [ ] Collector token can read **and** write `alphaess`:
+- [x] Collector token can read **and** write `alphaess`:
 
 ```sh
 COLLECTOR_TOKEN=paste_here
@@ -152,7 +178,7 @@ sudo docker exec -i "$INFLUXC" influx write \
 Both must succeed. (The probe point is harmless — a one-off in its own
 measurement, never queried by anything.)
 
-- [ ] Pusher token can read, and **cannot** write:
+- [x] Pusher token can read, and **cannot** write:
 
 ```sh
 PUSHER_TOKEN=paste_here
@@ -168,7 +194,7 @@ sudo docker exec -i "$INFLUXC" influx write \
 The read must succeed and **the write must fail** with an authorization error. A
 write that succeeds means the token is not scoped as intended — stop and re-mint.
 
-- [ ] Grafana token can read both buckets:
+- [x] Grafana token can read both buckets:
 
 ```sh
 GRAFANA_TOKEN=paste_here
@@ -186,11 +212,19 @@ The first returns rows. The second returns **no rows but no error** — `plannin
 is empty. An authorization error there means the second `--read-bucket` did not
 take.
 
-_Result:_
+_Result:_ done 2026-07-29, all three tokens verified while the admin token was
+still in service. The negative check produced exactly the intended error:
+
+```
+Error: failed to write data: 403 Forbidden: insufficient permissions for write
+```
+
+The remaining five commands returned without error. One `migration_probe` point
+was written by the collector token — removed in step 8.
 
 ## Step 4 — Put them in `.env`
 
-- [ ] Add three variables. `INFLUX_TOKEN` stays as it is.
+- [x] Add three variables. `INFLUX_TOKEN` stays as it is.
 
 ```
 INFLUX_TOKEN_COLLECTOR=...
@@ -198,7 +232,7 @@ INFLUX_TOKEN_PUSHER=...
 INFLUX_TOKEN_GRAFANA=...
 ```
 
-- [ ] Confirm compose resolves before touching the running stack:
+- [x] Confirm compose resolves before touching the running stack:
 
 ```sh
 sudo docker compose config -q && echo "compose OK"
@@ -207,11 +241,13 @@ sudo docker compose config -q && echo "compose OK"
 A missing variable fails here, by name, with a pointer to `DEPLOY.md` — which is
 the whole reason there are no fallbacks.
 
-_Result:_
+_Result:_ done 2026-07-29. `compose OK` — the first successful `docker compose`
+command since pulling this branch, and the point at which the `:?` guards stop
+blocking. The running stack was still untouched at this point.
 
 ## Step 5 — Cut over
 
-- [ ] The only step with downtime. Expect well under a minute.
+- [x] The only step with downtime. Expect well under a minute.
 
 ```sh
 sudo docker compose up -d
@@ -221,11 +257,14 @@ sudo docker compose ps
 `up -d` recreates the three services whose environment changed. InfluxDB itself is
 untouched.
 
-_Result:_
+_Result:_ done 2026-07-29 20:07. Grafana, collector and awtrix-pusher recreated
+and started in ~6 s; influxdb reported `Up 23 hours (healthy)` throughout, so it
+was never restarted. Actual downtime was seconds, against the 20-minute
+`MAX_GAP_S` budget.
 
 ## Step 6 — Verify the running stack
 
-- [ ] Collector polling, no auth errors:
+- [x] Collector polling, no auth errors:
 
 ```sh
 sudo docker compose logs --tail 30 collector
@@ -233,7 +272,7 @@ sudo docker compose logs --tail 30 collector
 
 Expect the MTU line and `Polling every 30s ...`, and **no** 401/unauthorized.
 
-- [ ] Data still arriving — the read end, not the writer's own claim:
+- [x] Data still arriving — the read end, not the writer's own claim:
 
 ```sh
 sudo docker compose exec -T influxdb influx query \
@@ -243,16 +282,29 @@ sudo docker compose exec -T influxdb influx query \
      |> last()"
 ```
 
-- [ ] Pusher healthy:
+- [x] Pusher healthy:
 
 ```sh
 sudo docker compose logs --tail 20 awtrix-pusher
 ```
 
-- [ ] Grafana dashboards render, including **Battery Savings** (it reads
+- [x] Grafana dashboards render, including **Battery Savings** (it reads
       `daily_cost`, so it exercises more than the live feed).
 
-_Result:_
+> A healthy pusher logs **nothing** at INFO after its banner: a successful push
+> is `log.debug` (`pusher.py`), while an auth failure raises through
+> `log.exception("Push cycle failed ...")` and stale or absent data warns. Silence
+> is the pass condition, not missing output.
+
+_Result:_ done 2026-07-29. Collector logged the MTU line and
+`Polling every 30s ... bucket=alphaess` with no 401. An admin-token query
+confirmed all five `power_readings` fields written at 20:09:23 — after the 20:07
+restart — so the scoped collector token authenticated against the real write path.
+Pusher quiet after its banner (see above). Grafana on `:3002` renders, **Battery
+Savings** included — €23.58 over 11 days at `model_version` 2, with the daily
+breakdown populated back to 2026-07-20, which exercises the Grafana token against
+`daily_cost` and not just the live feed. Uptime Kuma still receiving heartbeats,
+independent confirmation of a complete poll→write cycle.
 
 ## Step 7 — Hand over to the planning project
 
@@ -261,34 +313,63 @@ _Result:_
 - [ ] That project uses `INFLUX_URL=http://influxdb:8086` and joins
       `alphaess-net` as external — see `DEPLOY.md`, "Sharing the stack".
 
-> Its token can write `planning` but **not read it**, as specified. If that
-> project needs to query back its own rows — an idempotent "skip runs already
-> computed", or an audit — it needs read as well; the replacement command is in
-> `DEPLOY.md`.
+> Its token reads `alphaess` and reads+writes `planning` — auth
+> `1117e38ce1150000`. It **cannot** write `alphaess`, so a bug there cannot touch
+> this project's history. Name it plain `INFLUX_TOKEN` on that side: it is the only
+> token that project holds, and the `INFLUX_TOKEN_*` suffixes here exist only
+> because one `.env` feeds three services.
 
 _Result:_
 
 ## Step 8 — Clean up
 
-- [ ] Remove the probe points written in step 3:
+- [x] Remove the probe points written in step 3. Count first, delete, then confirm
+      the real measurements are untouched:
 
 ```sh
+sudo docker compose exec -T influxdb influx query \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" \
+  "from(bucket: \"$INFLUX_BUCKET\") |> range(start: <today>T00:00:00Z)
+     |> filter(fn: (r) => r._measurement == \"migration_probe\") |> count()"
+
 sudo docker compose exec -T influxdb influx delete \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -b "$INFLUX_BUCKET" \
-  --start 1970-01-01T00:00:00Z --stop $(date -u +%Y-%m-%dT%H:%M:%SZ) \
+  --start <today>T00:00:00Z --stop $(date -u +%Y-%m-%dT%H:%M:%SZ) \
   --predicate '_measurement="migration_probe"'
+
+sudo docker compose exec -T influxdb influx query \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" \
+  "from(bucket: \"$INFLUX_BUCKET\") |> range(start: -10m)
+     |> filter(fn: (r) => r._measurement == \"power_readings\") |> count()"
 ```
 
-- [ ] Confirm the admin token is no longer handed to any service:
+> **`--start` is deliberately today, not the epoch.** This is the only destructive
+> command in the runbook, and `influx delete` with a range but no *effective*
+> predicate deletes everything in that range — irreversibly, with no tombstone to
+> revert. Scoping the range to the day the probe was written means a lost or
+> mangled `--predicate` costs one day, not the entire history. The final query is
+> the check that actually matters: `power_readings` still counting.
+>
+> Skipping this step is also defensible — it is one point in a measurement nothing
+> queries, and the only cost is `migration_probe` appearing in measurement lists.
+
+- [x] Confirm the admin token is no longer handed to any service:
 
 ```sh
-sudo docker compose config | grep -c "$INFLUX_TOKEN"
+sudo docker compose config | grep -cF -- "$INFLUX_TOKEN"
 ```
+
+> `-F --` matters: tokens are base64 and contain `.`, `+` and `/`, which a basic
+> regex would interpret. Keep the pipe, too — `docker compose config` alone prints
+> every secret in the file to the terminal.
 
 Expect **1** — `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN` on the influxdb service, which
 is what initialises a fresh install.
 
-_Result:_
+_Result:_ done 2026-07-29. Probe points deleted with the range narrowed to the day
+they were written; `power_readings` confirmed still arriving afterwards.
+`grep -cF` returned **1** — `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN` on the influxdb
+service, and nothing else. The admin token is out of every application's hands.
 
 ---
 
@@ -344,6 +425,20 @@ sudo docker compose exec -T influxdb influx bucket delete \
   collide with.
 
 ## Revision log
+
+- 2026-07-29 — planning token re-minted as `r alphaess, rw planning` and the
+  write-only one deleted, before deployment. Read on its own bucket is what an
+  idempotent "skip runs already computed" needs; cheaper to change before the other
+  project is configured than after.
+
+- 2026-07-29 — step 8's delete narrowed from `--start 1970-01-01` to the day the
+  probe was written, and given count-before / verify-after queries. The epoch
+  start bought nothing and made a lost `--predicate` cost the whole history.
+  `grep` given `-F --` for base64 tokens.
+
+- 2026-07-29 — steps 0–4 run on the NAS; results recorded inline. Clarified
+  "all four must be non-empty" in step 0, which reads as *four lines of output*
+  rather than four values on one line.
 
 - 2026-07-29 — steps 0–3 moved off `docker compose` onto plain `docker exec`,
   found on the first run: compose interpolates the whole file on *every*
