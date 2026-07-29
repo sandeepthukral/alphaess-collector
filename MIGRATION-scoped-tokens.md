@@ -1,7 +1,7 @@
 # Migration: scoped tokens and the `planning` bucket
 
 Status: **not started**
-Last updated: 2026-07-28
+Last updated: 2026-07-29
 
 > Every `docker` command here runs on the NAS and needs `sudo`.
 
@@ -45,31 +45,55 @@ git pull
 git log --oneline -1
 ```
 
-- [ ] Note the admin token still works:
+> **Steps 0–3 deliberately avoid `docker compose`.** Once this branch is pulled,
+> compose refuses *every* subcommand — `exec` and `ps` included, not just `up` —
+> until the three new variables exist, because it interpolates the whole file
+> before doing anything. The error is the `:?` guard working:
+> `required variable INFLUX_TOKEN_COLLECTOR is missing a value`.
+> Plain `docker exec` talks to the running container directly and needs no
+> interpolation, so the InfluxDB work below happens on today's stack, untouched.
+
+- [ ] Load `.env` and find the running InfluxDB container:
 
 ```sh
 set -a; . ./.env; set +a
-sudo docker compose exec -T influxdb influx bucket list -t "$INFLUX_TOKEN" -o "$INFLUX_ORG"
+INFLUXC=$(sudo docker ps --format '{{.Names}}' | grep influxdb)
+echo "container=$INFLUXC bucket=$INFLUX_BUCKET org=$INFLUX_ORG token=${INFLUX_TOKEN:+set}"
 ```
 
-Expect the `alphaess` bucket listed. **Do not `up -d` yet** — compose now requires
-the three new variables and will refuse to start until step 4.
+All four must be non-empty. If `token=` is blank, see the note below.
+
+> **If `.env` contains a `HEARTBEAT_URL` with a query string**, sourcing it in a
+> shell breaks: the `&` separators make the shell background the line and treat
+> the rest as separate assignments (you will see `[1]+ Done  HEARTBEAT_URL=...`
+> and a stray `ping=` in `env`). Quote the value in `.env` —
+> `HEARTBEAT_URL='http://host:3001/api/push/xxx?status=up&msg=OK&ping='` — which
+> compose strips back off, so the container sees the same URL. Only the shell
+> needs the quotes; sourcing is otherwise unaffected and later lines still load.
+
+- [ ] Note the admin token still works:
+
+```sh
+sudo docker exec -i "$INFLUXC" influx bucket list -t "$INFLUX_TOKEN" -o "$INFLUX_ORG"
+```
+
+Expect the `alphaess` bucket listed.
 
 ## Step 1 — Create the `planning` bucket
 
 - [ ] 400-day retention, per the planning project's requirement.
 
 ```sh
-sudo docker compose exec -T influxdb influx bucket create \
+sudo docker exec -i "$INFLUXC" influx bucket create \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -n planning -r 400d
 ```
 
 - [ ] Capture both bucket IDs — `influx auth create` takes IDs, not names:
 
 ```sh
-ALPHAESS_ID=$(sudo docker compose exec -T influxdb influx bucket list \
+ALPHAESS_ID=$(sudo docker exec -i "$INFLUXC" influx bucket list \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" --name "$INFLUX_BUCKET" --hide-headers | awk '{print $1}')
-PLANNING_ID=$(sudo docker compose exec -T influxdb influx bucket list \
+PLANNING_ID=$(sudo docker exec -i "$INFLUXC" influx bucket list \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" --name planning --hide-headers | awk '{print $1}')
 echo "alphaess=$ALPHAESS_ID planning=$PLANNING_ID"
 ```
@@ -84,19 +108,19 @@ _Result:_
 - [ ] Four `influx auth create` calls. Each prints its token **once**.
 
 ```sh
-sudo docker compose exec -T influxdb influx auth create \
+sudo docker exec -i "$INFLUXC" influx auth create \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "collector: rw alphaess" \
   --read-bucket "$ALPHAESS_ID" --write-bucket "$ALPHAESS_ID"
 
-sudo docker compose exec -T influxdb influx auth create \
+sudo docker exec -i "$INFLUXC" influx auth create \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "awtrix-pusher: r alphaess" \
   --read-bucket "$ALPHAESS_ID"
 
-sudo docker compose exec -T influxdb influx auth create \
+sudo docker exec -i "$INFLUXC" influx auth create \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "grafana: r alphaess, r planning" \
   --read-bucket "$ALPHAESS_ID" --read-bucket "$PLANNING_ID"
 
-sudo docker compose exec -T influxdb influx auth create \
+sudo docker exec -i "$INFLUXC" influx auth create \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "planning: r alphaess, w planning" \
   --read-bucket "$ALPHAESS_ID" --write-bucket "$PLANNING_ID"
 ```
@@ -116,11 +140,11 @@ costs nothing.
 ```sh
 COLLECTOR_TOKEN=paste_here
 
-sudo docker compose exec -T influxdb influx query \
+sudo docker exec -i "$INFLUXC" influx query \
   -t "$COLLECTOR_TOKEN" -o "$INFLUX_ORG" \
   "from(bucket: \"$INFLUX_BUCKET\") |> range(start: -10m) |> limit(n: 1)"
 
-sudo docker compose exec -T influxdb influx write \
+sudo docker exec -i "$INFLUXC" influx write \
   -t "$COLLECTOR_TOKEN" -o "$INFLUX_ORG" -b "$INFLUX_BUCKET" \
   "migration_probe value=1"
 ```
@@ -133,11 +157,11 @@ measurement, never queried by anything.)
 ```sh
 PUSHER_TOKEN=paste_here
 
-sudo docker compose exec -T influxdb influx query \
+sudo docker exec -i "$INFLUXC" influx query \
   -t "$PUSHER_TOKEN" -o "$INFLUX_ORG" \
   "from(bucket: \"$INFLUX_BUCKET\") |> range(start: -10m) |> limit(n: 1)"
 
-sudo docker compose exec -T influxdb influx write \
+sudo docker exec -i "$INFLUXC" influx write \
   -t "$PUSHER_TOKEN" -o "$INFLUX_ORG" -b "$INFLUX_BUCKET" "migration_probe value=1"
 ```
 
@@ -149,11 +173,11 @@ write that succeeds means the token is not scoped as intended — stop and re-mi
 ```sh
 GRAFANA_TOKEN=paste_here
 
-sudo docker compose exec -T influxdb influx query \
+sudo docker exec -i "$INFLUXC" influx query \
   -t "$GRAFANA_TOKEN" -o "$INFLUX_ORG" \
   "from(bucket: \"$INFLUX_BUCKET\") |> range(start: -10m) |> limit(n: 1)"
 
-sudo docker compose exec -T influxdb influx query \
+sudo docker exec -i "$INFLUXC" influx query \
   -t "$GRAFANA_TOKEN" -o "$INFLUX_ORG" \
   "from(bucket: \"planning\") |> range(start: -10m)"
 ```
@@ -320,6 +344,12 @@ sudo docker compose exec -T influxdb influx bucket delete \
   collide with.
 
 ## Revision log
+
+- 2026-07-29 — steps 0–3 moved off `docker compose` onto plain `docker exec`,
+  found on the first run: compose interpolates the whole file on *every*
+  subcommand, so the new `:?` guards blocked `exec` too, and the runbook could
+  not reach the step that adds the variables. Also documented the `&` in a
+  Kuma `HEARTBEAT_URL` breaking `. ./.env`.
 
 - 2026-07-28 — written, from the planning project's stated requirements: bucket
   `planning`, 400-day retention, measurement `plan`, tag `plan_run`, ~770
