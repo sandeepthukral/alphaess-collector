@@ -484,7 +484,10 @@ after both sides depend on the current names.
    guard binds only at first init, so the running instance is unchanged.*
 4. **The `DEPLOY.md` ownership note** (#13, #14) — cheap, and it is what stops the
    second project being pointed at `http://<nas-ip>:8086` or declaring its own
-   `influxdb`. Worth doing early precisely because it costs nothing.
+   `influxdb`. Worth doing early precisely because it costs nothing. *Done in PR
+   #18 — "Sharing the stack with another project" in `DEPLOY.md` covers ownership,
+   the service-name URL, and the `down -v` warning. Nothing left here; #11 later
+   added the per-project identifier table to the same section.*
 5. **#7 `sysSn` redaction** — unchanged in priority; a leak to a third-party
    monitor, and self-contained.
 6. **#9 log rotation** — unbounded disk on a NAS now filling from two projects.
@@ -501,6 +504,16 @@ send its author looking in the wrong repository.
 ---
 
 ## Status
+
+**Resume point, 2026-07-29.** Steps 0–4 of the revised order are done and applied
+to the NAS. Next up is step 5, **#7 `sysSn` redaction** (self-contained, in
+`error_summary`), then step 6 **#9 log rotation**, then step 7 (#4, #8).
+
+One operator action is outstanding and cannot be done from the repository: the
+running Grafana still has the admin password it was initialised with, because
+`GF_SECURITY_ADMIN_PASSWORD` binds only at first init. If it is weak, run the
+reset in `DEPLOY.md`, "Changing the Grafana admin password". The `:?` guard from
+#6 protects fresh installs only.
 
 - [x] #1 Price-coverage gate — `priced_seconds()`, `price_coverage` field, `gate()` check
 - [x] #2 Fetch/write failure-domain split — `stage` tracking + `diagnose_write()`
