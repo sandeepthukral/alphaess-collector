@@ -477,21 +477,34 @@ sudo docker compose logs grafana 2>&1 | grep -i 'provision' | tail
 The same trick applies to any provisioned dashboard change that Grafana appears to
 ignore, not just folders.
 
-### `alphaess-battery-plan.json` is generated, not exported
+### The two battery-plan dashboards are generated, not exported
 
-Four of the five dashboards were exported from the Grafana UI. This one is built by
-[`grafana/generate-battery-plan.py`](grafana/generate-battery-plan.py), because its Flux
-queries were written and checked against the live database first, and those queries are
-the substance of the dashboard rather than its layout.
+Four of the six dashboards were exported from the Grafana UI. These two are built by
+scripts, because their Flux queries were written and checked against the live database
+first, and those queries are the substance of the dashboard rather than its layout:
+
+| script | dashboard | reads | looks |
+|---|---|---|---|
+| [`grafana/generate-battery-plan.py`](grafana/generate-battery-plan.py) | `alphaess-battery-plan.json` | `plan` | forward, `now-6h` to `now+36h` |
+| [`grafana/generate-battery-score.py`](grafana/generate-battery-score.py) | `alphaess-battery-score.json` | `plan_score` | back, over finished days |
+
+Both read the `planning` bucket, which the **battery-planning** repo writes: the planner
+writes `plan` every three hours, and `report_day.py` writes `plan_score` at 06:10 for the
+day that just ended. Neither is written by anything in this repo, so an empty dashboard
+here usually means a job did not run over there — the "Plan age" and "Score age" stats
+exist to say which.
 
 Edit the script, then regenerate:
 
 ```sh
 python grafana/generate-battery-plan.py grafana/alphaess-battery-plan.json
+python grafana/generate-battery-score.py grafana/alphaess-battery-score.json
 ```
 
-`tests/test_grafana_provisioning.py` re-runs the generator and compares, so a hand-edit
-to the JSON fails the suite. Bump `"version"` in the script, not in the output.
+`tests/test_grafana_provisioning.py` re-runs each generator and compares, so a hand-edit
+to the JSON fails the suite. The pairing is by filename — `generate-X.py` must emit
+`alphaess-X.json` — so a third generated dashboard is covered automatically. Bump
+`"version"` in the script, not in the output.
 
 The UI is still the right place to try a change; it just has to come back to the script,
 since re-provisioning overwrites the UI copy from the file.

@@ -22,6 +22,12 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 PROVISIONING = REPO / "grafana" / "provisioning"
 DASHBOARDS = sorted((REPO / "grafana").glob("*.json"))
 
+# Generated dashboards, paired with their script by filename: generate-X.py emits
+# alphaess-X.json. Deriving the pairing rather than listing it means a new generated
+# dashboard is covered the moment it is added, instead of whenever someone remembers to
+# extend this file -- which is the same class of omission the mount test exists to catch.
+GENERATORS = sorted((REPO / "grafana").glob("generate-*.py"))
+
 # The datasource variable every dashboard interpolates, and the uid the Grafana
 # entrypoint substitutes it with.
 DS_VAR = "${DS_ALPHAESS}"
@@ -38,30 +44,38 @@ def test_dashboards_were_found():
     added to grafana/ but never mounted in docker-compose.yml, which provisions
     nothing and fails silently -- see test_every_dashboard_is_mounted below.
     """
-    assert len(DASHBOARDS) == 5
+    assert len(DASHBOARDS) == 6
 
 
-def test_battery_plan_json_matches_its_generator(tmp_path):
-    """alphaess-battery-plan.json is generated, so it must equal what the generator emits.
+def test_generators_were_found():
+    """The pairing glob has the same failure mode as the dashboard glob: match nothing,
+    test nothing, pass."""
+    assert len(GENERATORS) == 2
 
-    It is the one dashboard here built from a script rather than exported from the
-    Grafana UI, because its Flux queries were written and checked against the live
-    database. That only holds while the two agree. Hand-edit the 850-line JSON and the
-    next regeneration silently reverts it; hand-edit it and never regenerate, and the
-    script becomes a lie that the next person edits instead.
+
+@pytest.mark.parametrize("generator", GENERATORS, ids=lambda p: p.name)
+def test_generated_dashboard_matches_its_generator(generator, tmp_path):
+    """A generated dashboard must equal what its generator emits.
+
+    Two of the six are built from a script rather than exported from the Grafana UI,
+    because their Flux queries were written and checked against the live database and are
+    the substance of the dashboard. That only holds while the two agree. Hand-edit the
+    JSON and the next regeneration silently reverts it; hand-edit it and never regenerate,
+    and the script becomes a lie that the next person edits instead.
 
     Nobody reviews generated JSON, which is exactly how a wrong query gets in: it renders
     as a plausible chart, not as an error.
     """
-    generator = REPO / "grafana" / "generate-battery-plan.py"
-    committed = REPO / "grafana" / "alphaess-battery-plan.json"
+    name = generator.name.replace("generate-", "alphaess-").replace(".py", ".json")
+    committed = REPO / "grafana" / name
+    assert committed.exists(), f"{generator.name} emits {name}, which is not committed"
     out = tmp_path / "regenerated.json"
     subprocess.run([sys.executable, str(generator), str(out)], check=True,
                    capture_output=True)
     assert out.read_text(encoding="utf-8") == committed.read_text(encoding="utf-8"), (
-        "grafana/alphaess-battery-plan.json is out of sync with its generator. Edit "
-        "grafana/generate-battery-plan.py, then re-run it:\n"
-        "  python grafana/generate-battery-plan.py grafana/alphaess-battery-plan.json"
+        f"grafana/{name} is out of sync with its generator. Edit "
+        f"grafana/{generator.name}, then re-run it:\n"
+        f"  python grafana/{generator.name} grafana/{name}"
     )
 
 
