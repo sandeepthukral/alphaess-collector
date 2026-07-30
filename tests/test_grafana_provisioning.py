@@ -12,6 +12,8 @@ claims `isDefault`, and no panel or alert query relies on the default.
 
 import json
 import pathlib
+import subprocess
+import sys
 
 import pytest
 import yaml
@@ -37,6 +39,30 @@ def test_dashboards_were_found():
     nothing and fails silently -- see test_every_dashboard_is_mounted below.
     """
     assert len(DASHBOARDS) == 5
+
+
+def test_battery_plan_json_matches_its_generator(tmp_path):
+    """alphaess-battery-plan.json is generated, so it must equal what the generator emits.
+
+    It is the one dashboard here built from a script rather than exported from the
+    Grafana UI, because its Flux queries were written and checked against the live
+    database. That only holds while the two agree. Hand-edit the 850-line JSON and the
+    next regeneration silently reverts it; hand-edit it and never regenerate, and the
+    script becomes a lie that the next person edits instead.
+
+    Nobody reviews generated JSON, which is exactly how a wrong query gets in: it renders
+    as a plausible chart, not as an error.
+    """
+    generator = REPO / "grafana" / "generate-battery-plan.py"
+    committed = REPO / "grafana" / "alphaess-battery-plan.json"
+    out = tmp_path / "regenerated.json"
+    subprocess.run([sys.executable, str(generator), str(out)], check=True,
+                   capture_output=True)
+    assert out.read_text(encoding="utf-8") == committed.read_text(encoding="utf-8"), (
+        "grafana/alphaess-battery-plan.json is out of sync with its generator. Edit "
+        "grafana/generate-battery-plan.py, then re-run it:\n"
+        "  python grafana/generate-battery-plan.py grafana/alphaess-battery-plan.json"
+    )
 
 
 @pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)

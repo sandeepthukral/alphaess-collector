@@ -477,6 +477,25 @@ sudo docker compose logs grafana 2>&1 | grep -i 'provision' | tail
 The same trick applies to any provisioned dashboard change that Grafana appears to
 ignore, not just folders.
 
+### `alphaess-battery-plan.json` is generated, not exported
+
+Four of the five dashboards were exported from the Grafana UI. This one is built by
+[`grafana/generate-battery-plan.py`](grafana/generate-battery-plan.py), because its Flux
+queries were written and checked against the live database first, and those queries are
+the substance of the dashboard rather than its layout.
+
+Edit the script, then regenerate:
+
+```sh
+python grafana/generate-battery-plan.py grafana/alphaess-battery-plan.json
+```
+
+`tests/test_grafana_provisioning.py` re-runs the generator and compares, so a hand-edit
+to the JSON fails the suite. Bump `"version"` in the script, not in the output.
+
+The UI is still the right place to try a change; it just has to come back to the script,
+since re-provisioning overwrites the UI copy from the file.
+
 ## Monitoring that the collector is actually collecting
 
 The poll loop catches every exception and backs off (capped at 5 minutes)
