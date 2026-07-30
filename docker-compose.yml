@@ -122,6 +122,10 @@ services:
       - ./grafana/alphaess-energy-flow.json:/etc/grafana/dashboard-src/alphaess-energy-flow.json:ro
       - ./grafana/alphaess-battery-savings.json:/etc/grafana/dashboard-src/alphaess-battery-savings.json:ro
       - ./grafana/alphaess-collector-health.json:/etc/grafana/dashboard-src/alphaess-collector-health.json:ro
+      # Reads the `planning` bucket, which the battery-planning repo writes to. The datasource
+      # below points at `alphaess` as its default bucket, but every query here names its
+      # bucket explicitly, so one datasource serves both.
+      - ./grafana/alphaess-battery-plan.json:/etc/grafana/dashboard-src/alphaess-battery-plan.json:ro
     depends_on:
       influxdb:
         condition: service_healthy
