@@ -30,8 +30,27 @@ BUILTIN_UIDS = {"-- Grafana --", "-- Mixed --", "-- Dashboard --", "__expr__"}
 
 
 def test_dashboards_were_found():
-    """Guard against the glob silently matching nothing."""
-    assert len(DASHBOARDS) == 4
+    """Guard against the glob silently matching nothing.
+
+    The count is deliberate rather than `> 0`: it also catches a dashboard
+    added to grafana/ but never mounted in docker-compose.yml, which provisions
+    nothing and fails silently -- see test_every_dashboard_is_mounted below.
+    """
+    assert len(DASHBOARDS) == 5
+
+
+@pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
+def test_every_dashboard_is_mounted(path):
+    """A dashboard Grafana never sees is the quietest failure of the set.
+
+    The entrypoint globs /etc/grafana/dashboard-src, which is populated one
+    bind mount at a time. Adding grafana/<name>.json without the matching line
+    in docker-compose.yml provisions nothing at all: no error, no log line, and
+    the dashboard simply is not in the list.
+    """
+    compose = (REPO / "docker-compose.yml").read_text(encoding="utf-8")
+    mount = f"./grafana/{path.name}:/etc/grafana/dashboard-src/{path.name}:ro"
+    assert mount in compose, f"{path.name} is not mounted into Grafana"
 
 
 @pytest.mark.parametrize("path", sorted(PROVISIONING.glob("datasources/*.yml")),
