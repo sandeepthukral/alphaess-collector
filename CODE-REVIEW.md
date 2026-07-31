@@ -19,6 +19,204 @@ Scope: full repository at commit `cce4419` (branch `simplify-nas-deploy`), ~6.6k
 > recommendation therefore mostly *stands*, and the sharing is a lifecycle and
 > namespacing problem (#14, #10, #11) rather than a network exposure one.
 
+## Status
+
+**Resume point, 2026-07-31.** Steps 0–6 of the revised order are done. #7 and
+#9 are shipped but not yet applied to the NAS (code-only changes, take effect
+on the next `git pull` + rebuild there). Next up is step 7 (#4, #8).
+
+One operator action is outstanding and cannot be done from the repository: the
+running Grafana still has the admin password it was initialised with, because
+`GF_SECURITY_ADMIN_PASSWORD` binds only at first init. If it is weak, run the
+reset in `DEPLOY.md`, "Changing the Grafana admin password". The `:?` guard from
+#6 protects fresh installs only.
+
+- [x] #1 Price-coverage gate — `priced_seconds()`, `price_coverage` field, `gate()` check
+- [x] #2 Fetch/write failure-domain split — `stage` tracking + `diagnose_write()`
+- [ ] #3 Hardcoded bucket in dashboards (48 refs across 4 dashboards + the alert rule) — independent of #12
+- [ ] #4 `daily-savings.sh` date parsing
+- [x] #5 Scoped InfluxDB tokens — PR #20, applied on the NAS 2026-07-29 (`MIGRATION-scoped-tokens.md`)
+- [x] #6 Grafana password default — `:?` guard, no fallback ~~+ loopback binding~~ (binding half reversed, see #6)
+- [x] #7 `sysSn` redaction in `error_summary` — `_URL_QUERY_RE`, strips the query string from any URL in the message
+- [ ] #8 Flux parameter binding
+- [x] #9 Log rotation (`x-logging` anchor, `max-size: 10m`/`max-file: 3` on all four services) +
+      pinned `GF_INSTALL_PLUGINS` version — rest of #9 (`cap_drop`, `read_only`, `no-new-privileges`,
+      memory limits) deliberately left, lower value per the ordering note below
+- [x] Test scaffolding — pytest + ruff + GitHub Actions, 81 tests
+- [x] Backoff cap vs. pricing gap gate — `MAX_BACKOFF_SECONDS`, PR #17 *(not from this
+      review; found while investigating a recurring collection gap after the
+      model_version 2 migration)*
+
+**Shared infrastructure** (added 2026-07-28):
+
+- [x] #10 Dashboards provisioned into the `AlphaESS` folder — PR #18, applied by PR #19
+- [x] #11 Provisioning namespacing — `isDefault` dropped, per-project prefix table in `DEPLOY.md`
+- [x] #12 Separate bucket for the second project — `planning`, 400d retention, created 2026-07-29
+- [x] #13 Second project uses `http://influxdb:8086`, not the host port — `DEPLOY.md`, "Sharing the stack" (PR #18)
+- [x] #14 `name: alphaess-net` + ownership/lifecycle note — PR #18
+- [ ] Housekeeping — stale "capped at 5 minutes" in `DEPLOY.md` and the alert rule
+- [x] Housekeeping — dashboard tags: already consistent (`alphaess` on all four), no change needed
+
+### Notes on the completed items
+
+**#7** — `error_summary` (`collector/collector.py`) now runs a redaction pass,
+`_URL_QUERY_RE`, after the `(Caused by ...)` split and before truncation: any
+`http(s)://` substring in the message has its query string stripped. This
+covers the case the original finding was about — an `HTTPError` puts the full
+request URL, `sysSn` and all, straight in `str(exc)` with no `(Caused by`
+segment to hide it behind — without needing to special-case `HTTPError`
+specifically, so it also catches a query string on any other exception type
+that happens to embed one. `appId`/`appSecret` were already confirmed safe
+(headers, never in the message); this only ever had `sysSn` to redact.
+
+Verified with a new test,
+`test_error_summary_redacts_the_query_string` in
+`tests/test_collector_helpers.py`, asserting both the tag name (`sysSn`) and
+the value (the serial number) are gone from the summary while the rest of the
+message — including the URL path, which is useful for diagnosis — survives.
+Not yet applied to the NAS; ships on the next deploy there.
+
+**#9** — `docker-compose.yml` gained an `x-logging` anchor (`json-file`,
+`max-size: 10m`, `max-file: 3`) applied via `logging: *default-logging` on
+all four services. Default json-file logging has no cap of its own, and
+three of the four services (collector, pusher, influxdb via the collector's
+polling) log continuously forever — on a NAS now shared with a second
+project, that's unbounded disk growth rather than a theoretical concern.
+10m × 3 files × 4 services caps total log disk at 120 MB.
+
+Also pinned `GF_INSTALL_PLUGINS` to `volkovlabs-echarts-panel@7.2.2` — it was
+unpinned, so every fresh Grafana start pulled whatever the plugin registry's
+current release was, a reproducibility and supply-chain gap. 7.2.2 is the
+newest release that still supports Grafana 11.6.0 (the compose file's pinned
+Grafana version); 7.2.4+ require Grafana ≥12.3.0. Bump both together if
+Grafana is ever upgraded.
+
+Left out, per the ordering note's "lower value" call: `cap_drop: [ALL]`,
+`read_only: true`, `no-new-privileges`, memory limits. `docker compose
+config` confirms the anchor resolves identically on all four services; not
+yet applied to the NAS.
+
+**#6 / #11** — the password half of #6 and all of #11, done together as step 3 of
+the revised order. `GRAFANA_ADMIN_PASSWORD` lost its `:-admin` fallback for a `:?`
+guard, `isDefault: true` is gone from the datasource, and `DEPLOY.md` gained the
+per-project identifier table (datasource uid, provider name, mount path, folder,
+dashboard uids, alert group/rule uid) that the second project needs.
+
+Two things surfaced while doing it:
+
+1. **`GF_SECURITY_ADMIN_PASSWORD` only applies when Grafana first initialises its
+   database.** Changing `.env` and restarting an existing install does nothing and
+   says nothing — the old password keeps working. So the guard protects fresh
+   installs; changing the password later needs `grafana cli admin
+   reset-admin-password`, now documented in `DEPLOY.md`. The live NAS instance
+   therefore keeps whatever password it was created with until that is run.
+2. **Dropping `isDefault` was free, and verified so rather than assumed.** Every
+   query node in all four dashboards names `${DS_ALPHAESS}` or a Grafana built-in
+   (`-- Grafana --`, `__expr__`), and the staleness rule names `datasourceUid:
+   alphaess` — checked by `tests/test_grafana_provisioning.py`, which also pins
+   the no-`isDefault` rule and the `AlphaESS` folder agreeing across the two
+   provisioning files. The only behaviour change is that a panel created by hand
+   in the UI starts with no datasource selected.
+
+**Applied to the NAS 2026-07-29.** `isDefault: false` confirmed through
+`/api/datasources`. A third deployment trap turned up in the process, and it is
+the same shape as the two under #10 — a config change that reports success and
+did nothing:
+
+3. **`up -d` recreates nothing when the *resolved* config is unchanged.** The
+   `:?` guard altered how `GRAFANA_ADMIN_PASSWORD` resolves, not what it
+   resolves to, and provisioning files are bind-mounted — so Compose diffed an
+   identical spec, printed `Container ... Running`, and left the old process
+   holding the old datasource config. `restart grafana` is what applies a
+   provisioning-only change; `Running` in that output means "did nothing", while
+   `Started`/`Recreated` means it acted. Now a table plus a section in
+   `DEPLOY.md` under "Updating", alongside the `networks:`/`volumes:` and
+   dashboard-checksum cases.
+
+   The pattern across all three: **this stack has no deployment mechanism that
+   fails loudly when a change is not applied.** Verify the change at its
+   destination — the API, the UI, the log — rather than trusting the deploy
+   command's output.
+
+**#5 / #12** — shipped in PR #20 and applied to the live stack on 2026-07-29 via
+`MIGRATION-scoped-tokens.md`, which records the per-step results. Bucket `planning`
+(400 d, ID `1430ea6bb66e9cb1`) alongside `alphaess` (`a83cd3d221d6111b`); four
+scoped tokens; `INFLUX_TOKEN` now reaches only InfluxDB's own init. Cutover took
+seconds, against the 20-minute `MAX_GAP_S` budget.
+
+Three things worth remembering:
+
+1. **Compose interpolates the whole file on *every* subcommand.** Once the `:?`
+   guards landed, `docker compose exec` and even `ps` failed until the new
+   variables existed — so the InfluxDB work has to run through plain `docker exec`,
+   which needs no interpolation. The runbook was written the other way round and
+   could not reach its own step 4.
+2. **Verify tokens before cutting over, not after.** Scoping was confirmed from the
+   `Permissions` column at creation, then each token exercised while the admin
+   token was still live. The negative check — the pusher's write returning
+   `403 insufficient permissions` — is the only one that catches a token broader
+   than intended.
+3. **Write-only was too tight for the planning token.** It was minted `w planning`
+   as specified, then re-minted the same day as `rw planning` before deployment:
+   without read on its own bucket, that project can neither skip runs it has already
+   computed nor audit its own output. It still cannot write `alphaess`, which is the
+   guarantee that actually matters here.
+
+**#10 / #13 / #14** — shipped in PR #18, with PR #19 supplying the part that made
+#10 take effect. Two Grafana behaviours cost a deployment round each and are worth
+remembering before touching provisioning again:
+
+1. Grafana **skips a provisioned dashboard whose checksum is unchanged**, and this
+   repo's Grafana entrypoint regenerates the JSON byte-identically at every start.
+   So a change to `dashboards.yml` alone — folder or anything else — is applied to
+   new installs and silently ignored on existing ones.
+2. A provisioned dashboard **cannot be deleted**, from the UI or the API, so
+   delete-and-recreate is not available as a workaround. `disableDeletion` governs
+   whether provisioning removes a dashboard when its file disappears, not whether
+   an operator may remove one.
+
+The lever is the file's bytes: bumping the top-level `"version"` in each dashboard
+JSON changes the checksum, and a dashboard the provisioner actually processes is
+written with the provider's current settings. Verified on the NAS.
+
+**#1** — `price_coverage` is a new field on the `daily_cost` measurement, gated at
+`PRICING_MIN_PRICE_COVERAGE` (default 0.999). Days with incomplete prices are now *excluded* rather
+than written with an understated cost; the rolling window in `scripts/daily-savings.sh` picks them
+up on a later run once the day-ahead prices land. Documented in `DESIGN-battery-savings.md`.
+
+Verified against the pre-fix code: a day priced for 12 of 24 hours produced `cost_model1 = 1.20`
+against a true 2.40, with `coverage = 1.000`, and the old gate returned `(True, 'ok')`.
+
+Shipped with `MODEL_VERSION = "2"` and the dashboard's **Model version** variable moved to match
+(the two are now pinned together by `tests/test_model_version_consistency.py` — a mismatch shows
+stale numbers rather than an empty dashboard, so it fails silently). Recomputing history at
+version 2 republishes every verifiable day and omits the rest, orphaning the unverifiable version-1
+rows instead of requiring them to be found and deleted. Confirmed by differential run: a fully
+priced day computes bit-identically at versions 1 and 2, on 23-, 24- and 25-hour days.
+
+`pricing.py --audit` (read-only) re-checks stored days at the current model version against today's
+gate, for the case where the underlying data changed after a row was written.
+
+**#2** — the loop now tracks which half of the poll is in flight. `diagnose_network` runs only for
+fetch failures; write failures get `diagnose_write`, which returns `local-influxdb` and points at
+the container/token/disk instead of claiming the AlphaESS API is at fault. The stage is also a tag
+on `collector_health` failure events and a prefix on the heartbeat message
+(`write: ConnectionError: ... [local-influxdb]`), so it is visible from the first failure rather
+than only from the third.
+
+Verified by reverting the conditional: `test_influxdb_write_failure_is_not_blamed_on_alphaess`
+fails with `diagnose_network_calls == 1`.
+
+**Test scaffolding** — `pyproject.toml` (pytest + ruff config), `requirements-dev.txt`,
+`tests/`, `.github/workflows/ci.yml`. `pythonpath` puts `collector/` and `awtrix-pusher/` on the
+path so tests import the same flat modules the Dockerfiles produce. Two ruff rules (`B905`,
+`RUF007`) are disabled with rationale — they would force a mechanical rewrite of the
+`zip(xs, xs[1:])` integration code, and `strict=` is wrong there by construction.
+
+Remaining known lint/quality debt is listed under "Code quality" above and is untouched.
+
+---
+
 ## Overall
 
 The engineering quality here is above average for a homelab project — the comments explain *why*
@@ -489,9 +687,11 @@ after both sides depend on the current names.
    the service-name URL, and the `down -v` warning. Nothing left here; #11 later
    added the per-project identifier table to the same section.*
 5. **#7 `sysSn` redaction** — unchanged in priority; a leak to a third-party
-   monitor, and self-contained.
+   monitor, and self-contained. *Done 2026-07-31; see the notes below. Not yet
+   applied to the NAS.*
 6. **#9 log rotation** — unbounded disk on a NAS now filling from two projects.
-   The rest of #9 (`cap_drop`, `read_only`) is lower value.
+   The rest of #9 (`cap_drop`, `read_only`) is lower value. *Done 2026-07-31; see
+   the notes below. Not yet applied to the NAS.*
 7. **#4 `daily-savings.sh` parsing**, **#8 Flux binding** — neither is currently
    reachable by an attacker or a realistic input; do them when convenient.
 
@@ -500,162 +700,3 @@ but it should land only once the second project is confirmed to be joining
 `alphaess-net` and using `http://influxdb:8086`. Doing it first would break that
 project the moment it was configured the other way — and the resulting error would
 send its author looking in the wrong repository.
-
----
-
-## Status
-
-**Resume point, 2026-07-29.** Steps 0–4 of the revised order are done and applied
-to the NAS. Next up is step 5, **#7 `sysSn` redaction** (self-contained, in
-`error_summary`), then step 6 **#9 log rotation**, then step 7 (#4, #8).
-
-One operator action is outstanding and cannot be done from the repository: the
-running Grafana still has the admin password it was initialised with, because
-`GF_SECURITY_ADMIN_PASSWORD` binds only at first init. If it is weak, run the
-reset in `DEPLOY.md`, "Changing the Grafana admin password". The `:?` guard from
-#6 protects fresh installs only.
-
-- [x] #1 Price-coverage gate — `priced_seconds()`, `price_coverage` field, `gate()` check
-- [x] #2 Fetch/write failure-domain split — `stage` tracking + `diagnose_write()`
-- [ ] #3 Hardcoded bucket in dashboards (48 refs across 4 dashboards + the alert rule) — independent of #12
-- [ ] #4 `daily-savings.sh` date parsing
-- [x] #5 Scoped InfluxDB tokens — PR #20, applied on the NAS 2026-07-29 (`MIGRATION-scoped-tokens.md`)
-- [x] #6 Grafana password default — `:?` guard, no fallback ~~+ loopback binding~~ (binding half reversed, see #6)
-- [ ] #7 `sysSn` redaction in `error_summary`
-- [ ] #8 Flux parameter binding
-- [ ] #9 Container hardening / log rotation
-- [x] Test scaffolding — pytest + ruff + GitHub Actions, 81 tests
-- [x] Backoff cap vs. pricing gap gate — `MAX_BACKOFF_SECONDS`, PR #17 *(not from this
-      review; found while investigating a recurring collection gap after the
-      model_version 2 migration)*
-
-**Shared infrastructure** (added 2026-07-28):
-
-- [x] #10 Dashboards provisioned into the `AlphaESS` folder — PR #18, applied by PR #19
-- [x] #11 Provisioning namespacing — `isDefault` dropped, per-project prefix table in `DEPLOY.md`
-- [x] #12 Separate bucket for the second project — `planning`, 400d retention, created 2026-07-29
-- [x] #13 Second project uses `http://influxdb:8086`, not the host port — `DEPLOY.md`, "Sharing the stack" (PR #18)
-- [x] #14 `name: alphaess-net` + ownership/lifecycle note — PR #18
-- [ ] Housekeeping — stale "capped at 5 minutes" in `DEPLOY.md` and the alert rule
-- [x] Housekeeping — dashboard tags: already consistent (`alphaess` on all four), no change needed
-
-### Notes on the completed items
-
-**#6 / #11** — the password half of #6 and all of #11, done together as step 3 of
-the revised order. `GRAFANA_ADMIN_PASSWORD` lost its `:-admin` fallback for a `:?`
-guard, `isDefault: true` is gone from the datasource, and `DEPLOY.md` gained the
-per-project identifier table (datasource uid, provider name, mount path, folder,
-dashboard uids, alert group/rule uid) that the second project needs.
-
-Two things surfaced while doing it:
-
-1. **`GF_SECURITY_ADMIN_PASSWORD` only applies when Grafana first initialises its
-   database.** Changing `.env` and restarting an existing install does nothing and
-   says nothing — the old password keeps working. So the guard protects fresh
-   installs; changing the password later needs `grafana cli admin
-   reset-admin-password`, now documented in `DEPLOY.md`. The live NAS instance
-   therefore keeps whatever password it was created with until that is run.
-2. **Dropping `isDefault` was free, and verified so rather than assumed.** Every
-   query node in all four dashboards names `${DS_ALPHAESS}` or a Grafana built-in
-   (`-- Grafana --`, `__expr__`), and the staleness rule names `datasourceUid:
-   alphaess` — checked by `tests/test_grafana_provisioning.py`, which also pins
-   the no-`isDefault` rule and the `AlphaESS` folder agreeing across the two
-   provisioning files. The only behaviour change is that a panel created by hand
-   in the UI starts with no datasource selected.
-
-**Applied to the NAS 2026-07-29.** `isDefault: false` confirmed through
-`/api/datasources`. A third deployment trap turned up in the process, and it is
-the same shape as the two under #10 — a config change that reports success and
-did nothing:
-
-3. **`up -d` recreates nothing when the *resolved* config is unchanged.** The
-   `:?` guard altered how `GRAFANA_ADMIN_PASSWORD` resolves, not what it
-   resolves to, and provisioning files are bind-mounted — so Compose diffed an
-   identical spec, printed `Container ... Running`, and left the old process
-   holding the old datasource config. `restart grafana` is what applies a
-   provisioning-only change; `Running` in that output means "did nothing", while
-   `Started`/`Recreated` means it acted. Now a table plus a section in
-   `DEPLOY.md` under "Updating", alongside the `networks:`/`volumes:` and
-   dashboard-checksum cases.
-
-   The pattern across all three: **this stack has no deployment mechanism that
-   fails loudly when a change is not applied.** Verify the change at its
-   destination — the API, the UI, the log — rather than trusting the deploy
-   command's output.
-
-**#5 / #12** — shipped in PR #20 and applied to the live stack on 2026-07-29 via
-`MIGRATION-scoped-tokens.md`, which records the per-step results. Bucket `planning`
-(400 d, ID `1430ea6bb66e9cb1`) alongside `alphaess` (`a83cd3d221d6111b`); four
-scoped tokens; `INFLUX_TOKEN` now reaches only InfluxDB's own init. Cutover took
-seconds, against the 20-minute `MAX_GAP_S` budget.
-
-Three things worth remembering:
-
-1. **Compose interpolates the whole file on *every* subcommand.** Once the `:?`
-   guards landed, `docker compose exec` and even `ps` failed until the new
-   variables existed — so the InfluxDB work has to run through plain `docker exec`,
-   which needs no interpolation. The runbook was written the other way round and
-   could not reach its own step 4.
-2. **Verify tokens before cutting over, not after.** Scoping was confirmed from the
-   `Permissions` column at creation, then each token exercised while the admin
-   token was still live. The negative check — the pusher's write returning
-   `403 insufficient permissions` — is the only one that catches a token broader
-   than intended.
-3. **Write-only was too tight for the planning token.** It was minted `w planning`
-   as specified, then re-minted the same day as `rw planning` before deployment:
-   without read on its own bucket, that project can neither skip runs it has already
-   computed nor audit its own output. It still cannot write `alphaess`, which is the
-   guarantee that actually matters here.
-
-**#10 / #13 / #14** — shipped in PR #18, with PR #19 supplying the part that made
-#10 take effect. Two Grafana behaviours cost a deployment round each and are worth
-remembering before touching provisioning again:
-
-1. Grafana **skips a provisioned dashboard whose checksum is unchanged**, and this
-   repo's Grafana entrypoint regenerates the JSON byte-identically at every start.
-   So a change to `dashboards.yml` alone — folder or anything else — is applied to
-   new installs and silently ignored on existing ones.
-2. A provisioned dashboard **cannot be deleted**, from the UI or the API, so
-   delete-and-recreate is not available as a workaround. `disableDeletion` governs
-   whether provisioning removes a dashboard when its file disappears, not whether
-   an operator may remove one.
-
-The lever is the file's bytes: bumping the top-level `"version"` in each dashboard
-JSON changes the checksum, and a dashboard the provisioner actually processes is
-written with the provider's current settings. Verified on the NAS.
-
-**#1** — `price_coverage` is a new field on the `daily_cost` measurement, gated at
-`PRICING_MIN_PRICE_COVERAGE` (default 0.999). Days with incomplete prices are now *excluded* rather
-than written with an understated cost; the rolling window in `scripts/daily-savings.sh` picks them
-up on a later run once the day-ahead prices land. Documented in `DESIGN-battery-savings.md`.
-
-Verified against the pre-fix code: a day priced for 12 of 24 hours produced `cost_model1 = 1.20`
-against a true 2.40, with `coverage = 1.000`, and the old gate returned `(True, 'ok')`.
-
-Shipped with `MODEL_VERSION = "2"` and the dashboard's **Model version** variable moved to match
-(the two are now pinned together by `tests/test_model_version_consistency.py` — a mismatch shows
-stale numbers rather than an empty dashboard, so it fails silently). Recomputing history at
-version 2 republishes every verifiable day and omits the rest, orphaning the unverifiable version-1
-rows instead of requiring them to be found and deleted. Confirmed by differential run: a fully
-priced day computes bit-identically at versions 1 and 2, on 23-, 24- and 25-hour days.
-
-`pricing.py --audit` (read-only) re-checks stored days at the current model version against today's
-gate, for the case where the underlying data changed after a row was written.
-
-**#2** — the loop now tracks which half of the poll is in flight. `diagnose_network` runs only for
-fetch failures; write failures get `diagnose_write`, which returns `local-influxdb` and points at
-the container/token/disk instead of claiming the AlphaESS API is at fault. The stage is also a tag
-on `collector_health` failure events and a prefix on the heartbeat message
-(`write: ConnectionError: ... [local-influxdb]`), so it is visible from the first failure rather
-than only from the third.
-
-Verified by reverting the conditional: `test_influxdb_write_failure_is_not_blamed_on_alphaess`
-fails with `diagnose_network_calls == 1`.
-
-**Test scaffolding** — `pyproject.toml` (pytest + ruff config), `requirements-dev.txt`,
-`tests/`, `.github/workflows/ci.yml`. `pythonpath` puts `collector/` and `awtrix-pusher/` on the
-path so tests import the same flat modules the Dockerfiles produce. Two ruff rules (`B905`,
-`RUF007`) are disabled with rationale — they would force a mechanical rewrite of the
-`zip(xs, xs[1:])` integration code, and `strict=` is wrong there by construction.
-
-Remaining known lint/quality debt is listed under "Code quality" above and is untouched.

@@ -13,6 +13,7 @@ Run modes:
 import hashlib
 import logging
 import os
+import re
 import signal
 import socket
 import sys
@@ -74,6 +75,12 @@ DEFAULT_DIAGNOSTIC_URL = "https://1.1.1.1/"
 # notification has room for the part that identifies the fault, not for the
 # full nested requests/urllib3/ssl chain.
 MAX_ERROR_SUMMARY_CHARS = 160
+
+# HTTPError messages from `requests` include the full request URL, which for
+# this API carries sys_sn in the query string (?sysSn=...). error_summary
+# ends up in the heartbeat message sent to Uptime Kuma, a third party -- strip
+# the query string before it leaves the process.
+_URL_QUERY_RE = re.compile(r"(https?://\S+?)\?\S*")
 
 log = logging.getLogger("alphaess-collector")
 
@@ -314,11 +321,16 @@ def error_summary(exc: Exception) -> str:
     to several hundred characters across the nested causes. The real fault is
     the innermost one, which requests renders as a trailing "(Caused by ...)"
     -- exactly the part a naive head-truncation would throw away.
+
+    An HTTPError (unlike a connection error) carries the request URL straight
+    in its message, query string and all -- redacted here before it can reach
+    the heartbeat message or the logs.
     """
     detail = " ".join(str(exc).split())
     _, sep, cause = detail.partition("(Caused by ")
     if sep:
         detail = cause.rstrip(")")
+    detail = _URL_QUERY_RE.sub(r"\1", detail)
     if len(detail) > MAX_ERROR_SUMMARY_CHARS:
         detail = detail[:MAX_ERROR_SUMMARY_CHARS] + "..."
     return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__

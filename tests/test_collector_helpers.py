@@ -49,6 +49,22 @@ def test_error_summary_without_a_message():
     assert error_summary(ValueError()) == "ValueError"
 
 
+def test_error_summary_redacts_the_query_string():
+    """HTTPError puts the request URL straight in the message, sysSn and all.
+
+    Unlike a connection error there's no "(Caused by ...)" segment to keep it
+    out of the summary that gets pushed to Uptime Kuma.
+    """
+    exc = Exception(
+        "401 Client Error: Unauthorized for url: "
+        "https://openapi.alphaess.com/api/getLastPowerData?sysSn=AL5006148000012345")
+    summary = error_summary(exc)
+    assert "sysSn" not in summary
+    assert "AL5006148000012345" not in summary
+    assert summary.endswith(
+        "https://openapi.alphaess.com/api/getLastPowerData")
+
+
 # --------------------------------------------------------------------------
 # format_duration / recovery_message
 # --------------------------------------------------------------------------
