@@ -151,7 +151,8 @@ Reordering apps or hiding the time is done in the AWTRIX app settings.
 
 Quantifies what the battery is worth in euros: for each complete local (NL) day
 it prices the real grid flows (Model 1, with battery) against a counterfactual
-with no battery (Model 2), using Frank Energie's hourly market prices. The
+with no battery (Model 2), using Frank Energie's market prices per billing
+slot (hourly through 2026-07-31, 15-minute from 2026-08-01). The
 difference is the battery's value that day. See
 [DESIGN-battery-savings.md](DESIGN-battery-savings.md) for the full rationale.
 

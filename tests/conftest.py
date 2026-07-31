@@ -34,6 +34,28 @@ def hourly_intervals(start: dt.datetime, hours: int, total: float = 0.10,
     ]
 
 
+def quarter_hour_intervals(start: dt.datetime, quarters: int, total: float = 0.10,
+                          market: float = 0.04, tax: float = 0.01,
+                          markup: float = 0.02, energy_tax: float = 0.03) -> list[dict]:
+    """`quarters` consecutive 15-minute price intervals from `start`.
+
+    Mirrors `hourly_intervals` at the resolution the contract moves to on
+    2026-08-01.
+    """
+    return [
+        {
+            "from": start + dt.timedelta(minutes=15 * q),
+            "till": start + dt.timedelta(minutes=15 * (q + 1)),
+            "market_price": market,
+            "market_price_tax": tax,
+            "sourcing_markup": markup,
+            "energy_tax": energy_tax,
+            "total": total,
+        }
+        for q in range(quarters)
+    ]
+
+
 def constant_samples(start: dt.datetime, end: dt.datetime, *, grid: float,
                      step_s: int = 30, pv: float = 0.0, battery: float = 0.0,
                      soc: float = 50.0) -> list[Sample]:

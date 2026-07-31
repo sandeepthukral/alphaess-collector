@@ -10,7 +10,7 @@ import datetime as dt
 import pytest
 
 import pricing
-from conftest import constant_samples, hourly_intervals
+from conftest import constant_samples, hourly_intervals, quarter_hour_intervals
 from pricing import compute_day, gate, priced_seconds
 
 UTC = dt.UTC
@@ -149,5 +149,62 @@ def test_price_coverage_is_correct_on_dst_days(day, hours):
     assert (end - start).total_seconds() == hours * 3600
     samples = constant_samples(start, end, grid=1000.0)
     result = compute_day(samples, hourly_intervals(start, hours), day)
+    assert result["price_coverage"] == 1.0
+    assert gate(result)[0] is True
+
+
+# --------------------------------------------------------------------------
+# 15-minute settlement (contract cutover 2026-08-01)
+#
+# The gate and integration logic derive slot length from each interval's own
+# from/till, so nothing here should require production changes -- these
+# mirror the hourly cases above at the resolution the contract moves to, to
+# prove that rather than assume it.
+# --------------------------------------------------------------------------
+
+def test_priced_seconds_full_day_at_quarter_hour_resolution(summer_day):
+    start, end = pricing.day_window_utc(summer_day)
+    assert priced_seconds(quarter_hour_intervals(start, 96), start, end) == 24 * 3600
+
+
+def test_fully_priced_day_is_accepted_and_costed_at_quarter_hour_resolution(
+        summer_day, day_window):
+    start, end = day_window
+    samples = constant_samples(start, end, grid=1000.0)
+    result = compute_day(samples, quarter_hour_intervals(start, 96, total=0.10),
+                         summer_day)
+    assert result["price_coverage"] == 1.0
+    assert result["coverage"] == 1.0
+    assert result["cost_model1"] == pytest.approx(2.40)  # same 24 kWh @ 0.10
+    assert gate(result)[0] is True
+
+
+def test_half_priced_day_is_rejected_at_quarter_hour_resolution(summer_day, day_window):
+    """Same regression as test_half_priced_day_is_rejected, at 96-slot resolution."""
+    start, end = day_window
+    samples = constant_samples(start, end, grid=1000.0)
+    result = compute_day(samples, quarter_hour_intervals(start, 48, total=0.10),
+                         summer_day)
+
+    assert result["coverage"] == 1.0
+    assert result["price_coverage"] == 0.5
+    assert result["cost_model1"] == pytest.approx(1.20)
+
+    ok, why = gate(result)
+    assert ok is False
+    assert "price coverage" in why
+
+
+@pytest.mark.parametrize("day,quarters", [
+    (dt.date(2026, 3, 29), 92),    # spring forward: 23h x 4
+    (dt.date(2026, 10, 25), 100),  # fall back: 25h x 4 -- the next DST
+                                   # transition after the 2026-08-01 cutover
+])
+def test_price_coverage_is_correct_on_dst_days_at_quarter_hour_resolution(day, quarters):
+    """A 92/100-quarter-hour day must not be scored against a hardcoded 96."""
+    start, end = pricing.day_window_utc(day)
+    assert (end - start).total_seconds() == quarters * 900
+    samples = constant_samples(start, end, grid=1000.0)
+    result = compute_day(samples, quarter_hour_intervals(start, quarters), day)
     assert result["price_coverage"] == 1.0
     assert gate(result)[0] is True

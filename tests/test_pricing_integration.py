@@ -8,7 +8,7 @@ import datetime as dt
 
 import pytest
 
-from conftest import constant_samples, hourly_intervals
+from conftest import constant_samples, hourly_intervals, quarter_hour_intervals
 from pricing import _accumulate, export_price, import_price, integrate_by_interval
 
 UTC = dt.UTC
@@ -150,3 +150,46 @@ def test_export_price_deducts_the_sourcing_markup():
     iv = hourly_intervals(T0, 1, market=0.04, tax=0.01, markup=0.02,
                           energy_tax=0.03)[0]
     assert export_price(iv) == pytest.approx(0.04 + 0.01 - 0.02 + 0.03)
+
+
+# --------------------------------------------------------------------------
+# 15-minute settlement (contract cutover 2026-08-01)
+# --------------------------------------------------------------------------
+
+def test_integrate_assigns_energy_to_the_right_quarter_hour():
+    intervals = quarter_hour_intervals(T0, 3)
+    samples = constant_samples(T0, T0 + dt.timedelta(minutes=45), grid=1000.0,
+                               step_s=60)
+    result = integrate_by_interval(samples, lambda s: s.grid, intervals)
+    for imp, exp in result:
+        assert imp == pytest.approx(250.0)  # 1000 W for 15 min
+        assert exp == pytest.approx(0.0)
+
+
+def test_integrate_splits_a_segment_spanning_a_quarter_hour_boundary():
+    """Mirrors the hour-boundary test at 15-minute resolution."""
+    intervals = quarter_hour_intervals(T0, 2)
+    samples = constant_samples(T0 + dt.timedelta(minutes=7, seconds=30),
+                               T0 + dt.timedelta(minutes=22, seconds=30),
+                               grid=1000.0, step_s=900)
+    result = integrate_by_interval(samples, lambda s: s.grid, intervals)
+    assert result[0][0] == pytest.approx(125.0)   # 1000 W for 7.5 min
+    assert result[1][0] == pytest.approx(125.0)
+
+
+def test_integrate_by_interval_handles_non_uniform_slot_durations():
+    """The cutover day itself is uniform (all-hourly or all-15-min, never
+    mixed, since the contract switches exactly at a local-midnight day
+    boundary) -- but `boundaries = sorted(set(froms) | set(tills))` has never
+    been exercised against a non-uniform grid before. A 15-min slot followed
+    by a 45-min slot proves it doesn't assume every interval is the same
+    length."""
+    intervals = [
+        {"from": T0, "till": T0 + dt.timedelta(minutes=15)},
+        {"from": T0 + dt.timedelta(minutes=15), "till": T0 + dt.timedelta(minutes=60)},
+    ]
+    samples = constant_samples(T0, T0 + dt.timedelta(minutes=60), grid=1000.0,
+                               step_s=300)
+    result = integrate_by_interval(samples, lambda s: s.grid, intervals)
+    assert result[0][0] == pytest.approx(250.0)   # 1000 W for 15 min
+    assert result[1][0] == pytest.approx(750.0)   # 1000 W for 45 min
