@@ -1,7 +1,9 @@
 """Battery-savings pricing: per-day cost of two worlds -> InfluxDB.
 
 For each complete local (NL) day, integrates the 30 s power samples against
-Frank Energie's hourly prices and computes:
+Frank Energie's per-slot prices (hourly through 2026-07-31, 15-minute from
+2026-08-01 -- slot length is read from each interval's own from/till, never
+assumed) and computes:
 
   Model 1 (with battery, actual)  - price the real grid flows.
   Model 2 (no battery, counterfactual) - grid_cf = grid + battery, priced the
@@ -10,7 +12,7 @@ Frank Energie's hourly prices and computes:
 
 Battery value = cost(Model 2) - cost(Model 1). Results go to the `daily_cost`
 measurement. See DESIGN-battery-savings.md for the full rationale (including why
-per-hour netting is exact for 2026 saldering).
+per-slot netting is exact for 2026 saldering, independent of slot length).
 
 Run modes:
     python pricing.py --date 2026-07-17          # one local day, InfluxDB I/O
@@ -119,7 +121,7 @@ def integrate_by_interval(samples: list[Sample], power_fn, intervals: list[dict]
 
     `power_fn(sample) -> float`. Segments between samples are treated as linear
     ramps (trapezoidal), split at every interval boundary and at zero crossings
-    so import and export are separated correctly even within one hourly slot.
+    so import and export are separated correctly even within one price slot.
     """
     froms = [iv["from"] for iv in intervals]
     tills = [iv["till"] for iv in intervals]

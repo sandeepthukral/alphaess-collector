@@ -74,11 +74,61 @@ Consequences worth stating:
 
 ### Atomic slot = Frank's price interval
 
-Frank Energie bills at **hourly** granularity in 2026 (the hourly price is the
-average of the four 15-min EPEX values). We do **not** hardcode 15 vs 60 min:
-`prices.py` stores whatever `from`/`till` intervals the API returns, and
-`pricing.py` integrates power within those exact boundaries. If Frank moves to
-15-min settlement later, the model adapts with no code change.
+Frank Energie billed at **hourly** granularity through 2026-07-31 (the hourly
+price was the average of the four 15-min EPEX values). **From 2026-08-01 the
+contract moves to 15-minute settlement**, billed per slot directly rather than
+as an hourly average. We do **not** hardcode 15 vs 60 min: `prices.py` stores
+whatever `from`/`till` intervals the API returns, and `pricing.py` integrates
+power within those exact boundaries. This cutover needed no code change —
+verified 2026-07-31 by a full-repo audit (see `CODE-REVIEW.md`) and new tests
+at 15-minute resolution alongside the existing hourly ones
+(`tests/conftest.py`'s `quarter_hour_intervals`).
+
+### Fallback if Frank's API doesn't actually cut over
+
+`marketPricesElectricity` is a public, unauthenticated GraphQL endpoint — it
+has no idea it's "us" or that our contract moves to 15-min settlement on
+2026-08-01. It's plausible it keeps returning 24 hourly rows/day indefinitely
+even after our real bill is settled per quarter, if it's a generic display
+feed decoupled from the actual billing engine. That case is dangerous
+precisely *because* it's silent: `price_coverage`/`gate()` only checks that
+priced seconds cover the day, and a stale hourly price repeated across 4
+quarters still covers 100% of it — nothing would look wrong while every
+quarter's cost is computed from the wrong sub-hour rate.
+
+Verified empirically (2026-07-31, real data for 2026-07-29) that a correct
+fallback exists: Frank's hourly `marketPrice` is the plain average of the
+real quarter-hour day-ahead wholesale prices published by EnergyZero's public
+API (`public.api.energyzero.nl/public/v1/prices?...&interval=INTERVAL_QUARTER`
+— no auth, the same feed the sibling battery-planning repo already uses,
+sourced from the NL day-ahead auction which has cleared in 15-minute MTUs
+since 2025-10-01). Max difference across a full day: 0.00001 €/kWh. Frank's
+other components don't scale with the market price the same way:
+`sourcing_markup` and `energy_tax` are flat €/kWh across all rows in a day,
+while `market_price_tax` is exactly 21% BTW of `market_price`. So the correct
+per-quarter reconstruction is:
+
+```
+quarter.market_price      = EnergyZero's real quarter-hour wholesale price
+quarter.market_price_tax  = quarter.market_price × (hourly_row.market_price_tax / hourly_row.market_price)
+quarter.sourcing_markup   = hourly_row.sourcing_markup      (unchanged)
+quarter.energy_tax        = hourly_row.energy_tax           (unchanged)
+```
+
+Implemented in `collector/prices.py` as `fetch_quarter_hour_wholesale()` +
+`reconstruct_quarter_hour_rows()`, wired in behind an opt-in
+`--reconstruct-if-coarse` flag — **not automatic**. We don't yet know for
+certain that Frank's real 15-min billing actually varies within the hour
+(rather than some suppliers literally re-billing every quarter at the same
+repeated hourly-average rate); the EnergyZero match tells us the correct
+number *if* it varies, not that it does. Silently swapping in a plausible-
+looking reconstructed number unvalidated against a real invoice would
+recreate the exact "confidently wrong" failure this fallback exists to
+avoid — see `CODE-REVIEW.md`. Reconstructed points are tagged
+`source=frank+energyzero` (vs. `source=frank`) for auditability;
+`pricing.py` doesn't filter or group on that tag, so this needed no changes
+there. `prices.py`'s `run()` always logs a warning the moment a
+post-cutover day comes back coarse, whether or not the flag is set.
 
 ### Per-slot netting is *exact* for 2026 (not an approximation)
 
@@ -91,6 +141,11 @@ are refunded on returned electricity. Combined with our assumption that
 - **Energy tax + BTW:** the rate is *flat* across slots, so
   `Σ (import_i − export_i) × tax = (Σimport − Σexport) × tax`. Per-slot netting
   equals the legally-correct annual volume netting. Exact.
+
+  This argument depends only on the tax rate being flat across slots, not on
+  how long a slot is — it holds identically whether a slot is one hour or 15
+  minutes. "Per-slot netting" is the accurate framing across the 2026-08-01
+  granularity cutover, not "per-hour."
 
 Therefore daily results are **additive** — a day is self-contained *and* the
 annual total is right. Period stats are plain sums of daily rows. (This
@@ -109,7 +164,8 @@ total = marketPrice + marketPriceTax + sourcingMarkupPrice + energyTaxPrice
 The components are BTW-handled per-part: `marketPriceTax` is the 21% BTW on the
 market price, and `sourcingMarkupPrice` / `energyTaxPrice` are themselves
 BTW-inclusive. So `total` is the fully all-in consumption price (€/kWh). One
-call returns one Amsterdam local day (23/24/25 hourly rows across DST).
+call returns one Amsterdam local day — 23/24/25 hourly rows across DST through
+2026-07-31, ×4 (92/96/100 rows) from 2026-08-01 under 15-minute settlement.
 
 We store all four components + the all-in `total` + `from`/`till`. This means:
 
@@ -249,9 +305,10 @@ For each **complete** day not already processed at the current `model_version`:
 - **Price coverage is gated separately, and near-absolutely (≥ 99.9%,
   `PRICING_MIN_PRICE_COVERAGE`).** Sample coverage and price coverage fail
   independently, and only the first is visible in the samples: energy landing in
-  an hour with no price row is *discarded* by the integration, not
-  approximated. A day priced for 12 of its 24 hours therefore costs out at
-  exactly half the true figure in both models — with `coverage` still reading
+  a slot with no price row is *discarded* by the integration, not
+  approximated. A day priced for only half its slots (12 of 24 hourly, or 48 of
+  96 quarter-hourly from 2026-08-01) therefore costs out at exactly half the
+  true figure in both models — with `coverage` still reading
   1.000 — and once written it is never revisited (see Caching / idempotency).
   Unlike sample coverage there is no interpolation to lean on, so the threshold
   admits float error on the boundary arithmetic and nothing else. The rolling

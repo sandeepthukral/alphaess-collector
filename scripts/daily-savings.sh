@@ -2,7 +2,7 @@
 # Nightly battery-savings update, intended for DSM Task Scheduler (run as root,
 # ~02:00 daily). Fetches Frank Energie prices and computes per-day savings for a
 # rolling window of recent complete days, then leaves. Safe to run repeatedly:
-#   - prices.py writes are idempotent (same hourly timestamps overwrite)
+#   - prices.py writes are idempotent (same slot timestamps overwrite)
 #   - pricing.py skips days already written and retries days previously skipped
 #     (late-published prices / low coverage), so the window is self-healing.
 set -eu

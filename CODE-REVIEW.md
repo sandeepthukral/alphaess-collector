@@ -58,6 +58,14 @@ reset in `DEPLOY.md`, "Changing the Grafana admin password". The `:?` guard from
 - [x] #12 Separate bucket for the second project — `planning`, 400d retention, created 2026-07-29
 - [x] #13 Second project uses `http://influxdb:8086`, not the host port — `DEPLOY.md`, "Sharing the stack" (PR #18)
 - [x] #14 `name: alphaess-net` + ownership/lifecycle note — PR #18
+- [ ] #15 `balance_residual_kwh` computed but never gated
+- [ ] #16 No date-aware branch for the 2027 saldering/netting change
+- [ ] #17 `export_price()` formula still unvalidated against a real bill
+- [ ] #18 Stale `daily_cost` rows require manual `influx delete`, no auto-heal
+- [ ] #19 Dashboard "Effective €/kWh" can misleadingly read as 0.0
+- [ ] #20 `MODEL_VERSION`/dashboard sync is a CI test, not a runtime guard
+- [ ] #21 AlphaESS sensor sign convention has no automated verification
+- [ ] #22 EnergyZero reconstruction fallback unvalidated against a real 15-min invoice
 - [ ] Housekeeping — stale "capped at 5 minutes" in `DEPLOY.md` and the alert rule
 - [x] Housekeeping — dashboard tags: already consistent (`alphaess` on all four), no change needed
 
@@ -727,3 +735,141 @@ but it should land only once the second project is confirmed to be joining
 `alphaess-net` and using `http://influxdb:8086`. Doing it first would break that
 project the moment it was configured the other way — and the resulting error would
 send its author looking in the wrong repository.
+
+---
+
+## Battery savings — additional findings (2026-07-31, undone)
+
+Found during a follow-up review of `collector/pricing.py` focused specifically
+on the savings-calculation logic. Not yet actioned — revisit later.
+
+### 15. `balance_residual_kwh` is computed but never gated
+
+`compute_day` (`collector/pricing.py:249-254`) integrates
+`|pv + grid + battery - load|` over the day into `balance_residual_kwh` and
+stores it, but `gate()` never checks it. A day with a sensor fault, a sign
+error, or clock skew between channels can still pass `coverage`/
+`price_coverage`/`max_gap_s` and get published with a wrong saving. This is
+already an open item in `DESIGN-battery-savings.md` ("choose the cutoff that
+flags/excludes a day").
+
+**Fix:** pick a residual threshold and add it to `gate()`, once enough
+history of real-world residual values exists to choose a sane cutoff.
+
+**Caveat added 2026-07-31, unconfirmed:** `load_power_w` (`pload` from the
+AlphaESS API) may not be an independent measurement at all. AlphaESS's public
+Web Monitoring API spec (V2.1) for the closest documented equivalent of the
+raw power endpoint lists `Ppv1/Ppv2`, `PrealL1-3`, `PmeterL1-3` (grid CT),
+`PmeterDC`, `Pbat`, and `Sva` — no load field. No AlphaESS hardware writeup
+found (Home Assistant integrations, Modbus register maps, forum threads)
+describes a dedicated load CT as a standard or optional component, consistent
+with load being computed downstream as `pv + grid + battery` rather than
+sensed. That endpoint is for AlphaESS's older internal API
+(`api.alphaess.com/ras/v2`), not the `openapi.alphaess.com` endpoint this
+collector actually calls, so this is circumstantial, not confirmed — the
+Open API's exact field derivation sits behind a registration wall
+(`open.alphaess.com/developmentManagement/apiList`) that would need to be
+checked with a registered developer account.
+
+If `pload` is in fact derived from `ppv`/`pgrid`/`pbat` rather than
+independently sensed, `balance_residual_kwh` is weaker evidence than it looks:
+it would mostly capture timing/rounding noise from when AlphaESS's backend
+computed the derived value, not a genuine cross-check. A real fault in the PV
+or battery reading would likely propagate straight into the derived load
+value too, so the residual could stay small even when the underlying number
+is wrong. Worth confirming against the actual Open API docs before leaning on
+this metric as a meaningful data-quality gate.
+
+### 16. No date-aware branch for the 2027 saldering change
+
+`export_price()` (`collector/pricing.py:197-205`) hardcodes the 2026 netting
+rule. `DESIGN-battery-savings.md` states this exactness "ends in 2027," but
+no code checks the current date or branches on it. On 2027-01-01 the model
+will keep applying 2026-era tax math with no error or warning.
+
+**Fix:** add an explicit date guard (e.g. raise or log loudly past a cutoff
+date) so this can't be missed silently when the rule actually changes.
+
+### 17. `export_price()` still unvalidated against a real bill
+
+The function's own docstring says to "pin against a real teruglevering bill
+line post-2026-07-26." Worth confirming whether that validation has actually
+happened.
+
+**Fix:** compare a computed month against the actual annual/periodic
+settlement once available, and record the result.
+
+### 18. Stale `daily_cost` rows require manual deletion, no auto-heal
+
+`process_day` (`collector/pricing.py:409-433`) never overwrites a day that
+the gate currently rejects, even under `--force`. `pricing.py --audit`
+detects these "stale" rows and prints the exact `influx delete` command, but
+correcting a stale row is always a manual step today.
+
+**Fix:** consider having `--audit --fix` (or similar) perform the delete +
+recompute automatically for rows it can safely identify as stale.
+
+### 19. Dashboard "Effective €/kWh" can misleadingly read as 0.0
+
+In `grafana/alphaess-battery-savings.json`, the Effective €/kWh panel divides
+total saving by total avoided import over the selected range, falling back to
+`0.0` whenever avoided import is `<= 0` for that range — with no visual
+distinction between "no benefit" and "denominator degenerate for this
+period."
+
+**Fix:** render `null`/blank (or a distinct marker) instead of `0.0` when the
+denominator is non-positive, so a short/unusual date range doesn't read as a
+real zero.
+
+### 20. `MODEL_VERSION`/dashboard sync is a CI test, not a runtime guard
+
+`tests/test_model_version_consistency.py` pins `pricing.MODEL_VERSION`
+against the dashboard's `model_version` template variable, but nothing
+enforces this at runtime. Bumping `MODEL_VERSION` without updating the
+dashboard JSON produces a dashboard that silently shows frozen/stale numbers,
+not an error.
+
+**Fix:** no clear low-cost runtime check exists (the dashboard has no
+lifecycle hook into `pricing.py`); for now, rely on the CI test and call this
+out explicitly in the PR template/checklist when `MODEL_VERSION` changes.
+
+### 21. AlphaESS sensor sign convention has no automated verification
+
+The entire saving figure's sign depends on `pgrid`/`pbat` matching AlphaESS's
+documented convention (`collector/collector.py`). The only check is manual
+(`collector.py --once`), and the schema's `billed_cost` field is described as
+"entered later for validation" — i.e., optional and manual.
+
+**Fix:** once a `billed_cost` value exists for a period, compare it
+automatically against `cost_model1` for the same period and warn if they
+diverge beyond a tolerance.
+
+### 22. EnergyZero reconstruction fallback unvalidated against a real 15-min invoice
+
+Added 2026-07-31 alongside the 15-min cutover work: `collector/prices.py`'s
+`--reconstruct-if-coarse` reconstructs quarter-hour prices from EnergyZero's
+public day-ahead feed for any day on/after 2026-08-01 where Frank's own API
+still returns hourly-or-coarser rows (a real risk, since that public GraphQL
+endpoint has no idea it's "us" or that our contract changed). The formula is
+empirically grounded — Frank's hourly `market_price` was verified to be the
+exact average of the real EnergyZero quarter-hour prices for 2026-07-29 (max
+diff 0.00001 €/kWh), and `market_price_tax`/`sourcing_markup`/`energy_tax`
+were verified to be, respectively, exactly 21% of `market_price`, flat, and
+flat, on every row of that same day. See `DESIGN-battery-savings.md`'s
+"Fallback if Frank's API doesn't actually cut over" for the full derivation.
+
+What's *not* verified: whether Frank's real 15-min billing actually varies
+within the hour once it goes live, as opposed to some suppliers literally
+re-billing every quarter at the same repeated hourly-average rate. The
+EnergyZero match tells us the correct number *if* it varies — not that it
+does. That's exactly why this ships opt-in (a CLI flag, not automatic) rather
+than silently substituted into the nightly job.
+
+**Fix:** close this the same way as #17 (export price vs. a real bill) — once
+either Frank's API genuinely starts returning quarter-hour rows, or a real
+15-min-itemized invoice arrives, compare it against what
+`reconstruct_quarter_hour_rows()` would have produced for the same hours. If
+they match, the fallback can graduate from opt-in to safe-to-automate (or be
+retired if Frank's API turns out to cut over cleanly and the fallback is
+simply never needed); if they don't, the formula needs revisiting before it's
+trusted for anything unattended.

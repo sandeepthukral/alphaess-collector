@@ -7,7 +7,7 @@ wrote. Those rows are invisible otherwise -- they look like every other row.
 
 import datetime as dt
 
-from conftest import constant_samples, hourly_intervals
+from conftest import constant_samples, hourly_intervals, quarter_hour_intervals
 from pricing import NL_TZ, audit_day, stored_days
 
 
@@ -125,3 +125,24 @@ def test_audit_flags_a_row_with_poor_sample_coverage(summer_day, day_window):
                                start + dt.timedelta(hours=18), grid=1000.0)
     status, _detail = audit_day(summer_day, samples, hourly_intervals(start, 24))
     assert status == "stale"
+
+
+# --------------------------------------------------------------------------
+# 15-minute settlement (contract cutover 2026-08-01)
+# --------------------------------------------------------------------------
+
+def test_audit_passes_a_fully_priced_day_at_quarter_hour_resolution(summer_day, day_window):
+    start, end = day_window
+    samples = constant_samples(start, end, grid=1000.0)
+    status, detail = audit_day(summer_day, samples, quarter_hour_intervals(start, 96))
+    assert status == "ok"
+    assert "price_coverage=1.000" in detail
+
+
+def test_audit_flags_a_row_whose_day_is_only_half_priced_at_quarter_hour_resolution(
+        summer_day, day_window):
+    start, end = day_window
+    samples = constant_samples(start, end, grid=1000.0)
+    status, detail = audit_day(summer_day, samples, quarter_hour_intervals(start, 48))
+    assert status == "stale"
+    assert "price coverage" in detail
