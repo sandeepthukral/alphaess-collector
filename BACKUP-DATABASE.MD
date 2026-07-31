@@ -1,5 +1,11 @@
 # Nightly InfluxDB backups to the NAS's Google-Drive-synced folder
 
+Status: **complete and verified on the NAS**, 2026-07-31. All 5 changes below
+are live; all 5 verification steps passed (see checkmarks). One bug found and
+fixed during verification: `influx backup` doesn't overwrite same-day files,
+so a re-run silently doubled them — the script now clears the dated folder
+first (§3).
+
 ## Context
 
 InfluxDB currently stores its data only in the named Docker volume
@@ -148,18 +154,26 @@ section, matching how the battery-savings nightly job is already linked.
 
 ## Verification
 
-1. `docker compose up -d` (or just recreate `influxdb`) after the compose
-   change, then confirm the bind mount landed:
-   `docker compose exec influxdb ls /backups` (should exist, empty).
-2. Run the new script by hand from the repo root and confirm a dated folder
-   with InfluxDB backup manifest/data files appears both inside the container
+1. ✅ `docker compose up -d` after the compose change, bind mount landed.
+   (First attempt failed — `.env` on the NAS didn't have `BACKUP_HOST_DIR`
+   set yet, so it fell through to the `./backups` default, which didn't
+   exist under the repo checkout. Fixed by setting the var and pre-creating
+   the Drive-side folder, matching ownership of the parent `googleDrive`
+   dir rather than leaving it root-owned from `mkdir`.)
+2. ✅ Ran the script by hand; dated folder with InfluxDB backup
+   manifest/data files appeared both inside the container
    (`docker compose exec influxdb ls /backups/<today>`) and on the host at
    `/volume1/web/googleDrive/alphaess-influxdb-backups/<today>`.
-3. Sanity-check restore flags against the actual installed CLI:
-   `docker compose exec influxdb influx restore --help`.
-4. Re-run the script a second time and confirm it's idempotent for the day
-   (overwrites or errors cleanly, not silently duplicating) and that the
-   retention `find`/prune command does not delete today's fresh folder.
-5. Add the DSM Task Scheduler entry and trigger a manual "Run now" once to
-   confirm it works under Task Scheduler's environment (minimal `PATH`, `root`
-   user), same as was done for the existing battery-savings task.
+3. ✅ Checked restore flags against the actual installed CLI
+   (`docker compose exec influxdb influx restore --help`) — `--full`,
+   `--org`/`-o`, `--token`/`-t` all present as assumed.
+4. ✅ Re-ran the script a second time. First attempt: **not** idempotent —
+   file count doubled (`influx backup` timestamps rather than overwrites).
+   Fixed by clearing the dated folder before each run (§3); re-verified
+   after the fix — file count and single timestamp prefix stayed the same
+   across repeated runs, and retention pruning left today's fresh folder
+   alone.
+5. ✅ Added the DSM Task Scheduler entry (daily, `01:00`, no extra
+   within-day repeat) and triggered a manual "Run now" — new dated backup
+   appeared, file count unchanged (9 files, one timestamp), confirming it
+   works under Task Scheduler's environment (minimal `PATH`, `root` user).
