@@ -89,9 +89,14 @@ start/done lines):
   permissions and rejects scoped/all-access tokens like
   `INFLUX_TOKEN_COLLECTOR`.
 - Run the backup into a dated subfolder so each day is independently
-  restorable and prunable:
+  restorable and prunable. `influx backup` timestamps every file it writes
+  rather than overwriting, so a re-run into a non-empty dated folder silently
+  doubles the files instead of replacing them (confirmed by testing) — clear
+  the folder first so a re-run (manual test, retry after failure) replaces
+  today's backup rather than piling up extra full snapshots next to it:
   ```sh
   TS=$(date +%Y-%m-%d)
+  rm -rf "${BACKUP_HOST_DIR:-./backups}/$TS"
   docker compose exec -T influxdb influx backup "/backups/$TS" \
     --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
   ```

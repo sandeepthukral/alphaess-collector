@@ -27,6 +27,12 @@ DC="docker compose"
 
 TS=$(date +%Y-%m-%d)
 
+# influx backup timestamps every file it writes rather than overwriting, so a
+# re-run into a non-empty dated folder just piles up extra full snapshots
+# instead of replacing today's. Clear it first so a re-run (manual test, retry
+# after a failure) replaces rather than duplicates.
+rm -rf "${BACKUP_HOST_DIR:-./backups}/$TS"
+
 echo "$(date '+%Y-%m-%d %H:%M:%S') backup-influxdb: backing up to /backups/$TS"
 
 $DC exec -T influxdb influx backup "/backups/$TS" \
