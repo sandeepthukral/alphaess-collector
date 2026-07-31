@@ -500,6 +500,19 @@ dashboard = {
         "tooltip": "What the planner intends next",
         "type": "dashboards",
         "url": "",
+    }, {
+        # The battery-planning repo's report-viewer nginx service, serving report_day.py's
+        # full narrative (SoC-carry notes, no-battery baseline framing, hour-by-hour
+        # forecast commentary) that isn't worth re-deriving as Flux queries.
+        "asDropdown": False,
+        "icon": "doc",
+        "includeVars": False,
+        "keepTime": False,
+        "targetBlank": True,
+        "title": "Full report (text)",
+        "tooltip": "report_day.py's narrative for the day this dashboard is showing",
+        "type": "link",
+        "url": "http://192.168.68.105:8091/report_${__from:date:YYYYMMDD}.txt",
     }],
     "panels": panels,
     "preload": False,
@@ -531,7 +544,7 @@ dashboard = {
     # already stored unless the incoming version is higher - it reads the new file, compares,
     # and does nothing, with no error and no log line. The symptom is a fix that appears not
     # to have worked, which sends you back to re-debug a query that was already correct.
-    "version": 1,
+    "version": 2,
     "weekStart": "",
 }
 
