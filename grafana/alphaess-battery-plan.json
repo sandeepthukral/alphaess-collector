@@ -629,6 +629,88 @@
                 "value": 0
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "sell above"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "dark-red",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "buy below"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "dark-green",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.lineWidth",
+                "value": 1
+              }
+            ]
           }
         ]
       },
@@ -669,6 +751,22 @@
           },
           "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"market_price\" and r._field == \"market_price\")\n  |> map(fn: (r) => ({ _time: r._time, \"market price\": r._value * 100.0 }))\n  |> yield(name: \"market_price\")\n",
           "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"array\"\n\narray.from(rows: [\n  {_time: v.timeRangeStart, \"sell above\": float(v: \"${price_high_eur}\") * 100.0},\n  {_time: v.timeRangeStop, \"sell above\": float(v: \"${price_high_eur}\") * 100.0}\n])\n  |> yield(name: \"sell threshold\")\n",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"array\"\n\narray.from(rows: [\n  {_time: v.timeRangeStart, \"buy below\": float(v: \"${price_low_eur}\") * 100.0},\n  {_time: v.timeRangeStop, \"buy below\": float(v: \"${price_low_eur}\") * 100.0}\n])\n  |> yield(name: \"buy threshold\")\n",
+          "refId": "D"
         }
       ],
       "title": "Planned charge / discharge, against price",
@@ -820,6 +918,46 @@
         "query": "27900",
         "skipUrlSync": false,
         "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "0.16472",
+          "value": "0.16472"
+        },
+        "description": "alphaess app's 'High' band floor (EUR/kWh) - sell above this. Drawn as a dashed line on the price panel so the band can be checked, and retuned, against the real market price rather than guessed.",
+        "hide": 0,
+        "label": "Sell above (EUR/kWh)",
+        "name": "price_high_eur",
+        "options": [
+          {
+            "selected": true,
+            "text": "0.16472",
+            "value": "0.16472"
+          }
+        ],
+        "query": "0.16472",
+        "skipUrlSync": false,
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "text": "0.05733",
+          "value": "0.05733"
+        },
+        "description": "alphaess app's 'Low' band ceiling (EUR/kWh) - buy below this. Drawn as a dashed line on the price panel so the band can be checked, and retuned, against the real market price rather than guessed.",
+        "hide": 0,
+        "label": "Buy below (EUR/kWh)",
+        "name": "price_low_eur",
+        "options": [
+          {
+            "selected": true,
+            "text": "0.05733",
+            "value": "0.05733"
+          }
+        ],
+        "query": "0.05733",
+        "skipUrlSync": false,
+        "type": "textbox"
       }
     ]
   },
@@ -831,6 +969,6 @@
   "timezone": "browser",
   "title": "AlphaESS Battery Plan",
   "uid": "alphaess-battery-plan",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }
