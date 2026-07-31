@@ -509,7 +509,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Discharge is drawn negative so the two directions separate. The price line is the reason for every block: buying happens in the troughs, selling on the peaks. If an action does not line up with the price, that is the interesting case.",
+      "description": "Discharge is drawn negative so the two directions separate. The price line is the raw market price (no tax, sourcing markup, or energy tax) - the same signal alphaess's own scheduling reacts to, so this is what to eyeball when tuning it: buying should happen in the troughs, selling on the peaks. If an action does not line up with the price, that is the interesting case.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -602,7 +602,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "buy price"
+              "options": "market price"
             },
             "properties": [
               {
@@ -623,33 +623,6 @@
               {
                 "id": "custom.axisLabel",
                 "value": "ct/kWh"
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 0
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "sell price"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "yellow",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "unit",
-                "value": "none"
-              },
-              {
-                "id": "custom.axisPlacement",
-                "value": "right"
               },
               {
                 "id": "custom.fillOpacity",
@@ -686,8 +659,16 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nfrom(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest)\n  |> filter(fn: (r) => r._field == \"charge_wh\" or r._field == \"discharge_wh\"\n                    or r._field == \"price_buy\" or r._field == \"price_sell\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({\n      _time: r._time,\n      \"charge\": r.charge_wh / 1000.0,\n      \"discharge\": -r.discharge_wh / 1000.0,\n      \"buy price\": r.price_buy * 100.0,\n      \"sell price\": r.price_sell * 100.0 }))\n  |> yield(name: \"actions\")\n",
+          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nfrom(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest)\n  |> filter(fn: (r) => r._field == \"charge_wh\" or r._field == \"discharge_wh\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({\n      _time: r._time,\n      \"charge\": r.charge_wh / 1000.0,\n      \"discharge\": -r.discharge_wh / 1000.0 }))\n  |> yield(name: \"actions\")\n",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"market_price\" and r._field == \"market_price\")\n  |> map(fn: (r) => ({ _time: r._time, \"market price\": r._value * 100.0 }))\n  |> yield(name: \"market_price\")\n",
+          "refId": "B"
         }
       ],
       "title": "Planned charge / discharge, against price",

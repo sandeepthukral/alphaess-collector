@@ -247,38 +247,39 @@ from(bucket: "planning")
 # --- Panel: actions against price -------------------------------------------------------
 panels.append(timeseries(
     6, "Planned charge / discharge, against price",
-    "Discharge is drawn negative so the two directions separate. The price line is the "
-    "reason for every block: buying happens in the troughs, selling on the peaks. If an "
-    "action does not line up with the price, that is the interesting case.",
+    "Discharge is drawn negative so the two directions separate. The price line is the raw "
+    "market price (no tax, sourcing markup, or energy tax) - the same signal alphaess's own "
+    "scheduling reacts to, so this is what to eyeball when tuning it: buying should happen in "
+    "the troughs, selling on the peaks. If an action does not line up with the price, that is "
+    "the interesting case.",
     [target(NEWEST + '''
 from(bucket: "planning")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
   |> filter(fn: (r) => r._measurement == "plan" and r.plan_run == newest)
-  |> filter(fn: (r) => r._field == "charge_wh" or r._field == "discharge_wh"
-                    or r._field == "price_buy" or r._field == "price_sell")
+  |> filter(fn: (r) => r._field == "charge_wh" or r._field == "discharge_wh")
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> map(fn: (r) => ({
       _time: r._time,
       "charge": r.charge_wh / 1000.0,
-      "discharge": -r.discharge_wh / 1000.0,
-      "buy price": r.price_buy * 100.0,
-      "sell price": r.price_sell * 100.0 }))
+      "discharge": -r.discharge_wh / 1000.0 }))
   |> yield(name: "actions")
-''', "A")],
+''', "A"),
+     target('''from(bucket: "alphaess")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "market_price" and r._field == "market_price")
+  |> map(fn: (r) => ({ _time: r._time, "market price": r._value * 100.0 }))
+  |> yield(name: "market_price")
+''', "B")],
     13, 9, "kwatth",
     [series_override("charge", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
                                 {"id": "custom.drawStyle", "value": "bars"}]),
      series_override("discharge", [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
                                    {"id": "custom.drawStyle", "value": "bars"}]),
-     series_override("buy price", [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}},
-                                   {"id": "unit", "value": "none"},
-                                   {"id": "custom.axisPlacement", "value": "right"},
-                                   {"id": "custom.axisLabel", "value": "ct/kWh"},
-                                   {"id": "custom.fillOpacity", "value": 0}]),
-     series_override("sell price", [{"id": "color", "value": {"fixedColor": "yellow", "mode": "fixed"}},
-                                    {"id": "unit", "value": "none"},
-                                    {"id": "custom.axisPlacement", "value": "right"},
-                                    {"id": "custom.fillOpacity", "value": 0}])],
+     series_override("market price", [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}},
+                                      {"id": "unit", "value": "none"},
+                                      {"id": "custom.axisPlacement", "value": "right"},
+                                      {"id": "custom.axisLabel", "value": "ct/kWh"},
+                                      {"id": "custom.fillOpacity", "value": 0}])],
     fill=60))
 
 # --- Panel: action table ----------------------------------------------------------------
