@@ -125,11 +125,14 @@ services:
       # DEPLOY.md, "Changing the Grafana admin password" to change it later.
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env -- no default, see DEPLOY.md, "Transfer secrets"}
       # ECharts panel used by the Energy Flow (Sankey) dashboard (not in core Grafana).
-      # Pinned: unpinned means Grafana pulls the plugin registry's current release
-      # on every fresh start, which is both a reproducibility and a supply-chain
-      # concern. 7.2.2 is the newest release that still supports Grafana 11.6.0
-      # (7.2.4+ require >=12.3.0); bump both together if Grafana is upgraded.
-      GF_INSTALL_PLUGINS: volkovlabs-echarts-panel@7.2.2
+      # Deliberately unpinned. A `@7.2.2` pin was tried (7.2.4+ need Grafana
+      # >=12.3.0, this stack runs 11.6.0) and it crash-looped Grafana on a fresh
+      # install: GCOM's plugin API 404s when the entrypoint requests that exact
+      # pinned version, even though the version itself is real and compatible
+      # -- the unpinned path (fetch "latest" metadata, which the plugin's own
+      # compatibility check then filters) is the one that actually works
+      # against this Grafana version. Confirmed on the NAS 2026-07-31.
+      GF_INSTALL_PLUGINS: volkovlabs-echarts-panel
       # Consumed by grafana/provisioning/datasources/influxdb.yml.
       # Read-only, across every bucket Grafana must chart. Anyone reaching the
       # Grafana UI can issue arbitrary Flux through the datasource proxy.

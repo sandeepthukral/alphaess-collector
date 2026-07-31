@@ -39,9 +39,10 @@ reset in `DEPLOY.md`, "Changing the Grafana admin password". The `:?` guard from
 - [x] #6 Grafana password default — `:?` guard, no fallback ~~+ loopback binding~~ (binding half reversed, see #6)
 - [x] #7 `sysSn` redaction in `error_summary` — `_URL_QUERY_RE`, strips the query string from any URL in the message
 - [ ] #8 Flux parameter binding
-- [x] #9 Log rotation (`x-logging` anchor, `max-size: 10m`/`max-file: 3` on all four services) +
-      pinned `GF_INSTALL_PLUGINS` version — rest of #9 (`cap_drop`, `read_only`, `no-new-privileges`,
-      memory limits) deliberately left, lower value per the ordering note below
+- [x] #9 Log rotation (`x-logging` anchor, `max-size: 10m`/`max-file: 3` on all four services).
+      Plugin pin attempted, crash-looped Grafana on the NAS, reverted — see notes below. Rest
+      of #9 (`cap_drop`, `read_only`, `no-new-privileges`, memory limits) deliberately left,
+      lower value per the ordering note below
 - [x] Test scaffolding — pytest + ruff + GitHub Actions, 81 tests
 - [x] Backoff cap vs. pricing gap gate — `MAX_BACKOFF_SECONDS`, PR #17 *(not from this
       review; found while investigating a recurring collection gap after the
@@ -84,12 +85,17 @@ polling) log continuously forever — on a NAS now shared with a second
 project, that's unbounded disk growth rather than a theoretical concern.
 10m × 3 files × 4 services caps total log disk at 120 MB.
 
-Also pinned `GF_INSTALL_PLUGINS` to `volkovlabs-echarts-panel@7.2.2` — it was
-unpinned, so every fresh Grafana start pulled whatever the plugin registry's
-current release was, a reproducibility and supply-chain gap. 7.2.2 is the
-newest release that still supports Grafana 11.6.0 (the compose file's pinned
-Grafana version); 7.2.4+ require Grafana ≥12.3.0. Bump both together if
-Grafana is ever upgraded.
+**Plugin pin attempted and reverted.** Pinned `GF_INSTALL_PLUGINS` to
+`volkovlabs-echarts-panel@7.2.2` (newest release still listing `>=11.0.0`,
+compatible with the compose file's pinned Grafana 11.6.0; 7.2.4+ need
+Grafana ≥12.3.0) to close the reproducibility/supply-chain gap of an
+unpinned plugin. Deployed to the NAS and it crash-looped Grafana on a fresh
+plugin install: GCOM's plugin API 404s when queried for that exact pinned
+version, despite the version itself being real, listed, and downloadable —
+the unpinned install path (fetch "latest" metadata, filtered by the plugin's
+own compatibility check) is the one that actually works against this
+Grafana version. Reverted to unpinned; the gap this was meant to close is
+still open. Confirmed working again on the NAS 2026-07-31.
 
 Left out, per the ordering note's "lower value" call: `cap_drop: [ALL]`,
 `read_only: true`, `no-new-privileges`, memory limits. `docker compose
