@@ -269,7 +269,23 @@ from(bucket: "planning")
   |> filter(fn: (r) => r._measurement == "market_price" and r._field == "market_price")
   |> map(fn: (r) => ({ _time: r._time, "market price": r._value * 100.0 }))
   |> yield(name: "market_price")
-''', "B")],
+''', "B"),
+     target('''import "array"
+
+array.from(rows: [
+  {_time: v.timeRangeStart, "sell above": float(v: "${price_high_eur}") * 100.0},
+  {_time: v.timeRangeStop, "sell above": float(v: "${price_high_eur}") * 100.0}
+])
+  |> yield(name: "sell threshold")
+''', "C"),
+     target('''import "array"
+
+array.from(rows: [
+  {_time: v.timeRangeStart, "buy below": float(v: "${price_low_eur}") * 100.0},
+  {_time: v.timeRangeStop, "buy below": float(v: "${price_low_eur}") * 100.0}
+])
+  |> yield(name: "buy threshold")
+''', "D")],
     13, 9, "kwatth",
     [series_override("charge", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
                                 {"id": "custom.drawStyle", "value": "bars"}]),
@@ -279,7 +295,21 @@ from(bucket: "planning")
                                       {"id": "unit", "value": "none"},
                                       {"id": "custom.axisPlacement", "value": "right"},
                                       {"id": "custom.axisLabel", "value": "ct/kWh"},
-                                      {"id": "custom.fillOpacity", "value": 0}])],
+                                      {"id": "custom.fillOpacity", "value": 0}]),
+     series_override("sell above", [{"id": "color", "value": {"fixedColor": "dark-red", "mode": "fixed"}},
+                                    {"id": "unit", "value": "none"},
+                                    {"id": "custom.axisPlacement", "value": "right"},
+                                    {"id": "custom.fillOpacity", "value": 0},
+                                    {"id": "custom.lineStyle",
+                                     "value": {"dash": [10, 10], "fill": "dash"}},
+                                    {"id": "custom.lineWidth", "value": 1}]),
+     series_override("buy below", [{"id": "color", "value": {"fixedColor": "dark-green", "mode": "fixed"}},
+                                   {"id": "unit", "value": "none"},
+                                   {"id": "custom.axisPlacement", "value": "right"},
+                                   {"id": "custom.fillOpacity", "value": 0},
+                                   {"id": "custom.lineStyle",
+                                    "value": {"dash": [10, 10], "fill": "dash"}},
+                                   {"id": "custom.lineWidth", "value": 1}])],
     fill=60))
 
 # --- Panel: action table ----------------------------------------------------------------
@@ -383,6 +413,30 @@ dashboard = {
         "query": "27900",
         "skipUrlSync": False,
         "type": "textbox",
+    }, {
+        "current": {"text": "0.16472", "value": "0.16472"},
+        "description": "alphaess app's 'High' band floor (EUR/kWh) - sell above this. Drawn as "
+                       "a dashed line on the price panel so the band can be checked, and "
+                       "retuned, against the real market price rather than guessed.",
+        "hide": 0,
+        "label": "Sell above (EUR/kWh)",
+        "name": "price_high_eur",
+        "options": [{"selected": True, "text": "0.16472", "value": "0.16472"}],
+        "query": "0.16472",
+        "skipUrlSync": False,
+        "type": "textbox",
+    }, {
+        "current": {"text": "0.05733", "value": "0.05733"},
+        "description": "alphaess app's 'Low' band ceiling (EUR/kWh) - buy below this. Drawn as "
+                       "a dashed line on the price panel so the band can be checked, and "
+                       "retuned, against the real market price rather than guessed.",
+        "hide": 0,
+        "label": "Buy below (EUR/kWh)",
+        "name": "price_low_eur",
+        "options": [{"selected": True, "text": "0.05733", "value": "0.05733"}],
+        "query": "0.05733",
+        "skipUrlSync": False,
+        "type": "textbox",
     }]},
     # Six hours back, thirty-six forward: enough past to see the actual line diverge, enough
     # future to cover a horizon built after the ~13:00 price release.
@@ -397,7 +451,8 @@ dashboard = {
     # does not help. The symptom is a fix that appears not to have worked, which sends you
     # back to re-debug a query that was already correct.
     # 2: series renamed out of _value so the byName overrides bind.
-    "version": 2,
+    # 3: price line switched to raw market price; sell/buy threshold lines added.
+    "version": 3,
     "weekStart": "",
 }
 
