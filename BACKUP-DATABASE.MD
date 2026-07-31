@@ -1,9 +1,8 @@
 # Nightly InfluxDB backups to the NAS's Google-Drive-synced folder
 
-Status: **implemented, one fix pending re-verification on the NAS**,
-2026-07-31. All 5 changes below are live; verification steps 1–5 passed (see
-checkmarks). Two bugs found during verification, both fixed in the script;
-the second fix (§6) still needs to be run on the NAS to confirm:
+Status: **complete and verified on the NAS**, 2026-07-31. All 5 changes below
+are live; all verification steps passed (see checkmarks). Two bugs found and
+fixed during verification:
 - `influx backup` doesn't overwrite same-day files, so a re-run silently
   doubled them — the script now clears the dated folder first (§3).
 - The dated backup folder landed `root:root` on the host (the container runs
@@ -193,9 +192,9 @@ section, matching how the battery-savings nightly job is already linked.
    within-day repeat) and triggered a manual "Run now" — new dated backup
    appeared, file count unchanged (9 files, one timestamp), confirming it
    works under Task Scheduler's environment (minimal `PATH`, `root` user).
-6. ⬜ Google Drive's own UI showed the dated subfolder under
+6. ✅ Google Drive's own UI showed the dated subfolder under
    `alphaess-influxdb-backups` as `root:root` (parent folder correctly
    `sandeep:users`), confirming it wasn't syncing. Added the `chown` step
-   (§3) in response — **not yet re-verified on the NAS**: still need to pull
-   this branch, re-run the script by hand, and confirm the fresh dated folder
-   comes out owned `sandeep:users`.
+   (§3); re-ran on the NAS — fresh dated folder came out owned
+   `sandeep:users`, matching the parent, and files subsequently appeared in
+   Google Drive.
