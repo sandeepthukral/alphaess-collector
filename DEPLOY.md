@@ -171,6 +171,67 @@ Test it once by hand first
 (`sudo /volume1/docker/alphaess-collector/scripts/daily-savings.sh`). Adjust the
 window via `WINDOW_DAYS` near the top of the script.
 
+## Backing up InfluxDB
+
+InfluxDB's data lives only in the `alphaess-influxdb-data` Docker volume,
+which the NAS's Google Drive backup doesn't reach (it only covers ordinary
+shared folders). [scripts/backup-influxdb.sh](scripts/backup-influxdb.sh) runs
+nightly to land a restorable backup inside a folder the NAS's own backup tool
+already watches, so it rides along automatically — see
+[BACKUP-DATABASE.MD](BACKUP-DATABASE.MD) for the full design.
+
+It uses `influx backup`/`influx restore` rather than copying the volume
+directly, because InfluxDB is a live, continuously-written database and a raw
+file copy risks a torn/corrupt snapshot; `influx backup` produces a
+consistent, portable backup while the server keeps running.
+
+The script authenticates with the admin `INFLUX_TOKEN`, not a scoped
+per-service token — the one deliberate exception to the "Scoped tokens" rule
+below. `influx backup`/`influx restore` require operator-level permissions;
+scoped/all-access tokens are documented to fail backup with permission
+errors, so there's no narrower token available.
+
+Set in `.env`:
+
+- `BACKUP_HOST_DIR` — host directory bind-mounted into the influxdb container
+  at `/backups` (see `docker-compose.yml`). Point it at a folder your NAS
+  backup tool already covers, e.g.
+  `/volume1/web/googleDrive/alphaess-influxdb-backups`.
+- `BACKUP_RETENTION_DAYS` — local backups older than this are pruned after
+  each run (the external backup target, e.g. Google Drive, keeps its own
+  history independently).
+
+DSM **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined
+script**:
+
+- **General**: User = `root`
+- **Schedule**: Daily, first run time `01:00` (ahead of the `02:00`
+  battery-savings job)
+- **Task Settings → Run command**:
+
+  ```sh
+  /volume1/docker/alphaess-collector/scripts/backup-influxdb.sh
+  ```
+
+Test it once by hand first
+(`sudo /volume1/docker/alphaess-collector/scripts/backup-influxdb.sh`).
+
+### Restoring
+
+Verify the exact flags for the installed InfluxDB version first — CLI flags
+can shift across versions:
+
+```sh
+docker compose exec influxdb influx restore --help
+```
+
+Then, picking a dated backup folder:
+
+```sh
+docker compose exec influxdb influx restore "/backups/<date>" \
+  --full --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
+```
+
 ## Updating
 
 ```sh
@@ -268,6 +329,9 @@ it.
 `INFLUX_TOKEN` is the admin token. It can create and drop buckets, mint other
 tokens, and delete data. Nothing but InfluxDB's own first-start initialisation and
 your manual `influx` CLI work should ever hold it.
+
+The nightly backup script is the one exception — see
+["Backing up InfluxDB"](#backing-up-influxdb) for why.
 
 Every service gets a token scoped to what it actually does:
 

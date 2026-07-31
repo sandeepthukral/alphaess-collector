@@ -219,3 +219,6 @@ __marimo__/
 
 # local files for TODOs
 /etc
+
+# default local target for scripts/backup-influxdb.sh (non-NAS docker compose up)
+/backups
