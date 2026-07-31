@@ -21,9 +21,10 @@ Scope: full repository at commit `cce4419` (branch `simplify-nas-deploy`), ~6.6k
 
 ## Status
 
-**Resume point, 2026-07-31.** Steps 0–6 of the revised order are done. #7 and
-#9 are shipped but not yet applied to the NAS (code-only changes, take effect
-on the next `git pull` + rebuild there). Next up is step 7 (#4, #8).
+**Resume point, 2026-07-31.** Steps 0–6 of the revised order are done and applied
+to the NAS. #9's Grafana plugin pin crash-looped Grafana there on first deploy
+and was reverted -- see the notes below; log rotation and #7's redaction are
+unaffected and confirmed working. Next up is step 7 (#4, #8).
 
 One operator action is outstanding and cannot be done from the repository: the
 running Grafana still has the admin password it was initialised with, because
@@ -75,7 +76,7 @@ Verified with a new test,
 `tests/test_collector_helpers.py`, asserting both the tag name (`sysSn`) and
 the value (the serial number) are gone from the summary while the rest of the
 message — including the URL path, which is useful for diagnosis — survives.
-Not yet applied to the NAS; ships on the next deploy there.
+Applied to the NAS 2026-07-31.
 
 **#9** — `docker-compose.yml` gained an `x-logging` anchor (`json-file`,
 `max-size: 10m`, `max-file: 3`) applied via `logging: *default-logging` on
