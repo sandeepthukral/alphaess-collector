@@ -38,6 +38,15 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') backup-influxdb: backing up to /backups/$TS"
 $DC exec -T influxdb influx backup "/backups/$TS" \
   --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
 
+# influx backup runs as root inside the container (no user: pin in
+# docker-compose.yml), and the bind mount carries that uid straight through to
+# the host, so the dated folder lands root:root. That's invisible to the
+# Google Drive sync client, which runs as a normal user -- backups were never
+# actually reaching Drive. This script already runs as root (Task Scheduler),
+# so re-own the fresh folder to match whoever already owns the parent
+# BACKUP_HOST_DIR (the account the Drive sync client runs as).
+chown -R "$(stat -c '%U:%G' "$BACKUP_HOST_DIR")" "$BACKUP_HOST_DIR/$TS"
+
 # Pruning runs on the host path directly -- this script runs on the NAS host,
 # not in the container, so BACKUP_HOST_DIR is a normal filesystem path here.
 find "$BACKUP_HOST_DIR" -maxdepth 1 -mindepth 1 -type d \

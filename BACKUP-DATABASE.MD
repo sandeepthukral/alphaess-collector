@@ -1,10 +1,17 @@
 # Nightly InfluxDB backups to the NAS's Google-Drive-synced folder
 
-Status: **complete and verified on the NAS**, 2026-07-31. All 5 changes below
-are live; all 5 verification steps passed (see checkmarks). One bug found and
-fixed during verification: `influx backup` doesn't overwrite same-day files,
-so a re-run silently doubled them — the script now clears the dated folder
-first (§3).
+Status: **implemented, one fix pending re-verification on the NAS**,
+2026-07-31. All 5 changes below are live; verification steps 1–5 passed (see
+checkmarks). Two bugs found during verification, both fixed in the script;
+the second fix (§6) still needs to be run on the NAS to confirm:
+- `influx backup` doesn't overwrite same-day files, so a re-run silently
+  doubled them — the script now clears the dated folder first (§3).
+- The dated backup folder landed `root:root` on the host (the container runs
+  `influx backup` as root, and the bind mount carries that uid straight
+  through), which the Google Drive sync client — running as a normal user —
+  couldn't see, so backups were never actually reaching Drive. The script now
+  `chown`s the fresh folder to match whoever owns the parent `BACKUP_HOST_DIR`
+  after each run (§3).
 
 ## Context
 
@@ -106,6 +113,15 @@ start/done lines):
   docker compose exec -T influxdb influx backup "/backups/$TS" \
     --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
   ```
+- `influx backup` runs as root inside the container (no `user:` pin in
+  `docker-compose.yml`), and the bind mount carries that uid straight through
+  to the host, so the dated folder lands `root:root` — invisible to the Drive
+  sync client, which runs as a normal user. The script already runs as root
+  (Task Scheduler), so it re-owns the fresh folder to match whoever already
+  owns the parent `BACKUP_HOST_DIR` right after the backup completes:
+  ```sh
+  chown -R "$(stat -c '%U:%G' "$BACKUP_HOST_DIR")" "$BACKUP_HOST_DIR/$TS"
+  ```
 - Prune local backups older than `BACKUP_RETENTION_DAYS`, operating directly
   on the host path (the script runs on the NAS host, so no need to do this
   inside the container):
@@ -177,3 +193,9 @@ section, matching how the battery-savings nightly job is already linked.
    within-day repeat) and triggered a manual "Run now" — new dated backup
    appeared, file count unchanged (9 files, one timestamp), confirming it
    works under Task Scheduler's environment (minimal `PATH`, `root` user).
+6. ⬜ Google Drive's own UI showed the dated subfolder under
+   `alphaess-influxdb-backups` as `root:root` (parent folder correctly
+   `sandeep:users`), confirming it wasn't syncing. Added the `chown` step
+   (§3) in response — **not yet re-verified on the NAS**: still need to pull
+   this branch, re-run the script by hand, and confirm the fresh dated folder
+   comes out owned `sandeep:users`.
