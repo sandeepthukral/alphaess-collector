@@ -14,6 +14,11 @@ services:
       - "${INFLUX_PORT:-8086}:8086" # for local inspection of the InfluxDB UI
     volumes:
       - alphaess-influxdb-data:/var/lib/influxdb2
+      # Nightly backup target for scripts/backup-influxdb.sh (see
+      # BACKUP-DATABASE.MD). Default keeps a non-NAS `docker compose up`
+      # working out of the box; the NAS .env overrides it to point at a
+      # folder the NAS's own backup tool already watches.
+      - ${BACKUP_HOST_DIR:-./backups}:/backups
     networks:
       - alphaess-net
     healthcheck:

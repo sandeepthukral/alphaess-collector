@@ -75,7 +75,9 @@ The same self-contained stack runs on a NAS — one `docker-compose.yml`, the
 bundled Grafana and all provisioning included. See [DEPLOY.md](DEPLOY.md) for
 the NAS specifics: cloning, transferring secrets, host-port conflicts (e.g.
 another Grafana already on 3000), verifying the collector's link MTU after
-network changes, the nightly battery-savings task, and collection monitoring.
+network changes, the nightly battery-savings task, the
+[nightly InfluxDB backup](DEPLOY.md#backing-up-influxdb), and collection
+monitoring.
 
 ## AWTRIX clock display (Ulanzi TC001)
 
