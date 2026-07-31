@@ -21,9 +21,12 @@ Scope: full repository at commit `cce4419` (branch `simplify-nas-deploy`), ~6.6k
 
 ## Status
 
-**Resume point, 2026-07-31.** Steps 0–6 of the revised order are done. #7 and
-#9 are shipped but not yet applied to the NAS (code-only changes, take effect
-on the next `git pull` + rebuild there). Next up is step 7 (#4, #8).
+**Resume point, 2026-07-31.** Steps 0–6 of the revised order are done and applied
+to the NAS. #9's Grafana plugin pin crash-looped Grafana there on first deploy
+and was reverted — see the notes below and the postmortem; log rotation and #7's
+redaction are unaffected and confirmed working. A `compose-boot` CI job now
+boots Grafana from a fresh volume on every PR so this class of bug fails CI
+instead of shipping. Next up is step 7 (#4, #8).
 
 One operator action is outstanding and cannot be done from the repository: the
 running Grafana still has the admin password it was initialised with, because
@@ -75,7 +78,7 @@ Verified with a new test,
 `tests/test_collector_helpers.py`, asserting both the tag name (`sysSn`) and
 the value (the serial number) are gone from the summary while the rest of the
 message — including the URL path, which is useful for diagnosis — survives.
-Not yet applied to the NAS; ships on the next deploy there.
+Applied to the NAS 2026-07-31.
 
 **#9** — `docker-compose.yml` gained an `x-logging` anchor (`json-file`,
 `max-size: 10m`, `max-file: 3`) applied via `logging: *default-logging` on
@@ -96,6 +99,23 @@ the unpinned install path (fetch "latest" metadata, filtered by the plugin's
 own compatibility check) is the one that actually works against this
 Grafana version. Reverted to unpinned; the gap this was meant to close is
 still open. Confirmed working again on the NAS 2026-07-31.
+
+**Postmortem: how this shipped, and the guardrail added.** The pin was based on
+GCOM catalog research that confirmed the *version* was compatible but never
+exercised the actual install path GCOM's plugin API uses for a pinned version —
+that only 404s on a fresh install, and the NAS's Grafana volume already had the
+plugin cached from an earlier unpinned run, so nothing in local testing or
+`docker compose config` (which only validates YAML, never boots a container)
+could have surfaced it. The only thing that caught it was a human reading NAS
+logs after the fact. Fix: a `compose-boot` job in `.github/workflows/ci.yml`
+boots Grafana (and influxdb, via `depends_on`) from a **fresh** volume on every
+PR and fails the build if `/api/health` doesn't come up within 60s. Verified
+locally that it reproduces this exact failure — re-adding the `@7.2.2` pin
+against a clean volume gets the same `404: Plugin not found` crash-loop, so any
+future regression here fails CI instead of reaching the NAS. Standing rule: any
+change to `GF_INSTALL_PLUGINS` or an image tag needs a fresh-volume boot
+(`docker compose down -v && up`) before it's trusted, because the persisted
+Grafana volume silently hides exactly this failure mode.
 
 Left out, per the ordering note's "lower value" call: `cap_drop: [ALL]`,
 `read_only: true`, `no-new-privileges`, memory limits. `docker compose
@@ -693,11 +713,12 @@ after both sides depend on the current names.
    the service-name URL, and the `down -v` warning. Nothing left here; #11 later
    added the per-project identifier table to the same section.*
 5. **#7 `sysSn` redaction** — unchanged in priority; a leak to a third-party
-   monitor, and self-contained. *Done 2026-07-31; see the notes below. Not yet
-   applied to the NAS.*
+   monitor, and self-contained. *Done and applied to the NAS 2026-07-31; see the
+   notes below.*
 6. **#9 log rotation** — unbounded disk on a NAS now filling from two projects.
-   The rest of #9 (`cap_drop`, `read_only`) is lower value. *Done 2026-07-31; see
-   the notes below. Not yet applied to the NAS.*
+   The rest of #9 (`cap_drop`, `read_only`) is lower value. *Done and applied to
+   the NAS 2026-07-31; see the notes below, including the plugin-pin postmortem
+   and the `compose-boot` CI guardrail added because of it.*
 7. **#4 `daily-savings.sh` parsing**, **#8 Flux binding** — neither is currently
    reachable by an attacker or a realistic input; do them when convenient.
 

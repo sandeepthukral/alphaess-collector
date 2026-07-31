@@ -36,3 +36,49 @@ jobs:
       # without building anything. .env is gitignored, so supply the example.
       - name: Validate compose file
         run: cp .env.example .env && docker compose config --quiet
+
+  compose-boot:
+    runs-on: ubuntu-latest
+    # Boots grafana (and, via depends_on, influxdb) from a fresh volume and
+    # waits for Grafana to actually report healthy. compose-config above only
+    # checks the YAML is well-formed -- it never starts a container, so it
+    # would not have caught GF_INSTALL_PLUGINS pinned to a version whose
+    # install 404s against GCOM's plugin API and crash-loops the container.
+    # That shipped straight to the NAS on 2026-07-31 because nothing between
+    # `docker compose config` and a human reading NAS logs ever actually
+    # booted the stack. This job is that missing step, and it must run
+    # against a fresh volume each time -- the failure only reproduces on a
+    # from-scratch plugin install, not a container restart with the plugin
+    # already cached on disk.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same placeholder values compose-config uses. Good enough to prove the
+      # container boots and stays up -- not a full end-to-end smoke test;
+      # real dashboards need real scoped tokens (see DEPLOY.md).
+      - name: Fake .env for a from-scratch boot
+        run: cp .env.example .env
+
+      - name: Boot Grafana (and its influxdb dependency)
+        run: docker compose up -d grafana
+
+      - name: Wait for Grafana to report healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/api/health >/dev/null; then
+              echo "Grafana healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Grafana never became healthy within 60s"
+          exit 1
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs grafana influxdb
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v
