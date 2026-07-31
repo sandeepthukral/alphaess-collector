@@ -1,7 +1,18 @@
+x-logging: &default-logging
+  # All four services log continuously (the collector/pusher every
+  # POLL_INTERVAL_SECONDS, forever) and the default json-file driver has no
+  # cap of its own -- left alone it's unbounded disk growth on the NAS. Cap
+  # and rotate instead.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   influxdb:
     image: influxdb:2
     restart: unless-stopped
+    logging: *default-logging
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
       DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_ADMIN_USER:-admin}
@@ -30,6 +41,7 @@ services:
   collector:
     build: ./collector
     restart: unless-stopped
+    logging: *default-logging
     environment:
       ALPHAESS_APP_ID: ${ALPHAESS_APP_ID}
       ALPHAESS_APP_SECRET: ${ALPHAESS_APP_SECRET}
@@ -61,6 +73,7 @@ services:
   awtrix-pusher:
     build: ./awtrix-pusher
     restart: unless-stopped
+    logging: *default-logging
     environment:
       INFLUX_URL: http://influxdb:8086
       # Read-only: the pusher only ever reads the newest sample.
@@ -84,6 +97,7 @@ services:
   grafana:
     image: grafana/grafana-oss:11.6.0
     restart: unless-stopped
+    logging: *default-logging
     # Copies the dashboard JSON into the provisioning dir with the import
     # placeholder ${DS_ALPHAESS} resolved to the provisioned datasource uid,
     # then starts Grafana normally. Keeps grafana/alphaess-dashboard.json
@@ -110,8 +124,12 @@ services:
       # Only takes effect when Grafana first initialises its database; see
       # DEPLOY.md, "Changing the Grafana admin password" to change it later.
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env -- no default, see DEPLOY.md, "Transfer secrets"}
-      # ECharts panel used by the Energy Flow (Sankey) dashboard (not in core Grafana)
-      GF_INSTALL_PLUGINS: volkovlabs-echarts-panel
+      # ECharts panel used by the Energy Flow (Sankey) dashboard (not in core Grafana).
+      # Pinned: unpinned means Grafana pulls the plugin registry's current release
+      # on every fresh start, which is both a reproducibility and a supply-chain
+      # concern. 7.2.2 is the newest release that still supports Grafana 11.6.0
+      # (7.2.4+ require >=12.3.0); bump both together if Grafana is upgraded.
+      GF_INSTALL_PLUGINS: volkovlabs-echarts-panel@7.2.2
       # Consumed by grafana/provisioning/datasources/influxdb.yml.
       # Read-only, across every bucket Grafana must chart. Anyone reaching the
       # Grafana UI can issue arbitrary Flux through the datasource proxy.
