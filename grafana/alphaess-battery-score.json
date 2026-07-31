@@ -84,9 +84,9 @@
       "keepTime": false,
       "targetBlank": true,
       "title": "Full report (text)",
-      "tooltip": "report_day.py's narrative for the day this dashboard is showing",
+      "tooltip": "Browse report_day.py's narrative for any day",
       "type": "link",
-      "url": "http://192.168.68.105:8091/report_${__from:date:YYYYMMDD}.txt"
+      "url": "http://192.168.68.105:8091/"
     }
   ],
   "panels": [
@@ -1669,6 +1669,6 @@
   "timezone": "browser",
   "title": "AlphaESS Plan vs Actual",
   "uid": "alphaess-battery-score",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }
