@@ -164,6 +164,15 @@ services:
         condition: service_healthy
     networks:
       - alphaess-net
+    healthcheck:
+      # Catches a crash-looping container (e.g. the GF_INSTALL_PLUGINS pin
+      # that 404'd against a fresh volume, see the #9 notes in
+      # CODE-REVIEW.md) in `docker compose ps` instead of needing someone to
+      # read logs to notice.
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
 networks:
   alphaess-net:
