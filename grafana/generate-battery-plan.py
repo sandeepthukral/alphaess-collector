@@ -62,11 +62,34 @@ array.from(rows: [{
 '''
 
 
+def price_extreme_query(action_field: str, agg: str) -> str:
+    """The real market price (bucket "alphaess") at the moment the newest plan actually
+    chose to {action_field}, reduced with {agg} ("max" for the buy ceiling, "min" for the
+    sell floor). This is the number to type into the alphaess app's Low/High band, pulled
+    from what the optimiser decided rather than guessed from eyeballing the chart."""
+    return NEWEST + f'''
+action = from(bucket: "planning")
+  |> range(start: -14d, stop: 72h)
+  |> filter(fn: (r) => r._measurement == "plan" and r.plan_run == newest and r._field == "{action_field}")
+  |> filter(fn: (r) => r._value > 0.0)
+  |> keep(columns: ["_time"])
+
+price = from(bucket: "alphaess")
+  |> range(start: -14d, stop: 72h)
+  |> filter(fn: (r) => r._measurement == "market_price" and r._field == "market_price")
+  |> keep(columns: ["_time", "_value"])
+
+join(tables: {{c: action, p: price}}, on: ["_time"])
+  |> {agg}(column: "_value")
+  |> yield(name: "extreme")
+'''
+
+
 def target(query, ref="A"):
     return {"datasource": DS, "query": query, "refId": ref}
 
 
-def stat(id_, title, desc, query, unit, decimals, x, w, steps, color_mode="value"):
+def stat(id_, title, desc, query, unit, decimals, x, w, steps, color_mode="value", y=0):
     return {
         "datasource": DS,
         "description": desc,
@@ -80,7 +103,7 @@ def stat(id_, title, desc, query, unit, decimals, x, w, steps, color_mode="value
             },
             "overrides": [],
         },
-        "gridPos": {"h": 4, "w": w, "x": x, "y": 0},
+        "gridPos": {"h": 4, "w": w, "x": x, "y": y},
         "id": id_,
         "options": {
             "colorMode": color_mode,
@@ -207,6 +230,23 @@ from(bucket: "planning")
 ''', "percent", 0, 18, 6,
     [{"color": "text", "value": None}]))
 
+# --- Row 2: real buy/sell price extremes from the newest plan --------------------------
+panels.append(stat(
+    8, "Buy ceiling (market price)",
+    "Highest market price at which the newest plan actually chose to charge. The number "
+    "to set as the alphaess app's Low band ceiling, taken from what the optimiser decided "
+    "rather than guessed from the chart.",
+    price_extreme_query("charge_wh", "max"), "currencyEUR", 5, 0, 12,
+    [{"color": "text", "value": None}], y=4))
+
+panels.append(stat(
+    9, "Sell floor (market price)",
+    "Lowest market price at which the newest plan actually chose to discharge. The number "
+    "to set as the alphaess app's High band floor, taken from what the optimiser decided "
+    "rather than guessed from the chart.",
+    price_extreme_query("discharge_wh", "min"), "currencyEUR", 5, 12, 12,
+    [{"color": "text", "value": None}], y=4))
+
 # --- Panel: planned vs actual SoC -------------------------------------------------------
 panels.append(timeseries(
     5, "Planned SoC vs actual SoC",
@@ -234,7 +274,7 @@ from(bucket: "planning")
   |> map(fn: (r) => ({ _time: r._time, "reserve": r._value / float(v: ${capacity_wh}) * 100.0 }))
   |> yield(name: "reserve")
 ''', "C")],
-    4, 9, "percent",
+    8, 9, "percent",
     [series_override("planned", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}}]),
      series_override("actual", [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}},
                                 {"id": "custom.fillOpacity", "value": 0}]),
@@ -286,7 +326,7 @@ array.from(rows: [
 ])
   |> yield(name: "buy threshold")
 ''', "D")],
-    13, 9, "kwatth",
+    17, 9, "kwatth",
     [series_override("charge", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
                                 {"id": "custom.drawStyle", "value": "bars"}]),
      series_override("discharge", [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
@@ -340,7 +380,7 @@ panels.append({
                             {"id": "displayName", "value": "ct/kWh"}]},
         ],
     },
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 22},
+    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 26},
     "id": 7,
     "options": {
         "cellHeight": "sm",
@@ -452,7 +492,9 @@ dashboard = {
     # back to re-debug a query that was already correct.
     # 2: series renamed out of _value so the byName overrides bind.
     # 3: price line switched to raw market price; sell/buy threshold lines added.
-    "version": 3,
+    # 4: added buy-ceiling/sell-floor stat panels, computed from the newest plan's real
+    #    charge/discharge decisions against market price; shifted panels below down a row.
+    "version": 4,
     "weekStart": "",
 }
 

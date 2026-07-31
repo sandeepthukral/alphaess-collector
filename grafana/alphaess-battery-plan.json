@@ -337,6 +337,134 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "Highest market price at which the newest plan actually chose to charge. The number to set as the alphaess app's Low band ceiling, taken from what the optimiser decided rather than guessed from the chart.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 5,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyEUR"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\naction = from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest and r._field == \"charge_wh\")\n  |> filter(fn: (r) => r._value > 0.0)\n  |> keep(columns: [\"_time\"])\n\nprice = from(bucket: \"alphaess\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"market_price\" and r._field == \"market_price\")\n  |> keep(columns: [\"_time\", \"_value\"])\n\njoin(tables: {c: action, p: price}, on: [\"_time\"])\n  |> max(column: \"_value\")\n  |> yield(name: \"extreme\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Buy ceiling (market price)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Lowest market price at which the newest plan actually chose to discharge. The number to set as the alphaess app's High band floor, taken from what the optimiser decided rather than guessed from the chart.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 5,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "currencyEUR"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "id": 9,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\naction = from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest and r._field == \"discharge_wh\")\n  |> filter(fn: (r) => r._value > 0.0)\n  |> keep(columns: [\"_time\"])\n\nprice = from(bucket: \"alphaess\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"market_price\" and r._field == \"market_price\")\n  |> keep(columns: [\"_time\", \"_value\"])\n\njoin(tables: {c: action, p: price}, on: [\"_time\"])\n  |> min(column: \"_value\")\n  |> yield(name: \"extreme\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Sell floor (market price)",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
       "description": "The plan running ahead of the measured line. Nothing executes the plan - the battery follows its own self-consumption logic - so the gap between the two lines is the question this whole project exists to answer, not a fault to be corrected.",
       "fieldConfig": {
         "defaults": {
@@ -458,7 +586,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 4
+        "y": 8
       },
       "id": 5,
       "options": {
@@ -718,7 +846,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 17
       },
       "id": 6,
       "options": {
@@ -853,7 +981,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 26
       },
       "id": 7,
       "options": {
@@ -969,6 +1097,6 @@
   "timezone": "browser",
   "title": "AlphaESS Battery Plan",
   "uid": "alphaess-battery-plan",
-  "version": 3,
+  "version": 4,
   "weekStart": ""
 }
