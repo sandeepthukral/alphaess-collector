@@ -141,9 +141,20 @@ Backfill a range once (adjust the start to how far back your `power_readings`
 go; end at yesterday — today is incomplete):
 
 ```sh
-docker compose run --rm collector python prices.py  --backfill 2026-07-01 2026-07-19
+docker compose run --rm collector python prices.py  --reconstruct-if-coarse --backfill 2026-07-01 2026-07-19
 docker compose run --rm collector python pricing.py --backfill 2026-07-01 2026-07-19
 ```
+
+`--reconstruct-if-coarse` matters from 2026-08-01, the 15-minute settlement
+cutover. Frank's public API kept returning hourly rows past it, so without the
+flag you store hourly prices for a contract billed per quarter; with it, the
+quarter-hour shape is rebuilt from EnergyZero's day-ahead feed. It is a no-op
+for earlier days and for any row Frank already returns at 15 minutes.
+
+Pass it consistently. Reconstruction writes quarter rows under a different
+`source` tag and does not remove the hourly rows for the same span, so a day
+fetched both ways ends up holding both — see `CODE-REVIEW.md` #23. Both
+scheduled jobs pass it.
 
 `pricing.py` skips days already written and only stores days with ≥98% sample
 coverage, so a range is cheap to re-run and self-heals days skipped for late
