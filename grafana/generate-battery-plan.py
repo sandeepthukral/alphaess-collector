@@ -304,7 +304,13 @@ array.from(rows: [
      # 23 percentage points of panel height above where the price scale would have placed
      # it. Same class of failure as the `_value`/"Value" trap above - it renders as a
      # perfectly plausible chart. test_grafana_provisioning.py pins this.
-     series_override("sell above", [{"id": "color", "value": {"fixedColor": "dark-red", "mode": "fixed"}},
+     # Purple, not the dark-red it used to be. Sharing one axis with the price is the whole
+     # point of the fix above, and its side effect is that this line now sits in the middle
+     # of the plot, crossing a red price curve - two reds a shade apart, exactly where they
+     # have to be told apart. It read fine only while the broken axis parked it near the top.
+     # Purple also survives red/green colour blindness beside the green `buy below`, which
+     # dark-red did not.
+     series_override("sell above", [{"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}},
                                     {"id": "unit", "value": "none"},
                                     {"id": "custom.axisPlacement", "value": "right"},
                                     {"id": "custom.axisLabel", "value": "ct/kWh"},
@@ -331,7 +337,12 @@ panels.append({
                    "merge twice and letting the two drift. ct/kWh is the raw market price, "
                    "the same number the graph above plots - not the all-in price the plan "
                    "optimises against, which includes tax, sourcing markup and energy tax. "
-                   "Blank where the day-ahead has not been published yet.",
+                   "Blank where the day-ahead has not been published yet. "
+                   "Where the list stops is usually the terminal reserve binding, not the "
+                   "price becoming unattractive: check whether the last row's SoC equals "
+                   "the Terminal reserve above. Nothing here follows a price threshold - "
+                   "the sell/buy lines on the graph are your alphaess app's settings, which "
+                   "the optimiser never reads.",
     "fieldConfig": {
         "defaults": {
             "custom": {
@@ -500,7 +511,7 @@ dashboard = {
     # back to re-debug a query that was already correct.
     # 2: series renamed out of _value so the byName overrides bind.
     # 3: price line switched to raw market price; sell/buy threshold lines added.
-    "version": 4,
+    "version": 5,
     "weekStart": "",
 }
 
