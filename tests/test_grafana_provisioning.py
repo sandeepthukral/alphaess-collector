@@ -132,6 +132,43 @@ def test_every_query_names_its_datasource(path):
     assert unnamed == []
 
 
+@pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
+def test_series_sharing_an_axis_agree_on_its_scale(path):
+    """Series pushed to the same side of a panel must agree on unit and axis label.
+
+    Grafana derives a series' y-scale key from both, so two series with the same unit but
+    a different `custom.axisLabel` get two independently auto-ranged axes on that side.
+    Nothing errors: the panel grows a second column of numbers, and the two lines then sit
+    at unrelated heights -- worst on exactly the panels built to compare them.
+
+    Seen on the NAS 2026-08-02, where the battery plan's `market price` carried the label
+    and the `sell above`/`buy below` threshold lines did not, so the dashed lines sat about
+    23 percentage points of panel height above where the price scale would have put them.
+    """
+    dash = json.loads(path.read_text(encoding="utf-8"))
+    disagreements = []
+
+    for panel in dash.get("panels", []):
+        # {placement: {series name: (unit, axis label)}}
+        by_side = {}
+        for override in panel.get("fieldConfig", {}).get("overrides", []):
+            matcher = override.get("matcher", {})
+            if matcher.get("id") != "byName":
+                continue
+            props = {p["id"]: p.get("value") for p in override.get("properties", [])}
+            placement = props.get("custom.axisPlacement")
+            if placement not in ("left", "right"):
+                continue
+            by_side.setdefault(placement, {})[matcher.get("options")] = (
+                props.get("unit"), props.get("custom.axisLabel"))
+
+        for placement, series in by_side.items():
+            if len(set(series.values())) > 1:
+                disagreements.append((panel.get("title"), placement, series))
+
+    assert disagreements == []
+
+
 def test_alert_rule_names_its_datasource():
     path = PROVISIONING / "alerting" / "alphaess-staleness.yml"
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))

@@ -296,9 +296,18 @@ array.from(rows: [
                                       {"id": "custom.axisPlacement", "value": "right"},
                                       {"id": "custom.axisLabel", "value": "ct/kWh"},
                                       {"id": "custom.fillOpacity", "value": 0}]),
+     # The three right-hand series must agree on unit *and* axisLabel. Grafana builds a
+     # series' y-scale key from both, so an identical unit with a different label lands on
+     # a second, independently auto-ranged right axis - and two lines that cannot be
+     # compared is precisely what this panel is for. Seen on the NAS 2026-08-02: the price
+     # drew on 0..25 while the thresholds drew on 4..18, putting the dashed sell line about
+     # 23 percentage points of panel height above where the price scale would have placed
+     # it. Same class of failure as the `_value`/"Value" trap above - it renders as a
+     # perfectly plausible chart. test_grafana_provisioning.py pins this.
      series_override("sell above", [{"id": "color", "value": {"fixedColor": "dark-red", "mode": "fixed"}},
                                     {"id": "unit", "value": "none"},
                                     {"id": "custom.axisPlacement", "value": "right"},
+                                    {"id": "custom.axisLabel", "value": "ct/kWh"},
                                     {"id": "custom.fillOpacity", "value": 0},
                                     {"id": "custom.lineStyle",
                                      "value": {"dash": [10, 10], "fill": "dash"}},
@@ -306,6 +315,7 @@ array.from(rows: [
      series_override("buy below", [{"id": "color", "value": {"fixedColor": "dark-green", "mode": "fixed"}},
                                    {"id": "unit", "value": "none"},
                                    {"id": "custom.axisPlacement", "value": "right"},
+                                   {"id": "custom.axisLabel", "value": "ct/kWh"},
                                    {"id": "custom.fillOpacity", "value": 0},
                                    {"id": "custom.lineStyle",
                                     "value": {"dash": [10, 10], "fill": "dash"}},
@@ -318,7 +328,10 @@ panels.append({
     "description": "Every interval the plan does something in. Not the merged blocks that "
                    "advise.py prints - those are built in Python from the same numbers and "
                    "are not stored, so reproducing them here would mean writing the "
-                   "merge twice and letting the two drift.",
+                   "merge twice and letting the two drift. ct/kWh is the raw market price, "
+                   "the same number the graph above plots - not the all-in price the plan "
+                   "optimises against, which includes tax, sourcing markup and energy tax. "
+                   "Blank where the day-ahead has not been published yet.",
     "fieldConfig": {
         "defaults": {
             "custom": {
@@ -349,20 +362,55 @@ panels.append({
         "sortBy": [{"desc": False, "displayName": "Time"}],
     },
     "pluginVersion": "11.6.0",
-    "targets": [target(NEWEST + '''
-from(bucket: "planning")
+    # Column order is set here rather than by the order of fields in the Flux `map`: Flux
+    # does not promise an output column order, so a map that happens to come out right
+    # today would reorder itself on an unrelated change and nobody would notice.
+    "transformations": [{
+        "id": "organize",
+        "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "renameByName": {},
+            "indexByName": {"_time": 0, "action": 1, "ct_kWh": 2, "soc_pct": 3, "kWh": 4},
+        },
+    }],
+    "targets": [target('''import "join"
+
+''' + NEWEST + '''
+plan = from(bucket: "planning")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
   |> filter(fn: (r) => r._measurement == "plan" and r.plan_run == newest)
   |> filter(fn: (r) => r._field == "charge_wh" or r._field == "discharge_wh"
-                    or r._field == "soc_wh" or r._field == "price_buy" or r._field == "price_sell")
+                    or r._field == "soc_wh")
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> filter(fn: (r) => r.charge_wh > 0.0 or r.discharge_wh > 0.0)
-  |> map(fn: (r) => ({
-      _time: r._time,
-      action: if r.charge_wh > 0.0 then "charge" else "discharge",
-      kWh: (if r.charge_wh > 0.0 then r.charge_wh else r.discharge_wh) / 1000.0,
-      soc_pct: r.soc_wh / float(v: ${capacity_wh}) * 100.0,
-      ct_kWh: (if r.charge_wh > 0.0 then r.price_buy else r.price_sell) * 100.0
+  |> group()
+
+// timeSrc: "_start" because aggregateWindow otherwise labels each window by its stop,
+// which would slide every price 15 minutes past the interval it belongs to - a table that
+// still looks entirely reasonable. createEmpty + fill carry an hourly price across the
+// quarters it covers, for days before the 2026-08-01 15-min cutover.
+mkt = from(bucket: "alphaess")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "market_price" and r._field == "market_price")
+  |> aggregateWindow(every: 15m, fn: last, timeSrc: "_start", createEmpty: true)
+  |> fill(usePrevious: true)
+  |> group()
+  |> keep(columns: ["_time", "_value"])
+
+// Left, not inner: the plan runs past the published day-ahead, and an inner join would
+// drop those intervals rather than show them with no price. A table that silently ends
+// early is worse than one with blank cells.
+join.left(
+  left: plan,
+  right: mkt,
+  on: (l, r) => l._time == r._time,
+  as: (l, r) => ({
+      _time: l._time,
+      action: if l.charge_wh > 0.0 then "charge" else "discharge",
+      kWh: (if l.charge_wh > 0.0 then l.charge_wh else l.discharge_wh) / 1000.0,
+      soc_pct: l.soc_wh / float(v: ${capacity_wh}) * 100.0,
+      ct_kWh: r._value * 100.0
     }))
   |> yield(name: "actions")
 ''')],
@@ -452,7 +500,7 @@ dashboard = {
     # back to re-debug a query that was already correct.
     # 2: series renamed out of _value so the byName overrides bind.
     # 3: price line switched to raw market price; sell/buy threshold lines added.
-    "version": 3,
+    "version": 4,
     "weekStart": "",
 }
 
