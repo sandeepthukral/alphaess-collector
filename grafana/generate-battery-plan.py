@@ -62,6 +62,97 @@ array.from(rows: [{
 '''
 
 
+# The two dashed lines on the price panel, and the "What to set in the app" table, are all
+# built from this. They used to be textbox constants holding whatever the alphaess app was
+# set to on 2026-08-01 - which made the panel read as advice while actually being a stale
+# record of an input, and the plan visibly contradicted it: on 2026-08-03 the plan charged
+# at 8.95 ct with the line drawn at 5.73. These are now derived from the plan, so they say
+# what to set the app to in order to reproduce the plan's trades.
+#
+# Both directions need *two* fields, not one. `charge_wh`/`discharge_wh` are battery flows
+# that do not distinguish grid from roof, and `import_wh`/`export_wh` are whole-house meter
+# flows that do not distinguish the battery from the dishwasher. Either alone gives a
+# confidently wrong answer: filtering on import_wh alone reports the house drawing load at
+# 13-16 ct overnight as "the plan buying", and export_wh alone reports midday PV surplus at
+# 9-11 ct as "the plan selling". The battery is trading with the grid only where both are
+# non-zero.
+#
+# Bands are found with stateCount, which counts consecutive matching intervals and resets
+# to -1 on a miss, so a band's start is `_time - (n-1) * 15min`. The plan writes every
+# interval, so the grid it counts over has no holes. A band already running at the left
+# edge of the range is reported as starting at that edge - the counter cannot see behind
+# it. Note the plan does not sell in unbroken runs: on 2026-08-03 it drew seven bands, four
+# of them a single quarter-hour, which cluster into the three sessions a human would name.
+# Setting the app per cluster means using the lowest sell / highest buy number in it.
+def band_query(kind):
+    """Flux for one direction's bands. `kind` is "sell" or "buy"."""
+    if kind == "sell":
+        fields = 'r._field == "discharge_wh" or r._field == "export_wh"'
+        trading = 'r.discharge_wh > 0.0 and r.export_wh > 0.0'
+        # The marginal price is the *worst* one the plan still acts at: the lowest price it
+        # sells at, the highest it buys at. Set the app there and every planned trade
+        # clears. Rounded outward for the same reason - the app compares strictly, so a
+        # threshold equal to the marginal price would drop exactly that interval.
+        better, identity, rounder = "<", "999.0", "math.floor"
+    else:
+        fields = 'r._field == "charge_wh" or r._field == "import_wh"'
+        trading = 'r.charge_wh > 0.0 and r.import_wh > 0.0'
+        better, identity, rounder = ">", "-999.0", "math.ceil"
+    return '''import "join"
+import "math"
+
+''' + NEWEST + '''
+acts = from(bucket: "planning")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "plan" and r.plan_run == newest)
+  |> filter(fn: (r) => ''' + fields + ''')
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> group()
+  |> sort(columns: ["_time"])
+  |> stateCount(fn: (r) => ''' + trading + ''', column: "n")
+  |> filter(fn: (r) => r.n > 0)
+  |> map(fn: (r) => ({
+      _time: r._time,
+      band: string(v: time(v: int(v: r._time) - (r.n - 1) * 900000000000))
+    }))
+
+// timeSrc: "_start" because aggregateWindow otherwise labels each window by its stop,
+// sliding every price 15 minutes past the interval it belongs to. createEmpty + fill carry
+// an hourly price across the quarters it covers, for days before the 15-min cutover.
+mkt = from(bucket: "alphaess")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "market_price" and r._field == "market_price")
+  |> aggregateWindow(every: 15m, fn: last, timeSrc: "_start", createEmpty: true)
+  |> fill(usePrevious: true)
+  |> group()
+  |> keep(columns: ["_time", "_value"])
+
+priced = join.inner(
+  left: acts,
+  right: mkt,
+  on: (l, r) => l._time == r._time,
+  as: (l, r) => ({ _time: l._time, band: l.band, ct: r._value * 100.0, t_ns: int(v: l._time) }))
+
+// The rounding sits in a map rather than inside reduce: Flux will not parse a conditional
+// as an argument to math.floor, which fails with a bare "expected RPAREN, got RBRACE".
+thresholds = priced
+  |> group(columns: ["band"])
+  |> reduce(
+      identity: {marginal: ''' + identity + ''', last_ns: 0},
+      fn: (r, accumulator) => ({
+        marginal: if r.ct ''' + better + ''' accumulator.marginal then r.ct else accumulator.marginal,
+        last_ns: if r.t_ns > accumulator.last_ns then r.t_ns else accumulator.last_ns
+      }))
+  |> group()
+  |> map(fn: (r) => ({
+      band: r.band,
+      from_t: time(v: r.band),
+      until_t: time(v: r.last_ns + 900000000000),
+      set_to: ''' + rounder + '''(x: r.marginal * 10.0) / 10.0
+    }))
+'''
+
+
 def target(query, ref="A"):
     return {"datasource": DS, "query": query, "refId": ref}
 
@@ -251,7 +342,10 @@ panels.append(timeseries(
     "market price (no tax, sourcing markup, or energy tax) - the same signal alphaess's own "
     "scheduling reacts to, so this is what to eyeball when tuning it: buying should happen in "
     "the troughs, selling on the peaks. If an action does not line up with the price, that is "
-    "the interesting case.",
+    "the interesting case. The dashed lines are derived from the plan, not from the app: "
+    "each step is what the app's High/Low band must be set to during that band for the app "
+    "to make the trade the plan wants. They step because one global pair cannot serve every "
+    "band - see the table below for when to change them.",
     [target(NEWEST + '''
 from(bucket: "planning")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
@@ -270,20 +364,26 @@ from(bucket: "planning")
   |> map(fn: (r) => ({ _time: r._time, "market price": r._value * 100.0 }))
   |> yield(name: "market_price")
 ''', "B"),
-     target('''import "array"
-
-array.from(rows: [
-  {_time: v.timeRangeStart, "sell above": float(v: "${price_high_eur}") * 100.0},
-  {_time: v.timeRangeStop, "sell above": float(v: "${price_high_eur}") * 100.0}
-])
+     # Joined back onto the intervals so each band draws its own step, rather than one flat
+     # line across the panel. A flat line has to be the loosest of all the bands, which is
+     # both wrong for every band but one and invites the app to trade in the hours between
+     # them.
+     target(band_query("sell") + '''
+join.inner(
+  left: acts,
+  right: thresholds,
+  on: (l, r) => l.band == r.band,
+  as: (l, r) => ({ _time: l._time, "sell above": r.set_to }))
+  |> group()
   |> yield(name: "sell threshold")
 ''', "C"),
-     target('''import "array"
-
-array.from(rows: [
-  {_time: v.timeRangeStart, "buy below": float(v: "${price_low_eur}") * 100.0},
-  {_time: v.timeRangeStop, "buy below": float(v: "${price_low_eur}") * 100.0}
-])
+     target(band_query("buy") + '''
+join.inner(
+  left: acts,
+  right: thresholds,
+  on: (l, r) => l.band == r.band,
+  as: (l, r) => ({ _time: l._time, "buy below": r.set_to }))
+  |> group()
   |> yield(name: "buy threshold")
 ''', "D")],
     13, 9, "kwatth",
@@ -328,6 +428,73 @@ array.from(rows: [
                                    {"id": "custom.lineWidth", "value": 1}])],
     fill=60))
 
+# --- Panel: app settings table ----------------------------------------------------------
+# Two targets rather than one union, merged by transformation: the sell and buy queries
+# differ in four places and reading them side by side is how the asymmetry stays visible.
+panels.append({
+    "datasource": DS,
+    "description": "What to type into the alphaess app, and when. The app takes one "
+                   "High/Low pair at a time, so each row is a setting to enter at 'from' "
+                   "and replace at the next row. 'set to' is the marginal price rounded "
+                   "outward - the lowest price the plan sells at in that band, or the "
+                   "highest it buys at - so every planned trade clears the app's strict "
+                   "comparison. Raw market price, matching the graph above. Rows close "
+                   "together are one session in practice: use the lowest sell / highest "
+                   "buy among them rather than retuning four times in an hour. Nothing "
+                   "here is read by the optimiser - it is the reverse, these numbers are "
+                   "read out of the plan so the app can be made to follow it.",
+    "fieldConfig": {
+        "defaults": {
+            "custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": False},
+            "mappings": [],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
+        },
+        "overrides": [
+            {"matcher": {"id": "byName", "options": "from_t"},
+             "properties": [{"id": "displayName", "value": "From"}]},
+            {"matcher": {"id": "byName", "options": "until_t"},
+             "properties": [{"id": "displayName", "value": "Until"}]},
+            {"matcher": {"id": "byName", "options": "action"},
+             "properties": [{"id": "displayName", "value": "Set"}]},
+            {"matcher": {"id": "byName", "options": "set_to"},
+             "properties": [{"id": "decimals", "value": 1},
+                            {"id": "displayName", "value": "to ct/kWh"}]},
+        ],
+    },
+    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 22},
+    "id": 8,
+    "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": False, "fields": "", "reducer": ["sum"], "show": False},
+        "showHeader": True,
+        "sortBy": [{"desc": False, "displayName": "From"}],
+    },
+    "pluginVersion": "11.6.0",
+    "transformations": [
+        {"id": "merge", "options": {}},
+        {"id": "organize", "options": {
+            "excludeByName": {"band": True},
+            "includeByName": {},
+            "renameByName": {},
+            "indexByName": {"from_t": 0, "until_t": 1, "action": 2, "set_to": 3},
+        }},
+    ],
+    "targets": [
+        target(band_query("sell") + '''
+thresholds
+  |> map(fn: (r) => ({ r with action: "sell above" }))
+  |> yield(name: "sell bands")
+''', "A"),
+        target(band_query("buy") + '''
+thresholds
+  |> map(fn: (r) => ({ r with action: "buy below" }))
+  |> yield(name: "buy bands")
+''', "B"),
+    ],
+    "title": "What to set in the app",
+    "type": "table",
+})
+
 # --- Panel: action table ----------------------------------------------------------------
 panels.append({
     "datasource": DS,
@@ -340,9 +507,9 @@ panels.append({
                    "Blank where the day-ahead has not been published yet. "
                    "Where the list stops is usually the terminal reserve binding, not the "
                    "price becoming unattractive: check whether the last row's SoC equals "
-                   "the Terminal reserve above. Nothing here follows a price threshold - "
-                   "the sell/buy lines on the graph are your alphaess app's settings, which "
-                   "the optimiser never reads.",
+                   "the Terminal reserve above. The optimiser follows no price threshold at "
+                   "all - it solves the whole horizon. The sell/buy lines on the graph are "
+                   "read back out of these actions, not fed into them.",
     "fieldConfig": {
         "defaults": {
             "custom": {
@@ -364,7 +531,7 @@ panels.append({
                             {"id": "displayName", "value": "ct/kWh"}]},
         ],
     },
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 22},
+    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 30},
     "id": 7,
     "options": {
         "cellHeight": "sm",
@@ -472,31 +639,12 @@ dashboard = {
         "query": "27900",
         "skipUrlSync": False,
         "type": "textbox",
-    }, {
-        "current": {"text": "0.16472", "value": "0.16472"},
-        "description": "alphaess app's 'High' band floor (EUR/kWh) - sell above this. Drawn as "
-                       "a dashed line on the price panel so the band can be checked, and "
-                       "retuned, against the real market price rather than guessed.",
-        "hide": 0,
-        "label": "Sell above (EUR/kWh)",
-        "name": "price_high_eur",
-        "options": [{"selected": True, "text": "0.16472", "value": "0.16472"}],
-        "query": "0.16472",
-        "skipUrlSync": False,
-        "type": "textbox",
-    }, {
-        "current": {"text": "0.05733", "value": "0.05733"},
-        "description": "alphaess app's 'Low' band ceiling (EUR/kWh) - buy below this. Drawn as "
-                       "a dashed line on the price panel so the band can be checked, and "
-                       "retuned, against the real market price rather than guessed.",
-        "hide": 0,
-        "label": "Buy below (EUR/kWh)",
-        "name": "price_low_eur",
-        "options": [{"selected": True, "text": "0.05733", "value": "0.05733"}],
-        "query": "0.05733",
-        "skipUrlSync": False,
-        "type": "textbox",
     }]},
+    # price_high_eur / price_low_eur used to live here, holding 0.16472 / 0.05733 - a
+    # snapshot of the alphaess app taken on 2026-08-01 and never updated again. Nothing kept
+    # them in step with the app, and the panel's own purpose was retuning the app, so using
+    # the dashboard as intended was what made the numbers wrong. They are now computed from
+    # the plan instead; see band_query.
     # Six hours back, thirty-six forward: enough past to see the actual line diverge, enough
     # future to cover a horizon built after the ~13:00 price release.
     "time": {"from": "now-6h", "to": "now+36h"},
@@ -511,7 +659,7 @@ dashboard = {
     # back to re-debug a query that was already correct.
     # 2: series renamed out of _value so the byName overrides bind.
     # 3: price line switched to raw market price; sell/buy threshold lines added.
-    "version": 5,
+    "version": 6,
     "weekStart": "",
 }
 
