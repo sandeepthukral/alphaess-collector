@@ -639,7 +639,7 @@
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "dark-red",
+                  "fixedColor": "purple",
                   "mode": "fixed"
                 }
               },
@@ -785,7 +785,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Every interval the plan does something in. Not the merged blocks that advise.py prints - those are built in Python from the same numbers and are not stored, so reproducing them here would mean writing the merge twice and letting the two drift. ct/kWh is the raw market price, the same number the graph above plots - not the all-in price the plan optimises against, which includes tax, sourcing markup and energy tax. Blank where the day-ahead has not been published yet.",
+      "description": "Every interval the plan does something in. Not the merged blocks that advise.py prints - those are built in Python from the same numbers and are not stored, so reproducing them here would mean writing the merge twice and letting the two drift. ct/kWh is the raw market price, the same number the graph above plots - not the all-in price the plan optimises against, which includes tax, sourcing markup and energy tax. Blank where the day-ahead has not been published yet. Where the list stops is usually the terminal reserve binding, not the price becoming unattractive: check whether the last row's SoC equals the Terminal reserve above. Nothing here follows a price threshold - the sell/buy lines on the graph are your alphaess app's settings, which the optimiser never reads.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -994,6 +994,6 @@
   "timezone": "browser",
   "title": "AlphaESS Battery Plan",
   "uid": "alphaess-battery-plan",
-  "version": 4,
+  "version": 5,
   "weekStart": ""
 }
