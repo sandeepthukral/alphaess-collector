@@ -5,6 +5,11 @@
 #   - prices.py writes are idempotent (same slot timestamps overwrite)
 #   - pricing.py skips days already written and retries days previously skipped
 #     (late-published prices / low coverage), so the window is self-healing.
+#
+# The window ends at yesterday because pricing.py scores complete days. That
+# means this job never fetches today or tomorrow, so it is *not* what keeps the
+# Battery Plan dashboard's price line alive - refresh-prices.sh is. Widening
+# WINDOW_DAYS does not help that; it only re-scores further into the past.
 set -eu
 
 # DSM Task Scheduler runs with a minimal PATH; make sure docker is findable.

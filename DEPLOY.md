@@ -171,6 +171,38 @@ Test it once by hand first
 (`sudo /volume1/docker/alphaess-collector/scripts/daily-savings.sh`). Adjust the
 window via `WINDOW_DAYS` near the top of the script.
 
+That window ends at **yesterday**, and should stay that way: `pricing.py` scores
+complete days and today is not one. It is therefore not the job that keeps
+today's and tomorrow's prices available — see below.
+
+### Keeping today's and tomorrow's prices available
+
+The **Battery Plan** dashboard draws the raw market price across a `now-6h` →
+`now+36h` range. Those are days the nightly job never fetches, so that panel's
+price series is empty unless something else keeps the forward end of
+`market_price` current.
+
+Schedule [scripts/refresh-prices.sh](scripts/refresh-prices.sh), which runs
+`prices.py` with no arguments — yesterday, today and tomorrow:
+
+- **General**: User = `root`
+- **Schedule**: Daily, first run time `00:05`, **Repeat every 3 hours**
+- **Task Settings → Run command**:
+
+  ```sh
+  /volume1/docker/alphaess-collector/scripts/refresh-prices.sh
+  ```
+
+It repeats through the day because tomorrow's day-ahead prices are not published
+until early afternoon. A day with no prices yet is logged and skipped, not an
+error, so runs before publication are simply no-ops for that day. Writes are
+idempotent — same slot timestamps overwrite — so the repetition costs nothing
+but an API call.
+
+Worth one check after setting it up: an empty price series looks exactly like a
+working panel in a quiet market, which is how this went unnoticed from the day
+the dashboard was built until 2026-08-02.
+
 ## Backing up InfluxDB
 
 InfluxDB's data lives only in the `alphaess-influxdb-data` Docker volume,
