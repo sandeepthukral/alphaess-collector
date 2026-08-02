@@ -15,6 +15,14 @@
 #
 # Safe to run as often as you like - writes are idempotent, same slot
 # timestamps overwrite.
+#
+# --reconstruct-if-coarse is passed because Frank's public API did not actually
+# cut over on 2026-08-01: it still returns hourly rows, so without this the
+# stored prices stay hourly while real billing is per quarter. It rebuilds the
+# quarter-hour shape from EnergyZero's day-ahead feed. daily-savings.sh passes
+# it too, and the two must not diverge - a day fetched once with the flag and
+# once without ends up holding both granularities under different `source`
+# tags, and pricing.py does not filter on that tag.
 set -eu
 
 # DSM Task Scheduler runs with a minimal PATH; make sure docker is findable.
@@ -27,6 +35,6 @@ cd "$REPO_DIR"
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') refresh-prices: fetching yesterday..tomorrow"
 
-docker compose run --rm collector python prices.py
+docker compose run --rm collector python prices.py --reconstruct-if-coarse
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') refresh-prices: done"

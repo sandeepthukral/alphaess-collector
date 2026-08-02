@@ -10,6 +10,15 @@
 # means this job never fetches today or tomorrow, so it is *not* what keeps the
 # Battery Plan dashboard's price line alive - refresh-prices.sh is. Widening
 # WINDOW_DAYS does not help that; it only re-scores further into the past.
+#
+# --reconstruct-if-coarse must stay in step with refresh-prices.sh. Both write
+# the same measurement, and reconstruction writes quarter-hour rows under
+# source="frank+energyzero" without removing the hourly source="frank" rows for
+# the same span. So a day fetched by one script with the flag and by the other
+# without holds both granularities, and pricing.py's price query does not filter
+# on source: overlapping intervals are merged for the coverage gate but each
+# sample is then priced by whichever row happens to sort last. Change the flag
+# in both files or in neither.
 set -eu
 
 # DSM Task Scheduler runs with a minimal PATH; make sure docker is findable.
@@ -38,7 +47,7 @@ END=$(echo "$DATES" | awk '{print $2}')
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') daily-savings: processing $START .. $END"
 
-$DC run --rm collector python prices.py  --backfill "$START" "$END"
+$DC run --rm collector python prices.py  --reconstruct-if-coarse --backfill "$START" "$END"
 $DC run --rm collector python pricing.py --backfill "$START" "$END"
 
 echo "$(date '+%Y-%m-%d %H:%M:%S') daily-savings: done"

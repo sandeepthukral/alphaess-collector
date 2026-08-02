@@ -65,7 +65,11 @@ reset in `DEPLOY.md`, "Changing the Grafana admin password". The `:?` guard from
 - [ ] #19 Dashboard "Effective €/kWh" can misleadingly read as 0.0
 - [ ] #20 `MODEL_VERSION`/dashboard sync is a CI test, not a runtime guard
 - [ ] #21 AlphaESS sensor sign convention has no automated verification
-- [ ] #22 EnergyZero reconstruction fallback unvalidated against a real 15-min invoice
+- [ ] #22 EnergyZero reconstruction fallback unvalidated against a real 15-min invoice —
+      now automated in both scheduled jobs anyway (2026-08-02), because Frank's API never
+      cut over; still open until an invoice settles it
+- [ ] #23 Reconstruction leaves the coarse rows it replaces in place, under a different
+      `source` tag that `pricing.py` does not filter on
 - [ ] Housekeeping — stale "capped at 5 minutes" in `DEPLOY.md` and the alert rule
 - [x] Housekeeping — dashboard tags: already consistent (`alphaess` on all four), no change needed
 
@@ -862,14 +866,49 @@ What's *not* verified: whether Frank's real 15-min billing actually varies
 within the hour once it goes live, as opposed to some suppliers literally
 re-billing every quarter at the same repeated hourly-average rate. The
 EnergyZero match tells us the correct number *if* it varies — not that it
-does. That's exactly why this ships opt-in (a CLI flag, not automatic) rather
-than silently substituted into the nightly job.
+does.
+
+**No longer opt-in (2026-08-02).** Frank's public API did not cut over: it
+kept returning hourly rows after 2026-08-01, so leaving the flag off meant
+storing hourly prices for a contract that bills per quarter — a certain
+mismatch, against the fallback's merely unproven one. Both scheduled jobs now
+pass `--reconstruct-if-coarse`, by explicit decision. `daily_cost` is
+therefore computed from reconstructed prices, and this item stays open until
+an invoice settles it.
+
+They had to move together: reconstruction writes quarter rows under
+`source="frank+energyzero"` and does *not* delete the hourly `source="frank"`
+rows for the same span, and `pricing.py`'s price query does not filter on
+`source` — so one flagged job plus one unflagged job means every day holds
+both granularities. See #23.
 
 **Fix:** close this the same way as #17 (export price vs. a real bill) — once
 either Frank's API genuinely starts returning quarter-hour rows, or a real
 15-min-itemized invoice arrives, compare it against what
 `reconstruct_quarter_hour_rows()` would have produced for the same hours. If
-they match, the fallback can graduate from opt-in to safe-to-automate (or be
-retired if Frank's API turns out to cut over cleanly and the fallback is
-simply never needed); if they don't, the formula needs revisiting before it's
-trusted for anything unattended.
+they match, this is settled (or the fallback can be retired, if Frank's API
+has cut over by then); if they don't, the formula needs revisiting and the
+affected `daily_cost` rows need recomputing.
+
+### 23. Reconstruction leaves the coarse rows it replaces in place
+
+`prices.py` writes reconstructed quarter-hour rows under a different `source`
+tag from the hourly rows they supersede, and never deletes the latter. Any day
+fetched once without `--reconstruct-if-coarse` and once with it holds both.
+
+`pricing.py` survives this without double-counting — `priced_seconds()` merges
+overlapping intervals for the coverage gate, and `integrate_by_interval()`'s
+bisect assigns each sample to exactly one interval — but *which* interval is
+decided by how the tied `from` timestamps happen to sort, so a mixed day is
+priced nondeterministically rather than consistently wrongly.
+
+Now that both jobs reconstruct, this can no longer happen routinely, but it
+still can whenever EnergyZero is unavailable for a run: the day falls back to
+coarse rows tagged `frank`, and a later successful run adds quarter rows
+beside them rather than replacing them.
+
+**Fix:** either delete the coarse span before writing reconstructed rows for
+it, or filter `_PRICE_FLUX` to prefer `frank+energyzero` where both exist. The
+first is honest storage; the second leaves the raw hourly rows queryable and
+is a smaller change. Pre-existing mixed days from before 2026-08-02 were
+cleaned up by hand with `influx delete`.
