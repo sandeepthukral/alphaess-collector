@@ -218,6 +218,12 @@ nightly — it reprocesses a rolling window of recent complete days. See
 [DEPLOY.md](DEPLOY.md#nightly-battery-savings-update) for the DSM Task Scheduler
 setup.
 
+That job stops at yesterday, so it leaves `market_price` with nothing for today
+or tomorrow — which the forward-looking **Battery Plan** dashboard needs.
+[scripts/refresh-prices.sh](scripts/refresh-prices.sh), scheduled every few
+hours, is what keeps that end current; see
+[DEPLOY.md](DEPLOY.md#keeping-todays-and-tomorrows-prices-available).
+
 ## Development
 
 Tests cover the parts that fail silently: the energy integration and pricing
