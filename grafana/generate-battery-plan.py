@@ -62,94 +62,91 @@ array.from(rows: [{
 '''
 
 
-# The two dashed lines on the price panel, and the "What to set in the app" table, are all
-# built from this. They used to be textbox constants holding whatever the alphaess app was
-# set to on 2026-08-01 - which made the panel read as advice while actually being a stale
-# record of an input, and the plan visibly contradicted it: on 2026-08-03 the plan charged
-# at 8.95 ct with the line drawn at 5.73. These are now derived from the plan, so they say
-# what to set the app to in order to reproduce the plan's trades.
+# The dashed lines on the price panel and the "What to set in the app" table both read the
+# `app_setting` measurement, which the planner writes alongside the plan itself
+# (battery-planning: app_bands.py, Marstek-planning.py appSettingLines).
 #
-# Both directions need *two* fields, not one. `charge_wh`/`discharge_wh` are battery flows
-# that do not distinguish grid from roof, and `import_wh`/`export_wh` are whole-house meter
-# flows that do not distinguish the battery from the dishwasher. Either alone gives a
-# confidently wrong answer: filtering on import_wh alone reports the house drawing load at
-# 13-16 ct overnight as "the plan buying", and export_wh alone reports midday PV surplus at
-# 9-11 ct as "the plan selling". The battery is trading with the grid only where both are
-# non-zero.
+# Two earlier versions of this lived here and both were wrong in instructive ways. First,
+# textbox constants holding whatever the alphaess app was set to on 2026-08-01 - so the
+# panel read as advice while actually being a stale record of an input, and the plan
+# visibly contradicted it: on 2026-08-03 it charged at 8.95 ct with the line drawn at 5.73.
+# Then band detection in Flux, which found the right bands but only ever computed the
+# marginal price - the threshold that catches every planned trade, saying nothing about
+# whether it also triggers trades the plan did not want.
 #
-# Bands are found with stateCount, which counts consecutive matching intervals and resets
-# to -1 on a miss, so a band's start is `_time - (n-1) * 15min`. The plan writes every
-# interval, so the grid it counts over has no holes. A band already running at the left
-# edge of the range is reported as starting at that edge - the counter cannot see behind
-# it. Note the plan does not sell in unbroken runs: on 2026-08-03 it drew seven bands, four
-# of them a single quarter-hour, which cluster into the three sessions a human would name.
-# Setting the app per cluster means using the lowest sell / highest buy number in it.
-def band_query(kind):
-    """Flux for one direction's bands. `kind` is "sell" or "buy"."""
-    if kind == "sell":
-        fields = 'r._field == "discharge_wh" or r._field == "export_wh"'
-        trading = 'r.discharge_wh > 0.0 and r.export_wh > 0.0'
-        # The marginal price is the *worst* one the plan still acts at: the lowest price it
-        # sells at, the highest it buys at. Set the app there and every planned trade
-        # clears. Rounded outward for the same reason - the app compares strictly, so a
-        # threshold equal to the marginal price would drop exactly that interval.
-        better, identity, rounder = "<", "999.0", "math.floor"
-    else:
-        fields = 'r._field == "charge_wh" or r._field == "import_wh"'
-        trading = 'r.charge_wh > 0.0 and r.import_wh > 0.0'
-        better, identity, rounder = ">", "-999.0", "math.ceil"
-    return '''import "join"
-import "math"
+# That second constraint is the whole difficulty, and it is arithmetic rather than query:
+# a threshold has to fire on every interval the plan trades in AND stay silent on every
+# interval it does not, over the whole time the setting is live. Sometimes no such number
+# exists. Deciding that needs tests over seeded scenarios, and a query buried in generated
+# dashboard JSON cannot have any - so it moved to Python, where 41 tests simulate the app
+# against each recommendation and check the traded set equals the plan's.
+#
+# What is left here is a read. `exact` says whether the number does what it claims; when it
+# does not, `extra_intervals` counts the trades that go against the plan.
+def threshold_line(action, series):
+    """A stepped dashed line: each session's threshold, drawn across that session only.
 
-''' + NEWEST + '''
-acts = from(bucket: "planning")
+    app_setting stores one point per session, at its start. Spreading that back over a
+    15-minute grid is what aggregateWindow + fill do here - createEmpty lays down the grid,
+    fill carries the value forward - and joining the same treatment of `until_s` is what
+    stops it carrying on past the end of the session. A flat line across the whole panel
+    would have to be the loosest of all the sessions: wrong for every one but a single one,
+    and an invitation for the app to trade in the hours between them.
+
+    A session that began before the panel's left edge is not drawn, because its point lies
+    outside the queried range. The table below has the same limit.
+    """
+    def field(name):
+        return '''from(bucket: "planning")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
-  |> filter(fn: (r) => r._measurement == "plan" and r.plan_run == newest)
-  |> filter(fn: (r) => ''' + fields + ''')
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> filter(fn: (r) => r._measurement == "app_setting" and r.plan_run == newest
+                    and r.action == "''' + action + '''" and r._field == "''' + name + '''")
   |> group()
-  |> sort(columns: ["_time"])
-  |> stateCount(fn: (r) => ''' + trading + ''', column: "n")
-  |> filter(fn: (r) => r.n > 0)
-  |> map(fn: (r) => ({
-      _time: r._time,
-      band: string(v: time(v: int(v: r._time) - (r.n - 1) * 900000000000))
-    }))
-
-// timeSrc: "_start" because aggregateWindow otherwise labels each window by its stop,
-// sliding every price 15 minutes past the interval it belongs to. createEmpty + fill carry
-// an hourly price across the quarters it covers, for days before the 15-min cutover.
-mkt = from(bucket: "alphaess")
-  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
-  |> filter(fn: (r) => r._measurement == "market_price" and r._field == "market_price")
   |> aggregateWindow(every: 15m, fn: last, timeSrc: "_start", createEmpty: true)
   |> fill(usePrevious: true)
-  |> group()
   |> keep(columns: ["_time", "_value"])
+'''
+    return '''import "join"
 
-priced = join.inner(
-  left: acts,
-  right: mkt,
+''' + NEWEST + '''
+setTo = ''' + field("set_to_eur_kwh") + '''
+liveUntil = ''' + field("until_s") + '''
+join.inner(
+  left: setTo,
+  right: liveUntil,
   on: (l, r) => l._time == r._time,
-  as: (l, r) => ({ _time: l._time, band: l.band, ct: r._value * 100.0, t_ns: int(v: l._time) }))
+  as: (l, r) => ({ _time: l._time, ct: l._value * 100.0,
+                   untilNs: int(v: r._value) * 1000000000 }))
+  |> filter(fn: (r) => int(v: r._time) < r.untilNs)
+  |> map(fn: (r) => ({ _time: r._time, "''' + series + '''": r.ct }))
+  |> group()
+  |> yield(name: "''' + series + '''")
+'''
 
-// The rounding sits in a map rather than inside reduce: Flux will not parse a conditional
-// as an argument to math.floor, which fails with a bare "expected RPAREN, got RBRACE".
-thresholds = priced
-  |> group(columns: ["band"])
-  |> reduce(
-      identity: {marginal: ''' + identity + ''', last_ns: 0},
-      fn: (r, accumulator) => ({
-        marginal: if r.ct ''' + better + ''' accumulator.marginal then r.ct else accumulator.marginal,
-        last_ns: if r.t_ns > accumulator.last_ns then r.t_ns else accumulator.last_ns
-      }))
+
+# One row per trading session. `action` is a tag, so it survives the pivot as a column and
+# no second query is needed to tell the two directions apart - which is also why this is a
+# single target rather than the two-target merge the Flux version needed.
+SETTINGS_TABLE = NEWEST + '''
+from(bucket: "planning")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "app_setting" and r.plan_run == newest)
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> group()
   |> map(fn: (r) => ({
-      band: r.band,
-      from_t: time(v: r.band),
-      until_t: time(v: r.last_ns + 900000000000),
-      set_to: ''' + rounder + '''(x: r.marginal * 10.0) / 10.0
+      from_t: r._time,
+      // until_s is seconds because an InfluxDB field cannot hold a time.
+      until_t: time(v: int(v: r.until_s) * 1000000000),
+      action: if r.action == "sell" then "sell above" else "buy below",
+      set_to: r.set_to_eur_kwh * 100.0,
+      target_soc: r.target_soc_wh / float(v: ${capacity_wh}) * 100.0,
+      // Spelled out rather than left as a 0/1: a column of bare zeroes beside a column of
+      // prices reads as a price of zero, and the count is the part worth acting on.
+      exact: if r.exact > 0.0 then "yes"
+             else "no - " + string(v: int(v: r.extra_intervals)) + " interval(s) against plan"
     }))
+  |> sort(columns: ["from_t"])
+  |> yield(name: "app settings")
 '''
 
 
@@ -364,28 +361,8 @@ from(bucket: "planning")
   |> map(fn: (r) => ({ _time: r._time, "market price": r._value * 100.0 }))
   |> yield(name: "market_price")
 ''', "B"),
-     # Joined back onto the intervals so each band draws its own step, rather than one flat
-     # line across the panel. A flat line has to be the loosest of all the bands, which is
-     # both wrong for every band but one and invites the app to trade in the hours between
-     # them.
-     target(band_query("sell") + '''
-join.inner(
-  left: acts,
-  right: thresholds,
-  on: (l, r) => l.band == r.band,
-  as: (l, r) => ({ _time: l._time, "sell above": r.set_to }))
-  |> group()
-  |> yield(name: "sell threshold")
-''', "C"),
-     target(band_query("buy") + '''
-join.inner(
-  left: acts,
-  right: thresholds,
-  on: (l, r) => l.band == r.band,
-  as: (l, r) => ({ _time: l._time, "buy below": r.set_to }))
-  |> group()
-  |> yield(name: "buy threshold")
-''', "D")],
+     target(threshold_line("sell", "sell above"), "C"),
+     target(threshold_line("buy", "buy below"), "D")],
     13, 9, "kwatth",
     [series_override("charge", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
                                 {"id": "custom.drawStyle", "value": "bars"}]),
@@ -434,15 +411,18 @@ join.inner(
 panels.append({
     "datasource": DS,
     "description": "What to type into the alphaess app, and when. The app takes one "
-                   "High/Low pair at a time, so each row is a setting to enter at 'from' "
-                   "and replace at the next row. 'set to' is the marginal price rounded "
-                   "outward - the lowest price the plan sells at in that band, or the "
-                   "highest it buys at - so every planned trade clears the app's strict "
-                   "comparison. Raw market price, matching the graph above. Rows close "
-                   "together are one session in practice: use the lowest sell / highest "
-                   "buy among them rather than retuning four times in an hour. Nothing "
-                   "here is read by the optimiser - it is the reverse, these numbers are "
-                   "read out of the plan so the app can be made to follow it.",
+                   "High/Low pair at a time, so each row is a setting to enter at 'From' "
+                   "and replace when the next row of the same direction comes due. "
+                   "'to ct/kWh' is chosen so the app trades in exactly the intervals the "
+                   "plan trades in - not merely the ones it must catch, but also none of "
+                   "the ones it must leave alone, for the whole time the setting is live. "
+                   "Raw market price, matching the graph above. 'Exact' is no when no "
+                   "single threshold can do both, and counts the intervals that then go "
+                   "against the plan; treat those rows as the best available compromise "
+                   "rather than an instruction. 'Target SoC' is what the battery should "
+                   "read by 'Until'. Nothing here is read by the optimiser - it is the "
+                   "reverse, these numbers are worked backwards out of the plan so the app "
+                   "can be made to follow it.",
     "fieldConfig": {
         "defaults": {
             "custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": False},
@@ -457,8 +437,13 @@ panels.append({
             {"matcher": {"id": "byName", "options": "action"},
              "properties": [{"id": "displayName", "value": "Set"}]},
             {"matcher": {"id": "byName", "options": "set_to"},
-             "properties": [{"id": "decimals", "value": 1},
+             "properties": [{"id": "decimals", "value": 2},
                             {"id": "displayName", "value": "to ct/kWh"}]},
+            {"matcher": {"id": "byName", "options": "target_soc"},
+             "properties": [{"id": "decimals", "value": 0}, {"id": "unit", "value": "percent"},
+                            {"id": "displayName", "value": "Target SoC"}]},
+            {"matcher": {"id": "byName", "options": "exact"},
+             "properties": [{"id": "displayName", "value": "Exact"}]},
         ],
     },
     "gridPos": {"h": 8, "w": 24, "x": 0, "y": 22},
@@ -473,24 +458,14 @@ panels.append({
     "transformations": [
         {"id": "merge", "options": {}},
         {"id": "organize", "options": {
-            "excludeByName": {"band": True},
+            "excludeByName": {},
             "includeByName": {},
             "renameByName": {},
-            "indexByName": {"from_t": 0, "until_t": 1, "action": 2, "set_to": 3},
+            "indexByName": {"from_t": 0, "until_t": 1, "action": 2, "set_to": 3,
+                            "target_soc": 4, "exact": 5},
         }},
     ],
-    "targets": [
-        target(band_query("sell") + '''
-thresholds
-  |> map(fn: (r) => ({ r with action: "sell above" }))
-  |> yield(name: "sell bands")
-''', "A"),
-        target(band_query("buy") + '''
-thresholds
-  |> map(fn: (r) => ({ r with action: "buy below" }))
-  |> yield(name: "buy bands")
-''', "B"),
-    ],
+    "targets": [target(SETTINGS_TABLE)],
     "title": "What to set in the app",
     "type": "table",
 })
@@ -644,7 +619,7 @@ dashboard = {
     # snapshot of the alphaess app taken on 2026-08-01 and never updated again. Nothing kept
     # them in step with the app, and the panel's own purpose was retuning the app, so using
     # the dashboard as intended was what made the numbers wrong. They are now computed from
-    # the plan instead; see band_query.
+    # the plan instead; see threshold_line and SETTINGS_TABLE.
     # Six hours back, thirty-six forward: enough past to see the actual line diverge, enough
     # future to cover a horizon built after the ~13:00 price release.
     "time": {"from": "now-6h", "to": "now+36h"},
@@ -659,7 +634,7 @@ dashboard = {
     # back to re-debug a query that was already correct.
     # 2: series renamed out of _value so the byName overrides bind.
     # 3: price line switched to raw market price; sell/buy threshold lines added.
-    "version": 6,
+    "version": 7,
     "weekStart": "",
 }
 
