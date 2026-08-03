@@ -64,6 +64,26 @@ services:
       # actually has is larger, which catches the network having been created
       # before that cap was added.
       EXPECTED_MAX_MTU: ${EXPECTED_MAX_MTU:-1400}
+      # Ceiling on the exponential backoff between failed polls. Coupled to
+      # PRICING_MAX_GAP_S below -- raising one without the other either costs
+      # whole days of savings data or hides real outages. See
+      # tests/test_collector_backoff.py.
+      MAX_BACKOFF_SECONDS: ${MAX_BACKOFF_SECONDS:-120}
+      # Reachability probe used to attribute a run of failures to the network
+      # or to AlphaESS. An IP, so it does not itself depend on DNS. The default
+      # is spelled out rather than left blank because collector.py's env()
+      # falls back only on an absent variable, not an empty one.
+      DIAGNOSTIC_URL: ${DIAGNOSTIC_URL:-https://1.1.1.1/}
+      # Complete-day gates for pricing.py, which runs from this same image via
+      # scripts/daily-savings.sh -- so this block is what makes them reachable
+      # at all. Defaults match the constants in pricing.py; a day failing
+      # either is left out of daily_cost entirely.
+      #
+      # Use the `:-` form, not a bare `-`: `:-` substitutes on empty as well as
+      # unset, so a stray `PRICING_MAX_GAP_S=` line in .env falls back instead
+      # of feeding an empty string to float().
+      PRICING_MIN_COVERAGE: ${PRICING_MIN_COVERAGE:-0.98}
+      PRICING_MAX_GAP_S: ${PRICING_MAX_GAP_S:-1200}
     depends_on:
       influxdb:
         condition: service_healthy
@@ -83,6 +103,9 @@ services:
       AWTRIX_HOST: ${AWTRIX_HOST}
       PUSH_INTERVAL_SECONDS: ${PUSH_INTERVAL_SECONDS:-30}
       STALE_AFTER_SECONDS: ${STALE_AFTER_SECONDS:-180}
+      # HTTP timeout per request to the clock. Only worth raising if the device
+      # is on a slow or congested LAN segment.
+      AWTRIX_TIMEOUT_SECONDS: ${AWTRIX_TIMEOUT_SECONDS:-5}
       AWTRIX_ICON_SOC: ${AWTRIX_ICON_SOC:-}
       AWTRIX_ICON_PV: ${AWTRIX_ICON_PV:-}
       AWTRIX_ICON_GRID: ${AWTRIX_ICON_GRID:-}

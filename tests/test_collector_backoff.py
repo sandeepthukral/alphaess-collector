@@ -11,6 +11,14 @@ This is not hypothetical. With the previous 300 s cap, four days in 2026-07
 carried gaps of 916-1051 s against a 1200 s gate -- each one failed poll below
 losing the day entirely. See MIGRATION.md, "Follow-ups this migration
 surfaced".
+
+Scope, since it is narrower than it looks: this asserts against the *defaults*
+-- DEFAULT_MAX_BACKOFF_S and pricing's MAX_GAP_S as imported with no environment
+set. Both are now settable per-deployment via .env (MAX_BACKOFF_SECONDS,
+PRICING_MAX_GAP_S), so a NAS that overrides one and not the other violates the
+invariant with this suite still green. Nothing here can catch that; the .env
+values are not in the repo. The coupling is spelled out at both definitions and
+in .env.example for that reason.
 """
 
 import pytest
