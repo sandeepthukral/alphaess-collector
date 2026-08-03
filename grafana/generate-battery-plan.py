@@ -62,6 +62,40 @@ array.from(rows: [{
 '''
 
 
+# The price line, from two sources joined at now().
+#
+# It used to be the collector's own `market_price` alone: a Frank Energie feed refreshed by
+# scripts/refresh-prices.sh every three hours, which publishes tomorrow later than the
+# day-ahead auction the planner reads. So every afternoon the panel drew bars, SoC and
+# threshold lines across a tomorrow with no price under them - which looks exactly like a
+# quiet market rather than a missing series. Worse, even once filled it was a second feed:
+# the line under the plan's bars need not have been the prices the plan optimised against.
+#
+# Ahead of now() the price is therefore the plan's own `price_market`, stored by the planner
+# on the same point as the schedule. Behind now() it stays the collector's stored price,
+# which is the record of what the market actually did. The two ranges must stay disjoint or
+# union() emits duplicate timestamps; keep() matches their schemas, group() collapses them
+# into the one series the overrides below match by name.
+PRICE_LINE = NEWEST + '''
+past = from(bucket: "alphaess")
+  |> range(start: v.timeRangeStart, stop: now())
+  |> filter(fn: (r) => r._measurement == "market_price" and r._field == "market_price")
+  |> keep(columns: ["_time", "_value"])
+
+future = from(bucket: "planning")
+  |> range(start: now(), stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "plan" and r.plan_run == newest
+                    and r._field == "price_market")
+  |> keep(columns: ["_time", "_value"])
+
+union(tables: [past, future])
+  |> group()
+  |> sort(columns: ["_time"])
+  |> map(fn: (r) => ({ _time: r._time, "market price": r._value * 100.0 }))
+  |> yield(name: "market_price")
+'''
+
+
 # The dashed lines on the price panel and the "What to set in the app" table both read the
 # `app_setting` measurement, which the planner writes alongside the plan itself
 # (battery-planning: app_bands.py, Marstek-planning.py appSettingLines).
@@ -342,7 +376,9 @@ panels.append(timeseries(
     "the interesting case. The dashed lines are derived from the plan, not from the app: "
     "each step is what the app's High/Low band must be set to during that band for the app "
     "to make the trade the plan wants. They step because one global pair cannot serve every "
-    "band - see the table below for when to change them.",
+    "band - see the table below for when to change them. Ahead of now the price is the "
+    "plan's own - the prices it was optimised against; behind now it is the price this "
+    "collector stored at the time. A step at now means the two feeds disagree there.",
     [target(NEWEST + '''
 from(bucket: "planning")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
@@ -355,12 +391,7 @@ from(bucket: "planning")
       "discharge": -r.discharge_wh / 1000.0 }))
   |> yield(name: "actions")
 ''', "A"),
-     target('''from(bucket: "alphaess")
-  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
-  |> filter(fn: (r) => r._measurement == "market_price" and r._field == "market_price")
-  |> map(fn: (r) => ({ _time: r._time, "market price": r._value * 100.0 }))
-  |> yield(name: "market_price")
-''', "B"),
+     target(PRICE_LINE, "B"),
      target(threshold_line("sell", "sell above"), "C"),
      target(threshold_line("buy", "buy below"), "D")],
     13, 9, "kwatth",
@@ -634,7 +665,9 @@ dashboard = {
     # back to re-debug a query that was already correct.
     # 2: series renamed out of _value so the byName overrides bind.
     # 3: price line switched to raw market price; sell/buy threshold lines added.
-    "version": 7,
+    # 8: price line reads the plan's own price_market ahead of now, so tomorrow's half of the
+    #    horizon is no longer blank until refresh-prices.sh next runs.
+    "version": 8,
     "weekStart": "",
 }
 

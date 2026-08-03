@@ -169,6 +169,30 @@ def test_series_sharing_an_axis_agree_on_its_scale(path):
     assert disagreements == []
 
 
+def test_price_line_reads_the_plan_ahead_of_now():
+    """Forward of now the price must come from the plan, not from the collector's feed.
+
+    The collector's `market_price` is refreshed every three hours from a feed that publishes
+    tomorrow later than the auction the planner reads, so on that source alone the panel spends
+    hours a day drawing bars and thresholds over an empty tomorrow. The two ranges also have to
+    stay disjoint at now(), or union() emits two values per timestamp where they overlap.
+    """
+    dash = json.loads(
+        (REPO / "grafana" / "alphaess-battery-plan.json").read_text(encoding="utf-8"))
+    panels = [p for p in dash["panels"]
+              if p.get("title") == "Planned charge / discharge, against price"]
+    assert len(panels) == 1, [p.get("title") for p in dash["panels"]]
+
+    price = [t["query"] for t in panels[0]["targets"] if '"market price"' in t.get("query", "")]
+    assert len(price) == 1, "expected exactly one query to emit the `market price` series"
+    query = price[0]
+
+    assert '_field == "price_market"' in query, "forward end does not read the plan's price"
+    assert 'range(start: now(), stop: v.timeRangeStop)' in query
+    assert 'range(start: v.timeRangeStart, stop: now())' in query, (
+        "the collector's stored price must be bounded at now(), or the two sources overlap")
+
+
 def test_alert_rule_names_its_datasource():
     path = PROVISIONING / "alerting" / "alphaess-staleness.yml"
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
