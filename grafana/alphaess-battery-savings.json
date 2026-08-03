@@ -279,7 +279,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Effective value the battery earned per kWh of grid import it avoided: total saving / total import avoided. A blended euro-per-kWh figure across all analysed days. Fixed all-time range.",
+      "description": "Real blended cost of every kWh used in the house: total with-battery cost (cost_model1, net of export credit) / total house consumption (load_kwh). A blended euro-per-kWh figure across all analysed days. Fixed all-time range.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -332,7 +332,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: 2020-01-01T00:00:00Z)\n  |> filter(fn: (r) => r._measurement == \"daily_cost\" and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"saving\" or r._field == \"import_kwh_cf\" or r._field == \"import_kwh_actual\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> reduce(identity: {s: 0.0, a: 0.0}, fn: (r, accumulator) => ({s: accumulator.s + r.saving, a: accumulator.a + (r.import_kwh_cf - r.import_kwh_actual)}))\n  |> map(fn: (r) => ({_value: if r.a > 0.0 then r.s / r.a else 0.0}))\n  |> yield(name: \"eff_eur_per_kwh\")",
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: 2020-01-01T00:00:00Z)\n  |> filter(fn: (r) => r._measurement == \"daily_cost\" and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"cost_model1\" or r._field == \"load_kwh\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> reduce(identity: {c: 0.0, l: 0.0}, fn: (r, accumulator) => ({c: accumulator.c + r.cost_model1, l: accumulator.l + r.load_kwh}))\n  |> map(fn: (r) => ({_value: if r.l > 0.0 then r.c / r.l else 0.0}))\n  |> yield(name: \"eff_eur_per_kwh\")",
           "refId": "A"
         }
       ],
@@ -788,7 +788,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Effective euro-per-kWh the battery earned over the selected range: period saving / period import avoided.",
+      "description": "Real blended cost of every kWh used in the house over the selected range: period with-battery cost (cost_model1, net of export credit) / period house consumption (load_kwh).",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -841,7 +841,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_cost\" and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"saving\" or r._field == \"import_kwh_cf\" or r._field == \"import_kwh_actual\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> reduce(identity: {s: 0.0, a: 0.0}, fn: (r, accumulator) => ({s: accumulator.s + r.saving, a: accumulator.a + (r.import_kwh_cf - r.import_kwh_actual)}))\n  |> map(fn: (r) => ({_value: if r.a > 0.0 then r.s / r.a else 0.0}))\n  |> yield(name: \"eff_eur_per_kwh\")",
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_cost\" and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"cost_model1\" or r._field == \"load_kwh\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> reduce(identity: {c: 0.0, l: 0.0}, fn: (r, accumulator) => ({c: accumulator.c + r.cost_model1, l: accumulator.l + r.load_kwh}))\n  |> map(fn: (r) => ({_value: if r.l > 0.0 then r.c / r.l else 0.0}))\n  |> yield(name: \"eff_eur_per_kwh\")",
           "refId": "A"
         }
       ],
@@ -1034,10 +1034,10 @@
     "list": [
       {
         "current": {
-          "text": "2",
-          "value": "2"
+          "text": "3",
+          "value": "3"
         },
-        "description": "daily_cost model_version to read. Bump in pricing.py when the model changes; set the same value here so old and new rows are not double-counted. 2 = price-coverage gate (days are stored only when their prices are complete); 1 = pre-gate rows, kept for comparison.",
+        "description": "daily_cost model_version to read. Bump in pricing.py when the model changes; set the same value here so old and new rows are not double-counted. 3 = added load_kwh (total house consumption) for the real-€/kWh panels; 2 = price-coverage gate (days are stored only when their prices are complete); 1 = pre-gate rows, kept for comparison.",
         "hide": 0,
         "label": "Model version",
         "name": "model_version",
@@ -1048,12 +1048,17 @@
             "value": "1"
           },
           {
-            "selected": true,
+            "selected": false,
             "text": "2",
             "value": "2"
+          },
+          {
+            "selected": true,
+            "text": "3",
+            "value": "3"
           }
         ],
-        "query": "1,2",
+        "query": "1,2,3",
         "skipUrlSync": false,
         "type": "custom"
       }
