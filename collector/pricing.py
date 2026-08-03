@@ -52,10 +52,33 @@ DAILY_MEASUREMENT = "daily_cost"
 #    in step (grafana/alphaess-battery-savings.json).
 MODEL_VERSION = "2"
 
-# Complete-day gate.
-POLL_INTERVAL_S = int(os.environ.get("POLL_INTERVAL_SECONDS", "30"))
-MIN_COVERAGE = float(os.environ.get("PRICING_MIN_COVERAGE", "0.98"))
-MAX_GAP_S = float(os.environ.get("PRICING_MAX_GAP_S", "1200"))  # 20 min
+# Defined before the settings below, which log through it while being parsed.
+log = logging.getLogger("pricing")
+
+
+def _num_env(name: str, default: str, cast=float):
+    """Parse a numeric setting, failing loudly on a typo.
+
+    These are read at import, so an unparseable value used to surface as a bare
+    ValueError traceback from a module-level line -- the offending variable
+    named nowhere in it. That was unreachable while nothing set these; now that
+    docker-compose.yml passes them through it is a mistype away.
+
+    Deliberately fatal rather than falling back to the default: a gate that
+    silently reverts is how a day gets scored under rules nobody chose.
+    """
+    raw = os.environ.get(name, default)
+    try:
+        return cast(raw)
+    except ValueError:
+        log.error("%s=%r is not a valid %s", name, raw, cast.__name__)
+        sys.exit(1)
+
+
+# Complete-day gate. Both are settable via .env -- see .env.example.
+POLL_INTERVAL_S = _num_env("POLL_INTERVAL_SECONDS", "30", int)
+MIN_COVERAGE = _num_env("PRICING_MIN_COVERAGE", "0.98")
+MAX_GAP_S = _num_env("PRICING_MAX_GAP_S", "1200")  # 20 min
 
 # Minimum fraction of the day that must be covered by price intervals. Unlike
 # sample coverage this is held to ~1.0: energy in an unpriced hour is silently
@@ -63,12 +86,18 @@ MAX_GAP_S = float(os.environ.get("PRICING_MAX_GAP_S", "1200"))  # 20 min
 # a slightly-noisier result, it is a wrong one (that hour's cost reads as zero
 # in both models). The tolerance exists only to absorb float error on the
 # boundary arithmetic, not to admit genuinely missing hours.
-MIN_PRICE_COVERAGE = float(os.environ.get("PRICING_MIN_PRICE_COVERAGE", "0.999"))
+#
+# Deliberately NOT configurable, unlike the two gates above -- this is not an
+# oversight, so please don't "fix" it. Those two measure sample completeness and
+# degrade smoothly, so trading precision for a day that would otherwise vanish
+# is a real operational call. This one has no such gradient: below 1.0 the
+# output is not noisier, it is wrong, and nothing in the stored row marks it.
+# The fix for a day excluded here is to refetch its prices, never to lower the
+# bar.
+MIN_PRICE_COVERAGE = 0.999
 
 # Optional: convert ΔSoC% to kWh for the borrow/bank indicator.
 BATTERY_CAPACITY_KWH = os.environ.get("BATTERY_CAPACITY_KWH")
-
-log = logging.getLogger("pricing")
 
 
 def env(name: str, default: str | None = None) -> str:
