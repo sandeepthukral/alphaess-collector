@@ -201,6 +201,26 @@ A day that appears at version 1 but not version 2 is one whose prices could not
 be completed — flip the dashboard's **Model version** variable to `1` to see
 what it used to claim.
 
+### Migrating existing history to model_version 3
+
+`MODEL_VERSION = "3"` adds `load_kwh` (total house consumption for the day, in
+priced hours), which the **Effective €/kWh** panels now use as
+`cost_model1 / load_kwh` instead of `saving / avoided-import` — the latter goes
+degenerate (near-zero or even negative denominator) whenever the battery's
+benefit comes mostly from price arbitrage rather than pure import avoidance.
+`cost_model1`, `cost_model2`, `saving`, and the `import`/`export` fields are
+unchanged from v2.
+
+Recomputing republishes every day, at version 3, same as the v2 migration:
+
+```sh
+docker compose run --rm collector python prices.py  --backfill 2026-07-01 2026-08-02
+docker compose run --rm collector python pricing.py --backfill 2026-07-01 2026-08-02
+```
+
+The version-2 rows are left in place and simply become invisible once the
+dashboard's **Model version** variable is on `3` (already the default).
+
 ### Auditing stored days
 
 `--audit` is read-only. It re-checks every stored day at the current

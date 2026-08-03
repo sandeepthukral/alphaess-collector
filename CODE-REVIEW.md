@@ -62,7 +62,7 @@ reset in `DEPLOY.md`, "Changing the Grafana admin password". The `:?` guard from
 - [ ] #16 No date-aware branch for the 2027 saldering/netting change
 - [ ] #17 `export_price()` formula still unvalidated against a real bill
 - [ ] #18 Stale `daily_cost` rows require manual `influx delete`, no auto-heal
-- [ ] #19 Dashboard "Effective €/kWh" can misleadingly read as 0.0
+- [x] #19 Dashboard "Effective €/kWh" can misleadingly read as 0.0 — model_version 3
 - [ ] #20 `MODEL_VERSION`/dashboard sync is a CI test, not a runtime guard
 - [ ] #21 AlphaESS sensor sign convention has no automated verification
 - [ ] #22 EnergyZero reconstruction fallback unvalidated against a real 15-min invoice —
@@ -813,17 +813,25 @@ correcting a stale row is always a manual step today.
 **Fix:** consider having `--audit --fix` (or similar) perform the delete +
 recompute automatically for rows it can safely identify as stale.
 
-### 19. Dashboard "Effective €/kWh" can misleadingly read as 0.0
+### 19. Dashboard "Effective €/kWh" can misleadingly read as 0.0 — fixed, model_version 3
 
-In `grafana/alphaess-battery-savings.json`, the Effective €/kWh panel divides
-total saving by total avoided import over the selected range, falling back to
-`0.0` whenever avoided import is `<= 0` for that range — with no visual
-distinction between "no benefit" and "denominator degenerate for this
-period."
+`saving / avoided-import` (`total saving` divided by `total_import_kwh_cf -
+total_import_kwh_actual`) is not a stable ratio: the numerator is a cost
+figure that also captures price arbitrage (charging on cheap grid power to
+avoid pricier hours later), while the denominator only tracks net avoided
+import kWh. The two aren't proportional, so the ratio could spike arbitrarily
+high on a near-zero-but-positive denominator, or fall back to a misleading
+`0.0` once accumulated avoided import went negative — which is exactly what
+was observed on the real dashboard (a ~95 €/kWh reading one day, "No data"/0.0
+the next, with only ~16 days of history).
 
-**Fix:** render `null`/blank (or a distinct marker) instead of `0.0` when the
-denominator is non-positive, so a short/unusual date range doesn't read as a
-real zero.
+**Fix (model_version 3):** replaced the panel's formula with
+`total cost_model1 / total load_kwh` — the real with-battery cost (net of
+export credit) divided by total house consumption. Both quantities are in the
+same "money in, energy in" frame, so the ratio can't invert sign and reads
+as an actual blended €/kWh price for energy used in the house, not a
+volatile avoided-import ratio. See the "Migrating existing history to
+model_version 3" section in `README.md`.
 
 ### 20. `MODEL_VERSION`/dashboard sync is a CI test, not a runtime guard
 

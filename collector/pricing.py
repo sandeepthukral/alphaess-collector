@@ -48,9 +48,16 @@ DAILY_MEASUREMENT = "daily_cost"
 #    carries no evidence that its prices were complete. Recomputing under v2
 #    republishes every day that can be verified and simply omits those that
 #    cannot, which orphans the unverifiable v1 rows instead of requiring them to
-#    be hunted down and deleted. Keep the dashboard's `model_version` variable
-#    in step (grafana/alphaess-battery-savings.json).
-MODEL_VERSION = "2"
+#    be hunted down and deleted.
+# 3: added `load_kwh` (total house consumption, priced hours only) so the
+#    dashboard can show a blended real €/kWh -- cost_model1 / load_kwh -- instead
+#    of saving / avoided-import, which goes degenerate (near-zero or negative
+#    denominator) whenever the battery's benefit comes mostly from price
+#    arbitrage rather than pure import avoidance. cost1/cost2/saving/import*/
+#    export* are otherwise unchanged from v2.
+#    Keep the dashboard's `model_version` variable in step
+#    (grafana/alphaess-battery-savings.json).
+MODEL_VERSION = "3"
 
 # Defined before the settings below, which log through it while being parsed.
 log = logging.getLogger("pricing")
@@ -240,18 +247,24 @@ def compute_day(samples: list[Sample], intervals: list[dict], day: dt.date) -> d
     """Compute the daily_cost fields from samples + price intervals."""
     actual = integrate_by_interval(samples, lambda s: s.grid, intervals)
     counterfactual = integrate_by_interval(samples, lambda s: s.grid + s.battery, intervals)
+    house = integrate_by_interval(samples, lambda s: s.load, intervals)
 
     cost1 = cost2 = 0.0
     imp1 = exp1 = imp2 = exp2 = 0.0  # kWh totals
-    for iv, (ia, ea), (ic, ec) in zip(intervals, actual, counterfactual):
+    load_kwh = 0.0
+    for iv, (ia, ea), (ic, ec), (il, el) in zip(intervals, actual, counterfactual, house):
         pi, pe = import_price(iv), export_price(iv)
         ia, ea, ic, ec = ia / 1000, ea / 1000, ic / 1000, ec / 1000  # Wh -> kWh
+        il, el = il / 1000, el / 1000
         cost1 += ia * pi - ea * pe
         cost2 += ic * pi - ec * pe
         imp1 += ia
         exp1 += ea
         imp2 += ic
         exp2 += ec
+        # el is normally ~0 (load isn't expected to go negative); netting it
+        # anyway matches how imp1/exp1 are combined above.
+        load_kwh += il - el
 
     # Data-quality metrics. Coverage is time-based: normal cadence drift and a
     # skipped poll or two never count as missing; only real outages (gaps beyond
@@ -292,6 +305,7 @@ def compute_day(samples: list[Sample], intervals: list[dict], day: dt.date) -> d
         "export_kwh_actual": round(exp1, 4),
         "import_kwh_cf": round(imp2, 4),
         "export_kwh_cf": round(exp2, 4),
+        "load_kwh": round(load_kwh, 4),
         "delta_soc_percent": round(samples[-1].soc - samples[0].soc, 2),
         "balance_residual_kwh": round(residual, 4),
         "coverage": round(coverage, 4),

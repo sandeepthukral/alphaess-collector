@@ -280,6 +280,7 @@ For each **complete** day not already processed at the current `model_version`:
 | `saving` | `cost_model2 − cost_model1` (signed) |
 | `import_kwh_actual`, `export_kwh_actual` | grid energy, actual |
 | `import_kwh_cf`, `export_kwh_cf` | grid energy, counterfactual |
+| `load_kwh` | total house consumption, priced hours only (v3+) |
 | `delta_soc_percent` | SoC at 24:00 − 00:00 (borrow/bank indicator) |
 | `delta_soc_kwh` | same in kWh — only if `BATTERY_CAPACITY_KWH` is configured |
 | `coverage` | fraction of expected (DST-aware) samples present |
