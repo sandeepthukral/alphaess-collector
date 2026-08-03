@@ -509,7 +509,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Discharge is drawn negative so the two directions separate. The price line is the raw market price (no tax, sourcing markup, or energy tax) - the same signal alphaess's own scheduling reacts to, so this is what to eyeball when tuning it: buying should happen in the troughs, selling on the peaks. If an action does not line up with the price, that is the interesting case. The dashed lines are derived from the plan, not from the app: each step is what the app's High/Low band must be set to during that band for the app to make the trade the plan wants. They step because one global pair cannot serve every band - see the table below for when to change them.",
+      "description": "Discharge is drawn negative so the two directions separate. The price line is the raw market price (no tax, sourcing markup, or energy tax) - the same signal alphaess's own scheduling reacts to, so this is what to eyeball when tuning it: buying should happen in the troughs, selling on the peaks. If an action does not line up with the price, that is the interesting case. The dashed lines are derived from the plan, not from the app: each step is what the app's High/Low band must be set to during that band for the app to make the trade the plan wants. They step because one global pair cannot serve every band - see the table below for when to change them. Ahead of now the price is the plan's own - the prices it was optimised against; behind now it is the price this collector stored at the time. A step at now means the two feeds disagree there.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -757,7 +757,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"market_price\" and r._field == \"market_price\")\n  |> map(fn: (r) => ({ _time: r._time, \"market price\": r._value * 100.0 }))\n  |> yield(name: \"market_price\")\n",
+          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\npast = from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: now())\n  |> filter(fn: (r) => r._measurement == \"market_price\" and r._field == \"market_price\")\n  |> keep(columns: [\"_time\", \"_value\"])\n\nfuture = from(bucket: \"planning\")\n  |> range(start: now(), stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest\n                    and r._field == \"price_market\")\n  |> keep(columns: [\"_time\", \"_value\"])\n\nunion(tables: [past, future])\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> map(fn: (r) => ({ _time: r._time, \"market price\": r._value * 100.0 }))\n  |> yield(name: \"market_price\")\n",
           "refId": "B"
         },
         {
@@ -1128,6 +1128,6 @@
   "timezone": "browser",
   "title": "AlphaESS Battery Plan",
   "uid": "alphaess-battery-plan",
-  "version": 7,
+  "version": 8,
   "weekStart": ""
 }
