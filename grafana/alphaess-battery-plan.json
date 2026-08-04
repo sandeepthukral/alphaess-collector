@@ -141,6 +141,138 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "Positive is charging, negative is discharging - the same sign convention as the main AlphaESS dashboard, and the opposite of the raw `battery_power_w` field, which counts discharge as positive. Green is charging, red is discharging.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "id": 9,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> last()\n  |> map(fn: (r) => ({ r with _value: -r._value }))\n  |> yield(name: \"battery now\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Battery Power now",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Positive is drawing from the grid, negative is returning to it. Around zero means the house is running off solar and battery.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "id": 10,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> last()\n  |> yield(name: \"grid now\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Grid Power now",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
       "description": "Sum of the plan's per-interval cost, positive meaning earning. Matches the 'total benefit' line that advise.py prints for the same run.",
       "fieldConfig": {
         "defaults": {
@@ -169,7 +301,7 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 4,
+        "x": 12,
         "y": 0
       },
       "id": 2,
@@ -233,7 +365,7 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 8,
+        "x": 16,
         "y": 0
       },
       "id": 3,
@@ -297,7 +429,7 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 12,
+        "x": 20,
         "y": 0
       },
       "id": 4,
@@ -330,134 +462,6 @@
         }
       ],
       "title": "Terminal reserve",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "description": "Positive is charging, negative is discharging - the same sign convention as the main AlphaESS dashboard, and the opposite of the raw `battery_power_w` field, which counts discharge as positive.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "decimals": null,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "watt"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 0
-      },
-      "id": 9,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> last()\n  |> map(fn: (r) => ({ r with _value: -r._value }))\n  |> yield(name: \"battery now\")\n",
-          "refId": "A"
-        }
-      ],
-      "title": "Battery now",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "description": "Positive is drawing from the grid, negative is returning to it. Around zero means the house is running off solar and battery.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "decimals": null,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "watt"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 0
-      },
-      "id": 10,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> last()\n  |> yield(name: \"grid now\")\n",
-          "refId": "A"
-        }
-      ],
-      "title": "Grid now",
       "type": "stat"
     },
     {
