@@ -276,13 +276,13 @@ def series_override(name, props):
 
 panels = []
 
-# --- Row 1: four stats ------------------------------------------------------------------
+# --- Row 1: six stats -------------------------------------------------------------------
 panels.append(stat(
     1, "Plan age",
     "Time since the newest plan was made. The schedule runs every 3 hours, so anything past "
     "4 hours means a run did not fire - which is otherwise silent, because a stale plan still "
     "renders perfectly well.",
-    PLAN_AGE, "s", 0, 0, 6,
+    PLAN_AGE, "s", 0, 0, 4,
     [{"color": "green", "value": None},
      {"color": "orange", "value": 12600},
      {"color": "red", "value": 14400}]))
@@ -298,7 +298,7 @@ from(bucket: "planning")
   |> group()
   |> sum()
   |> yield(name: "benefit")
-''', "currencyEUR", 2, 6, 6,
+''', "currencyEUR", 2, 4, 4,
     [{"color": "red", "value": None}, {"color": "green", "value": 0}]))
 
 panels.append(stat(
@@ -312,7 +312,7 @@ from(bucket: "planning")
   |> last()
   |> map(fn: (r) => ({ r with _value: r._value / float(v: ${capacity_wh}) * 100.0 }))
   |> yield(name: "end SoC")
-''', "percent", 0, 12, 6,
+''', "percent", 0, 8, 4,
     [{"color": "text", "value": None}]))
 
 panels.append(stat(
@@ -326,7 +326,46 @@ from(bucket: "planning")
   |> last()
   |> map(fn: (r) => ({ r with _value: r._value / float(v: ${capacity_wh}) * 100.0 }))
   |> yield(name: "reserve")
-''', "percent", 0, 18, 6,
+''', "percent", 0, 12, 4,
+    [{"color": "text", "value": None}]))
+
+# The two live readings below are the only panels here that come from the battery rather than
+# from the plan: what it is doing right now, beside what the plan says it should be doing.
+#
+# `decimals` is left unset on purpose. Grafana's `watt` unit scales SI by itself, and its
+# automatic decimal count then gives "1.50 kW" above a kilowatt and "850 W" below it, which
+# is the wanted rendering. Pinning decimals to 2 would print "850.00 W"; pinning it to 0
+# would print "2 kW".
+#
+# Both fields are read as the last point in the past hour rather than over the dashboard's
+# range, because the dashboard's range runs into the future - the plan's horizon - and
+# `last()` over that would still be the newest reading, but a range starting days back is a
+# needlessly wide scan for one point. An empty panel therefore means the collector has been
+# silent for an hour, which is worth seeing as blank rather than as an hours-old number.
+panels.append(stat(
+    9, "Battery now",
+    "Positive is charging, negative is discharging - the same sign convention as the main "
+    "AlphaESS dashboard, and the opposite of the raw `battery_power_w` field, which counts "
+    "discharge as positive.",
+    '''from(bucket: "alphaess")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "battery_power_w")
+  |> last()
+  |> map(fn: (r) => ({ r with _value: -r._value }))
+  |> yield(name: "battery now")
+''', "watt", None, 16, 4,
+    [{"color": "text", "value": None}]))
+
+panels.append(stat(
+    10, "Grid now",
+    "Positive is drawing from the grid, negative is returning to it. Around zero means the "
+    "house is running off solar and battery.",
+    '''from(bucket: "alphaess")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "grid_power_w")
+  |> last()
+  |> yield(name: "grid now")
+''', "watt", None, 20, 4,
     [{"color": "text", "value": None}]))
 
 # --- Panel: planned vs actual SoC -------------------------------------------------------
