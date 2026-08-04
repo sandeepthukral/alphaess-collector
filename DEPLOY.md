@@ -618,7 +618,7 @@ since re-provisioning overwrites the UI copy from the file.
 
 ## Monitoring that the collector is actually collecting
 
-The poll loop catches every exception and backs off (capped at 5 minutes)
+The poll loop catches every exception and backs off (capped at 2 minutes)
 instead of exiting, so **container liveness is not a useful signal** — the
 process stays up while collecting nothing. Expired credentials, API errors,
 InfluxDB write failures and the MTU problem above all look identical from the
@@ -692,6 +692,15 @@ heartbeat still fires, which is the point of having both).
 fires when the newest `power_readings` sample is more than 5 minutes old, and
 on no data at all. The bundled Grafana mounts `./grafana/provisioning`, so the
 rule is picked up automatically — nothing to install.
+
+The same 5-minute staleness rule is rendered on screen as the **Collector
+status** stat, first in the top row of the *AlphaESS Collector Health*
+dashboard: a green `ALL OK` or a red `OUTAGE` box answering "is an outage
+happening right now", independent of the time picker. It exists because a
+Kuma "down" notification says only that pings stopped; this says whether they
+have resumed, which is otherwise a matter of noticing the follow-up "up"
+notification. A test pins its threshold to the alert's, so the box cannot go
+green while the alert fires.
 
 The two live checks overlap substantially — the heartbeat already catches most
 stalls. The staleness alert adds the cases the heartbeat structurally cannot see, because
