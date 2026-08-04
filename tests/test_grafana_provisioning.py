@@ -217,3 +217,43 @@ def test_dashboard_provider_and_alert_folder_agree():
 
     folders = {p["folder"] for p in providers} | {g["folder"] for g in alerting}
     assert folders == {"AlphaESS"}
+
+
+def test_status_panel_and_staleness_alert_share_a_threshold():
+    """The 'Collector status' box is the alert rendered on screen.
+
+    A green box while the alert is firing (or the reverse) is worse than having
+    neither: the dashboard is the thing looked at first when a Kuma notification
+    arrives, so a disagreement sends you hunting for a second, non-existent
+    fault. Both must break on the same number of seconds.
+    """
+    alerting = yaml.safe_load(
+        (PROVISIONING / "alerting" / "alphaess-staleness.yml").read_text(encoding="utf-8")
+    )["groups"]
+    alert_thresholds = [
+        param
+        for group in alerting
+        for rule in group["rules"]
+        for query in rule["data"]
+        for condition in query["model"].get("conditions", [])
+        for param in condition["evaluator"]["params"]
+    ]
+    assert len(alert_thresholds) == 1, alert_thresholds
+
+    dashboard = json.loads(
+        (REPO / "grafana" / "alphaess-collector-health.json").read_text(encoding="utf-8")
+    )
+    panel = next(
+        p for p in dashboard["panels"] if p["title"] == "Collector status"
+    )
+    defaults = panel["fieldConfig"]["defaults"]
+
+    # The red threshold step, and the boundary between the ALL OK and OUTAGE
+    # value mappings: both express the same rule, so both are checked.
+    steps = [s["value"] for s in defaults["thresholds"]["steps"] if s["value"] is not None]
+    ok = next(m for m in defaults["mappings"] if m["options"].get("result", {}).get("text") == "ALL OK")
+    outage = next(m for m in defaults["mappings"] if m["options"].get("result", {}).get("text") == "OUTAGE")
+
+    assert steps == alert_thresholds
+    assert ok["options"]["to"] == alert_thresholds[0]
+    assert outage["options"]["from"] == alert_thresholds[0]

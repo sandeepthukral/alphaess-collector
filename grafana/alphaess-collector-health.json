@@ -69,6 +69,113 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "Is collection happening right now? Green while the newest sample is under 5 minutes old, red past that -- the collector's poll loop never exits on failure, so \"container up\" says nothing. Matches the 'AlphaESS collector data stale' alert exactly. Ignores the time picker: this is always about now.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [
+            {
+              "options": {
+                "from": 0,
+                "result": {
+                  "color": "green",
+                  "index": 0,
+                  "text": "ALL OK"
+                },
+                "to": 300
+              },
+              "type": "range"
+            },
+            {
+              "options": {
+                "from": 300,
+                "result": {
+                  "color": "red",
+                  "index": 1,
+                  "text": "OUTAGE"
+                },
+                "to": 999999999
+              },
+              "type": "range"
+            },
+            {
+              "options": {
+                "match": "null",
+                "result": {
+                  "color": "red",
+                  "index": 2,
+                  "text": "NO DATA"
+                }
+              },
+              "type": "special"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 0,
+        "y": 0
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {
+          "valueSize": 32
+        },
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "// Age of the newest sample, in seconds. Deliberately the same signal as the\n// provisioned \"AlphaESS collector data stale\" alert (and the same 300s\n// threshold), so this panel and the alert can never disagree.\n//\n// Data staleness rather than the collector_health events, because an outage\n// is \"no data is arriving\", whatever the cause: a failing poll loop writes\n// failure events, but a dead container, a wrong bucket or a broken datasource\n// write nothing at all -- and those must show red too, not a stale \"ALL OK\".\n//\n// Fixed -1h lookback, not the time picker: the question is \"right now\", which\n// must not change when the dashboard is set to 7d.\nfrom(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"soc_percent\")\n  |> last()\n  |> map(fn: (r) => ({_time: r._time, _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0}))\n  |> keep(columns: [\"_time\", \"_value\"])\n  |> yield(name: \"data_age\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Collector status",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
       "description": "Polls that raised an error in the selected range. A handful spread over days is normal upstream flakiness; a cluster is an outage.",
       "fieldConfig": {
         "defaults": {
@@ -104,8 +211,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 0,
+        "w": 5,
+        "x": 5,
         "y": 0
       },
       "id": 1,
@@ -180,8 +287,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
+        "w": 5,
+        "x": 10,
         "y": 0
       },
       "id": 2,
@@ -252,8 +359,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 12,
+        "w": 5,
+        "x": 15,
         "y": 0
       },
       "id": 3,
@@ -317,8 +424,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 18,
+        "w": 4,
+        "x": 20,
         "y": 0
       },
       "id": 4,

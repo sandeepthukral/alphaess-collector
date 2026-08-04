@@ -1,7 +1,8 @@
 # Alerts on the collector going quiet, regardless of why.
 #
 # The collector's poll loop catches every exception and backs off (capped at
-# 5 minutes) rather than exiting, so a container-liveness check stays green
+# DEFAULT_MAX_BACKOFF_S, 2 minutes) rather than exiting, so a container-liveness
+# check stays green
 # while no data is being written. Credential expiry, AlphaESS API errors,
 # InfluxDB write failures and the stale-MTU TLS problem all present
 # identically: the process is up and the dashboards are empty.
@@ -82,9 +83,12 @@ groups:
               type: reduce
               expression: A
               reducer: last
-          # C: fire when the newest sample is older than 5 minutes. This is
-          # the collector's own backoff cap, so anything past it means the
-          # loop is failing repeatedly rather than merely between polls.
+          # C: fire when the newest sample is older than 5 minutes. That is
+          # comfortably past the collector's 120s backoff cap -- two full
+          # backoffs plus slack -- so anything beyond it means the loop is
+          # failing repeatedly rather than merely between polls. Kept at 300s
+          # when the cap dropped from 300s to 120s: tightening it to match
+          # would trade quiet, self-healing blips for pages.
           - refId: C
             datasourceUid: __expr__
             model:
