@@ -8,12 +8,26 @@ x-logging: &default-logging
     max-size: "10m"
     max-file: "3"
 
+# Container clock, for log timestamps only. Without it every container runs
+# UTC while the NAS, Grafana and Uptime Kuma show local time -- so a log line
+# and the dashboard row for the same failure are two hours apart in summer,
+# which reads as two separate incidents during the one moment you least want
+# to be doing arithmetic. Observed 2026-08-04 on a 15-minute AlphaESS outage.
+#
+# Safe to change: nothing date-sensitive reads the container clock's zone.
+# pricing.py and scripts/daily-savings.sh pin Europe/Amsterdam explicitly
+# (NL_TZ in collector/prices.py) and InfluxDB stores UTC regardless, so day
+# boundaries and published savings are unaffected either way.
+x-timezone: &default-timezone
+  TZ: ${TZ:-Europe/Amsterdam}
+
 services:
   influxdb:
     image: influxdb:2
     restart: unless-stopped
     logging: *default-logging
     environment:
+      <<: *default-timezone
       DOCKER_INFLUXDB_INIT_MODE: setup
       DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_ADMIN_USER:-admin}
       DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_ADMIN_PASSWORD}
@@ -43,6 +57,7 @@ services:
     restart: unless-stopped
     logging: *default-logging
     environment:
+      <<: *default-timezone
       ALPHAESS_APP_ID: ${ALPHAESS_APP_ID}
       ALPHAESS_APP_SECRET: ${ALPHAESS_APP_SECRET}
       ALPHAESS_SYS_SN: ${ALPHAESS_SYS_SN}
@@ -95,6 +110,7 @@ services:
     restart: unless-stopped
     logging: *default-logging
     environment:
+      <<: *default-timezone
       INFLUX_URL: http://influxdb:8086
       # Read-only: the pusher only ever reads the newest sample.
       INFLUX_TOKEN: ${INFLUX_TOKEN_PUSHER:?set INFLUX_TOKEN_PUSHER in .env -- see DEPLOY.md, "Scoped tokens"}
@@ -136,6 +152,7 @@ services:
         done &&
         exec /run.sh
     environment:
+      <<: *default-timezone
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       # No fallback, on purpose. Grafana is the only service published to the
       # LAN, its admin account guards more than one project's dashboards, and

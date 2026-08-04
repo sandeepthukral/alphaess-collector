@@ -83,6 +83,10 @@ docker compose logs -f collector
 
 Expected: a `Polling every 30s ...` line and no repeated `Poll failed` errors.
 
+Log timestamps follow `TZ` in `.env` (default `Europe/Amsterdam`). Set it to
+the host's zone: left unset, containers run UTC while Grafana and Uptime Kuma
+show local time, and the same failure appears at two different clock times.
+
 Then open Grafana at `http://<nas-host>:3000` (or your `GRAFANA_PORT`). The
 InfluxDB datasource and all three dashboards — **AlphaESS**, **AlphaESS Energy
 Flow** (Sankey), and **Battery Savings** — are provisioned automatically, and
