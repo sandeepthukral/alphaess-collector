@@ -99,6 +99,37 @@ services:
       # of feeding an empty string to float().
       PRICING_MIN_COVERAGE: ${PRICING_MIN_COVERAGE:-0.98}
       PRICING_MAX_GAP_S: ${PRICING_MAX_GAP_S:-1200}
+      # Complete-day gates for efficiency.py, which runs from this same image
+      # via scripts/daily-efficiency.sh. Same `:-` reasoning as above.
+      # EFFICIENCY_MAX_SOC_ALIGN_PP guards the one assumption efficiency.py
+      # cannot verify from the payload: that AlphaESS stamps uploadTime in the
+      # system's local zone. A whole-hour error moves SoC by tens of points,
+      # so this catches a DST mis-parse instead of storing a plausible lie.
+      EFFICIENCY_MIN_COVERAGE: ${EFFICIENCY_MIN_COVERAGE:-0.98}
+      EFFICIENCY_MAX_GAP_S: ${EFFICIENCY_MAX_GAP_S:-1800}
+      EFFICIENCY_MAX_SOC_ALIGN_PP: ${EFFICIENCY_MAX_SOC_ALIGN_PP:-2.0}
+      # Despiking for the metered load series. AlphaESS intermittently returns
+      # a wildly wrong single 5-minute `load` record (5832 W where the 30 s
+      # series says ~500 W); 14 landed on 2026-08-01 and took that day's
+      # conversion loss to -4.59 kWh. A record is dropped when it exceeds the
+      # largest derived load in its own 5-minute neighbourhood by both FACTOR x
+      # and FLOOR_W -- conversion loss only ever makes derived >= metered, so
+      # the reverse by several-fold is not loss. A real appliance spike shows in
+      # both series and survives. FACTOR=0 disables.
+      EFFICIENCY_SPIKE_FACTOR: ${EFFICIENCY_SPIKE_FACTOR:-4.0}
+      EFFICIENCY_SPIKE_FLOOR_W: ${EFFICIENCY_SPIKE_FLOOR_W:-1500}
+      EFFICIENCY_MAX_SPIKE_FRACTION: ${EFFICIENCY_MAX_SPIKE_FRACTION:-0.10}
+      # AlphaESS rate-limit politeness. efficiency.py shares an appId budget
+      # with the 30s poll loop in this same image, so a greedy backfill punches
+      # gaps in power_readings that pricing.py then charges against
+      # PRICING_MAX_GAP_S. 10s is the upstream library's advice.
+      ALPHAESS_MIN_REQUEST_INTERVAL_S: ${ALPHAESS_MIN_REQUEST_INTERVAL_S:-10}
+      ALPHAESS_MAX_RETRIES: ${ALPHAESS_MAX_RETRIES:-4}
+      ALPHAESS_RETRY_CODES: ${ALPHAESS_RETRY_CODES:-6053}
+      # Optional Kuma "Push" monitor URL for the nightly efficiency job; unset =
+      # no heartbeat. Separate from HEARTBEAT_URL above: that one is the live
+      # collector's dead-man's switch and fires every 30s, this one once a night.
+      EFFICIENCY_HEARTBEAT_URL: ${EFFICIENCY_HEARTBEAT_URL:-}
     depends_on:
       influxdb:
         condition: service_healthy
@@ -188,6 +219,7 @@ services:
       - ./grafana/alphaess-energy-flow.json:/etc/grafana/dashboard-src/alphaess-energy-flow.json:ro
       - ./grafana/alphaess-battery-savings.json:/etc/grafana/dashboard-src/alphaess-battery-savings.json:ro
       - ./grafana/alphaess-collector-health.json:/etc/grafana/dashboard-src/alphaess-collector-health.json:ro
+      - ./grafana/alphaess-energy-losses.json:/etc/grafana/dashboard-src/alphaess-energy-losses.json:ro
       # Both read the `planning` bucket, which the battery-planning repo writes to. The
       # datasource points at `alphaess` as its default bucket, but every query here names its
       # bucket explicitly, so one datasource serves both. That does depend on

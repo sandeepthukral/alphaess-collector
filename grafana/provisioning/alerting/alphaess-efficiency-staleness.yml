@@ -1,0 +1,112 @@
+# Alerts on the nightly conversion-loss job having stopped running.
+#
+# scripts/daily-efficiency.sh fires once a night at 03:00 and writes
+# daily_energy. When it stops, nothing changes visibly: every panel on the
+# Energy Losses dashboard keeps rendering the days it did write, and the only
+# symptom is that the newest bar quietly stops moving. A container-liveness
+# check says nothing either -- there is no container; the job is a
+# `docker compose run` from DSM Task Scheduler that exits.
+#
+# This is the SECONDARY check. The primary is EFFICIENCY_HEARTBEAT_URL: the job
+# pushes an Uptime Kuma "Push" monitor after a row actually lands, and pushes
+# status=down with the reason when a run writes nothing. That distinction is
+# what catches the job's nastiest failure -- a run where every day fails the
+# quality gate exits 0 and looks like a healthy night to anything watching the
+# exit code. This rule watches the read end instead, so it additionally covers
+# a wrong bucket, a re-scoped token, a retention policy dropping rows, or
+# EFFICIENCY_HEARTBEAT_URL simply never being set.
+#
+# WHY computed_at_unix AND NOT THE ROW'S OWN TIMESTAMP: daily_energy rows are
+# stamped at the local midnight of the day they describe, so the 03:00 run on
+# day D writes a row stamped D-1 00:00. Just before the next run the newest row
+# is already 51 hours old on a perfectly healthy system. A staleness check on
+# that timestamp would need a >51h threshold and would take two and a half days
+# to notice a dead job. computed_at_unix records when efficiency.py actually
+# ran, which is why 30h is enough to catch a single missed night -- and why a
+# re-run that only confirms old days still counts as liveness.
+#
+# The bundled Grafana picks this up automatically (docker-compose.yml mounts
+# ./grafana/provisioning) -- nothing to install. See DEPLOY.md, "Monitoring the
+# nightly efficiency job".
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: alphaess-health
+    folder: AlphaESS
+    # The job runs once a night; evaluating every minute would be thirteen
+    # hundred queries a day to learn something that changes once.
+    interval: 15m
+    rules:
+      - uid: alphaess-efficiency-stale
+        title: AlphaESS conversion-loss job stale
+        condition: C
+        # The metric is itself an elapsed time, so it is inherently debounced --
+        # a brief blip cannot push it over 30 hours. No extra "for" needed.
+        for: 0s
+        # No series at all means nothing has been written in 30 days, which is
+        # the most severe case, not a reason to stay silent. It is also the
+        # state on a fresh install before the first backfill -- expected, and
+        # silenceable, but it should still say so out loud once.
+        noDataState: Alerting
+        execErrState: Alerting
+        labels:
+          service: alphaess-efficiency
+        annotations:
+          summary: >-
+            The nightly conversion-loss job has not written for over 30 hours
+            (last run {{ humanize $values.B.Value }}s ago).
+          description: >-
+            scripts/daily-efficiency.sh writes daily_energy at 03:00. In order
+            of likelihood: the DSM Task Scheduler entry is disabled or was
+            removed; AlphaESS is throttling (the job logs "code 6053" and gives
+            up after 3 consecutive days); every day in the window failed the
+            quality gate, most often soc_align after a DST change -- diagnose
+            with `docker compose run --rm collector python efficiency.py
+            --check-alignment --date YYYY-MM-DD`; or InfluxDB is refusing
+            writes. The Kuma push monitor's message names which of these it is;
+            failing that, `docker compose logs collector`.
+        data:
+          # A: seconds since efficiency.py last wrote a row, from the field that
+          # records when it ran rather than which day it described.
+          - refId: A
+            relativeTimeRange:
+              from: 2592000  # 30d
+              to: 0
+            datasourceUid: alphaess
+            model:
+              refId: A
+              # Change the bucket here if INFLUX_BUCKET is not the default.
+              query: |
+                from(bucket: "alphaess")
+                  |> range(start: -30d)
+                  |> filter(fn: (r) => r._measurement == "daily_energy")
+                  |> filter(fn: (r) => r._field == "computed_at_unix")
+                  |> max()
+                  |> map(fn: (r) => ({
+                       _time: now(),
+                       _value: float(v: uint(v: now())) / 1000000000.0 - r._value
+                     }))
+                  |> keep(columns: ["_time", "_value"])
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          # C: fire past 30 hours. The job runs every 24, so this tolerates one
+          # late or slow night and pages on a missed one. Keep in step with the
+          # "Job age" stat's red threshold on the Energy Losses dashboard --
+          # tests/test_grafana_provisioning.py pins the two together, so the box
+          # cannot read green while this fires.
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [108000]

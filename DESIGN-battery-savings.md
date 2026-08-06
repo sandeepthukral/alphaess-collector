@@ -30,7 +30,7 @@ Measurement `power_readings` in bucket `alphaess`, tag `sys_sn`, sampled every
 |---|---|---|
 | `pv_power_w` | W | solar generation (≥0) |
 | `grid_power_w` | W | **+ = import, − = export** |
-| `load_power_w` | W | house load (≥0) |
+| `load_power_w` | W | house load (≥0) — **derived, not measured**; see "Where the losses come from" |
 | `battery_power_w` | W | **+ = discharge, − = charge** |
 | `soc_percent` | % | battery state of charge |
 
@@ -374,3 +374,92 @@ day; there is no with/without split in the day set.
 - Load and PV are identical between the two worlds (removing the battery changes
   nothing else in the house).
 - The ~15% teruglever bonus is excluded (specific-case only).
+
+---
+
+## Where the losses come from (added 2026-08-06)
+
+The `balance_residual_kwh` metric above turned out to be structurally incapable
+of doing what it was built for, and the reason is worth recording rather than
+rediscovering.
+
+**`load_power_w` is an identity, not a measurement.**
+`load_power_w == pv_power_w + grid_power_w + battery_power_w` holds *exactly* on
+every sample — all 56,969 of them checked over 2026-07-17 → 2026-08-06, maximum
+absolute residual **0 W**. AlphaESS's `getLastPowerData` derives house load as
+the residual rather than metering it. Two consequences:
+
+- The AC energy balance in "The accounting" above closes by construction.
+  `balance_residual_kwh` is identically zero and can never flag anything.
+- `load_power_w` goes negative (−7847 W observed), which no house can do.
+
+So conversion and standby losses are invisible in `power_readings`, and no
+amount of integrating it changes that.
+
+### The two losses, measured separately
+
+Only the battery's own loss is visible in the 30-second data, via the asymmetry
+between charge and discharge over a window whose start and end SoC match. Over
+2026-07-17 → 2026-08-06, start and end SoC both 14.8%: **373.97 kWh in, 359.58
+kWh out — 14.39 kWh lost, 96.15% round-trip**, corroborated by eight
+non-overlapping SoC-matched sub-windows (pooled 95.93%).
+
+The rest needed a second, independent load figure, which
+`getOneDayPowerBySn` provides at 5-minute resolution. Its `load` is *not* the
+residual: on 2026-08-05 21:03 NL it reported 571 W where the identity gave 723 W,
+across four consecutive records, while the same payload's SoC matched
+`power_readings` exactly and its `feedIn` matched grid export to 1.4%. That gives
+
+```
+conversion + standby = Σ(derived load − metered load)      getOneDayPowerBySn
+battery internal     = Σ(charge) − Σ(discharge) − ΔSoC·C   getOneDateEnergyBySn
+total                = the two added
+```
+
+**The two terms do not double-count.** `eCharge`/`eDischarge` reproduce this
+repo's own integration of `battery_power_w` to within 1.4% over 19 local days
+(charge 364.20 vs 360.10 kWh, discharge 352.60 vs 347.58; out/in 96.81% vs
+96.52%), so they measure the same plane, and the conversion term is measured
+entirely outside it.
+
+Measured over 2026-07-18 → 2026-08-05: conversion + standby **1.1–2.7 kWh/day**,
+battery internal **~0.7 kWh/day**.
+
+### Two data defects the module has to survive
+
+1. **`ppv` in `getOneDayPowerBySn` is always 0.0** on this system — three full
+   days summed to 0.00 kWh while `getOneDateEnergyBySn` reported 17–25 kWh of PV
+   for the same days. Not stored; see `efficiency.series_points`.
+2. **`load` in the same endpoint intermittently returns a wildly wrong single
+   value** — 5832 W where the 30-second series says ~500 W. 26 records in 5430
+   (0.48%) across 19 days, worth 8.7 kWh of phantom load, with 14 of them on
+   2026-08-01 alone: enough to take that day's conversion loss to **−4.59 kWh**,
+   inverting the sign of the quantity being measured. The filter tests each
+   record against the derived series rather than against its neighbours, because
+   that is the physically meaningful direction — conversion loss makes derived ≥
+   metered, always — and because a genuine appliance spike appears in both series
+   and must survive. Dropped records are still stored in `metered_power`; the
+   filter applies to the integral, not to the archive.
+
+### Schema
+
+Write measurement **`metered_power`**, tags `sys_sn` + `source`, timestamp = the
+record's own `uploadTime` converted from naive Amsterdam local to UTC (fold-aware
+in October, gap-dropping in March — see `efficiency.parse_upload_times`).
+
+Write measurement **`daily_energy`**, tags `sys_sn` + `model_version`, timestamp
+= local midnight expressed as UTC, the same convention as `daily_cost`.
+
+One field there is not about energy: **`computed_at_unix`**, the wall-clock
+instant the row was written. Every staleness check reads it, because a
+`daily_energy` row's own timestamp is 51 hours old on a healthy system right
+before the next nightly run — a check on that would need a >51 h threshold and
+would take two and a half days to notice a dead job.
+
+### What still cannot be measured
+
+Whether `eCharge`/`eDischarge` are metered at the battery's DC terminals or
+AC-referred is not documented anywhere and no endpoint distinguishes them. If
+they are AC-referred, some conversion loss is counted in both terms. The 1.4%
+agreement with `battery_power_w` says only that the two agree with *each other*.
+Settling it needs a physical AC meter on the inverter, not another API call.

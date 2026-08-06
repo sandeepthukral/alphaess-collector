@@ -218,6 +218,201 @@ Worth one check after setting it up: an empty price series looks exactly like a
 working panel in a quiet market, which is how this went unnoticed from the day
 the dashboard was built until 2026-08-02.
 
+### Nightly conversion-loss update
+
+Back-fills AlphaESS's own metered house load and daily energy totals into
+`metered_power` and `daily_energy`, feeding the **AlphaESS Energy Losses**
+dashboard. This is what makes the inverter's conversion and standby losses
+measurable at all: `power_readings.load_power_w` is the exact identity
+`pv + grid + battery`, so its energy balance closes by construction and no loss
+can appear in it (see README, "Data collected"). `getOneDayPowerBySn` reports the
+same day with a load that *is* metered, and the gap between the two is the loss —
+about 1–2.7 kWh a day on this system, against a battery round-trip loss of ~0.7.
+
+Schedule [scripts/daily-efficiency.sh](scripts/daily-efficiency.sh):
+
+- **General**: User = `root` (DSM's docker socket needs root)
+- **Schedule**: Daily, first run time `03:00`
+- **Task Settings → Run command**:
+
+  ```sh
+  /volume1/docker/alphaess-collector/scripts/daily-efficiency.sh
+  ```
+
+`03:00`, not just after midnight: AlphaESS finalises a day's totals some minutes
+into the next one and returns HTTP 200 with a null or all-zero payload until it
+has. `efficiency.py` refuses to store that, so an earlier run would only waste
+the window. It is deliberately a separate task from `daily-savings.sh` at 02:00 —
+both run under `set -eu`, and a throttled AlphaESS API here would otherwise abort
+that script before `pricing.py` runs, coupling a nice-to-have to the job that
+produces the money figure.
+
+Run it once by hand first:
+
+```sh
+cd /volume1/docker/alphaess-collector
+sudo docker compose run --rm collector python efficiency.py --dry-run --date 2026-08-05
+```
+
+**No token change is needed.** `INFLUX_TOKEN_COLLECTOR` is already read+write on
+`alphaess`, which is where both new measurements live and where `power_readings`
+is read from. (The Kuma monitor below does need a new read-only token — see
+["Scoped tokens"](#scoped-tokens).)
+
+**One-off backfill.** How far `getOneDayPowerBySn` serves history is unverified,
+so do it in chunks of 30 days or fewer and check the first chunk before
+committing to a year:
+
+```sh
+sudo docker compose run --rm collector python efficiency.py --backfill 2026-07-18 2026-08-05
+```
+
+Two API calls per day at `ALPHAESS_MIN_REQUEST_INTERVAL_S` apart, so a 30-day
+chunk takes about ten minutes. **That rate budget is shared with the live
+collector**, which is polling the same `appId` every 30 seconds from the same
+image: a greedy backfill pushes it into its backoff ladder and punches gaps in
+`power_readings`, which `pricing.py` then charges against `PRICING_MAX_GAP_S` —
+i.e. it can cost whole days of `daily_cost`. Keep the interval at 10 s or more,
+run large backfills deliberately, and check `collector_health` afterwards. An
+empty response for an old day is logged and skipped, never stored as zero.
+
+**When a day is rejected for `soc_align`.** That gate compares AlphaESS's SoC
+against the SoC already in `power_readings` at the same instant, which is the
+only available check on the one thing the module has to assume: that
+`uploadTime` is stamped in the system's local timezone. A whole-hour error moves
+SoC by tens of points on any day the battery cycles. Diagnose with:
+
+```sh
+sudo docker compose run --rm collector python efficiency.py --check-alignment --date 2026-08-05
+```
+
+It reports the clock lag that best reconciles the two series. `+0.00h` is
+correct and is what every day measured so far returns; a whole-hour answer means
+the timezone assumption has broken — most likely around a DST transition, so
+**2026-10-25 is worth checking by hand.**
+
+And once, after any hardware change:
+
+```sh
+sudo docker compose run --rm collector python efficiency.py --system-facts
+```
+
+That prints what AlphaESS says the system is and warns if `BATTERY_CAPACITY_KWH`
+disagrees with the reported capacity by more than 1%. Worth doing because
+`battery_loss_kwh` is directly proportional to a number typed into `.env` by
+hand.
+
+## Monitoring the nightly efficiency job
+
+A job that runs once a night and stops is invisible. There is no container to
+check — it is a `docker compose run` from Task Scheduler that exits — and every
+panel on the Energy Losses dashboard keeps rendering the days it *did* write, so
+the only symptom is that the newest bar quietly stops moving.
+
+Four failure modes, and they are not equivalent:
+
+| | Failure | What a naive check sees |
+|---|---|---|
+| a | The Task Scheduler entry is disabled or removed; the NAS was asleep at 03:00 | nothing runs, nothing complains |
+| b | AlphaESS throttles every day in the window | non-zero exit, visible only in DSM's mail |
+| c | Every day fails the quality gate | **exits 0 and looks like success** |
+| d | Rows land somewhere nothing reads them — token re-scoped, wrong bucket, retention | the job reports success; the dashboard is empty |
+
+Three checks cover them, in the same shape as
+["Monitoring that the collector is actually collecting"](#monitoring-that-the-collector-is-actually-collecting).
+
+**1. `EFFICIENCY_HEARTBEAT_URL` (write side, primary).** A second Uptime Kuma
+**Push** monitor, separate from the collector's `HEARTBEAT_URL`. Create it with:
+
+- Monitor Type: **Push**
+- **Heartbeat Interval**: `86400`
+- **Retries**: `1`, **Heartbeat Retry Interval**: `3600`
+
+which trips roughly 26 hours after the last good night — one missed 03:00 run
+alerts, a run that slips an hour does not. Paste the URL into
+`EFFICIENCY_HEARTBEAT_URL` in `.env`, quoted, for the same `. ./.env` reason as
+`HEARTBEAT_URL`.
+
+The job pushes it itself, after a row actually lands — not the shell script on
+exit 0, which is precisely what would report case (c) as healthy:
+
+| When | Push | Notification reads |
+|---|---|---|
+| ≥1 day written | `up` | `OK 2026-08-05: total loss 3.14 kWh (conv 1.79 + bat 1.35); 1 written, 3 skipped` |
+| Nothing new, window already full | `up` | `OK (nothing new, up to date through 2026-08-05)` |
+| Every attempted day gated | `down` | `GATED 2026-08-05: soc_align 4.2pp > 2.0 (4 days)` |
+| Rate-limited out | `down` | `THROTTLED: 3 day(s) lost to rate limiting, newest 2026-08-05` |
+| AlphaESS returned nothing | `down` | `NO DATA: AlphaESS returned nothing for 2 day(s)...` |
+
+A quiet night is pushed as `up`, not as silence: without that the monitor would
+flap every time the rolling window is already full, and an alert that cries wolf
+nightly is one nobody reads. If Python dies before it can push at all, no ping
+arrives and the monitor trips on its own — which is what a dead-man's switch is
+for, and why the shell script has no trap.
+
+**2. A Kuma monitor that queries InfluxDB directly (read side).** Covers (d) and
+anything else where the job is happy but the data is not there, because it reads
+the data instead of trusting the writer. Add a second monitor:
+
+- Monitor Type: **HTTP(s) - Keyword**, Keyword: `FRESH`, Heartbeat Interval `3600`
+- Method: `POST`, URL: `http://<nas-host>:8086/api/v2/query?org=home`
+- Headers:
+
+  ```json
+  {
+    "Authorization": "Token <INFLUX_TOKEN_KUMA>",
+    "Content-Type": "application/vnd.flux",
+    "Accept": "application/csv"
+  }
+  ```
+
+- Body:
+
+  ```flux
+  from(bucket: "alphaess")
+    |> range(start: -14d)
+    |> filter(fn: (r) => r._measurement == "daily_energy"
+          and r._field == "computed_at_unix")
+    |> max()
+    |> map(fn: (r) => ({
+        _value: if float(v: uint(v: now())) / 1000000000.0 - r._value < 108000.0
+                then "FRESH" else "STALE"
+      }))
+    |> yield(name: "freshness")
+  ```
+
+No rows at all also fails the keyword match, which is what we want: nothing
+written in two weeks is the worst case, not a reason to stay quiet. Paste the
+Flux into `influx query` first and confirm it prints `FRESH`, then drop the
+`108000.0` to something tiny and confirm it prints `STALE` — a monitor never
+seen to fail is not known to work.
+
+**Why `computed_at_unix` and not the row's own timestamp.** `daily_energy` rows
+are stamped at the local midnight of the day they *describe*, so the 03:00 run on
+day D writes a row stamped D−1 00:00. Just before the next run, the newest row is
+already 51 hours old on a perfectly healthy system. A staleness check on that
+timestamp would need a threshold above 51 hours and would take two and a half
+days to notice a dead job. `computed_at_unix` records when the job actually ran,
+so 30 hours catches a single missed night — and a re-run that only confirms old
+days still counts as liveness.
+
+**3. Grafana staleness alert + the on-screen stat (read side, secondary).** The
+rule in
+[`grafana/provisioning/alerting/alphaess-efficiency-staleness.yml`](grafana/provisioning/alerting/alphaess-efficiency-staleness.yml)
+fires on the same 30 hours, and on no data at all. It is picked up automatically
+by the bundled Grafana's existing `./grafana/provisioning` mount. The same
+threshold is rendered as the **Job age** stat in the top row of the Energy Losses
+dashboard; a test pins the two together, so the box cannot read green while the
+alert fires.
+
+Provisioned rules route through the **default notification policy** — point that
+at a real contact point, or all of this fires into nothing.
+
+> The nightly `daily-savings.sh` has no equivalent check: `daily_cost` can stop
+> being written and only the savings dashboard going flat reveals it. The same
+> keyword monitor pointed at `daily_cost` (filtered on `model_version`) would
+> close that gap. Left undone deliberately rather than overlooked.
+
 ## Backing up InfluxDB
 
 InfluxDB's data lives only in the `alphaess-influxdb-data` Docker volume,
@@ -384,8 +579,9 @@ Every service gets a token scoped to what it actually does:
 
 | Token | Permissions | Why |
 |---|---|---|
-| `INFLUX_TOKEN_COLLECTOR` | read + write `alphaess` | Writes `power_readings` and `collector_health`. Read as well, because this image also runs `pricing.py`, which queries `daily_cost` to skip days it has already computed and reads `power_readings`/`market_price` to compute them. |
+| `INFLUX_TOKEN_COLLECTOR` | read + write `alphaess` | Writes `power_readings` and `collector_health`. Read as well, because this image also runs `pricing.py`, which queries `daily_cost` to skip days it has already computed and reads `power_readings`/`market_price` to compute them. The same token covers `efficiency.py` (`metered_power`, `daily_energy`) — no change was needed to add it. |
 | `INFLUX_TOKEN_PUSHER` | read `alphaess` | Only ever reads the newest sample. |
+| `INFLUX_TOKEN_KUMA` | read `alphaess` | For the Uptime Kuma keyword monitor in ["Monitoring the nightly efficiency job"](#monitoring-the-nightly-efficiency-job). Deliberately not `INFLUX_TOKEN_GRAFANA`: that one also reads `planning`, and pasting it into a second system means revoking one breaks the other. Optional — mint it only if you set that monitor up. |
 | `INFLUX_TOKEN_GRAFANA` | read on every bucket it charts | Read-only. Anyone who reaches the Grafana UI can issue arbitrary Flux through the datasource proxy, so this is the one most worth keeping narrow. |
 
 None of them have a fallback: compose fails to start and names the missing
@@ -409,6 +605,12 @@ sudo docker compose exec -T influxdb influx auth create \
 
 sudo docker compose exec -T influxdb influx auth create \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "awtrix-pusher: r alphaess" \
+  --read-bucket "$ALPHAESS_ID"
+
+# Only if you set up the Uptime Kuma keyword monitor. This one is pasted into
+# Kuma's config, not into .env.
+sudo docker compose exec -T influxdb influx auth create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "uptime-kuma: r alphaess" \
   --read-bucket "$ALPHAESS_ID"
 ```
 
