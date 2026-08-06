@@ -1,0 +1,1206 @@
+{
+  "__elements": {},
+  "__inputs": [
+    {
+      "description": "",
+      "label": "alphaess",
+      "name": "DS_ALPHAESS",
+      "pluginId": "influxdb",
+      "pluginName": "InfluxDB",
+      "type": "datasource"
+    }
+  ],
+  "__requires": [
+    {
+      "id": "grafana",
+      "name": "Grafana",
+      "type": "grafana",
+      "version": "11.6.0"
+    },
+    {
+      "id": "influxdb",
+      "name": "InfluxDB",
+      "type": "datasource",
+      "version": "1.0.0"
+    },
+    {
+      "id": "stat",
+      "name": "Stat",
+      "type": "panel",
+      "version": ""
+    },
+    {
+      "id": "table",
+      "name": "Table",
+      "type": "panel",
+      "version": ""
+    },
+    {
+      "id": "timeseries",
+      "name": "Time series",
+      "type": "panel",
+      "version": ""
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Electricity lost converting AC to DC and back, from the daily_energy measurement that efficiency.py writes nightly. Two independently measured losses: the inverter's, and the battery's.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [
+        "savings"
+      ],
+      "targetBlank": false,
+      "title": "Battery savings",
+      "tooltip": "What the battery earned over the same days",
+      "type": "dashboards",
+      "url": ""
+    }
+  ],
+  "panels": [
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Total over the picked range of (load implied by power_readings) minus (load AlphaESS actually metered). This is the number the 30-second dataset structurally cannot produce on its own: load_power_w there is the exact identity pv + grid + battery, so its energy balance closes by construction and no loss can appear in it.\n\nIt is a difference of two load figures, not a directly attributed physical loss -- it also contains anything AlphaESS meters on a different CT than the residual sees. Around 1-2.7 kWh a day on this system.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "text",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"conversion_loss_kwh\")\n  |> group()\n  |> sum()\n  |> yield(name: \"conversion\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Conversion + standby loss",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Charge minus discharge, minus the energy still in the battery at the end (delta SoC x capacity). The SoC correction is what makes this valid over any range instead of only over a window whose start and end SoC match.\n\nWritten only when BATTERY_CAPACITY_KWH is configured. Single days can come out negative -- SoC is a BMS estimate, not a coulomb count, and it is nonlinear near the top and bottom of the range. That averages out over a week; do not read one day.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "text",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"battery_loss_kwh\")\n  |> group()\n  |> sum()\n  |> yield(name: \"battery\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Battery internal loss",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The two added. They do not double-count: the battery term is measured at the battery (eCharge/eDischarge reproduce this repo's own integration of battery_power_w to within 1.4% over 19 days), and the conversion term is measured entirely outside it, as the gap between two independent load figures.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "text",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"total_loss_kwh\")\n  |> group()\n  |> sum()\n  |> yield(name: \"total\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Total AC-DC-AC loss",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Time since efficiency.py last ran, from computed_at_unix -- not since the newest row's timestamp, which is 51 hours old on a healthy system right before the next nightly run. Amber past 26h, red past 30h, matching the provisioned staleness alert.\n\nA job that silently stops otherwise looks exactly like a working dashboard: every panel keeps rendering the days it did write.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 93600
+              },
+              {
+                "color": "red",
+                "value": 108000
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"array\"\n\nlast = (from(bucket: \"alphaess\")\n  |> range(start: -30d)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r._field == \"computed_at_unix\")\n  |> max()\n  |> findColumn(fn: (key) => true, column: \"_value\"))[0]\n\narray.from(rows: [{\n  _time: now(),\n  _value: float(v: uint(v: now())) / 1000000000.0 - last\n}])\n  |> yield(name: \"job age\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Job age",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Battery discharge divided by battery charge over the range, from AlphaESS's own daily counters. Independent of everything else here, which makes it the sanity check on the whole pipeline: measured directly from power_readings over a 20-day SoC-matched window it is 96.15%, so a number far from that means the pipeline is wrong, not the battery.\n\nUncorrected for delta SoC, so a short range that ends fuller than it started reads low. Use a week or more.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 90
+              },
+              {
+                "color": "green",
+                "value": 95
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 4
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"array\"\n\nsums = from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"discharge_kwh_api\" or r._field == \"charge_kwh_api\")\n  |> group(columns: [\"_field\"])\n  |> sum()\n\nn = (sums |> filter(fn: (r) => r._field == \"discharge_kwh_api\")\n          |> findColumn(fn: (key) => true, column: \"_value\"))[0]\nd = (sums |> filter(fn: (r) => r._field == \"charge_kwh_api\")\n          |> findColumn(fn: (key) => true, column: \"_value\"))[0]\n\narray.from(rows: [{\n  _time: now(),\n  _value: if d == 0.0 then 0.0 else n / d * 100.0\n}])\n  |> yield(name: \"round-trip\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Round-trip efficiency",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The conversion + standby figure against the house load implied by power_readings, so it can be compared across ranges of different length.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 4
+      },
+      "id": 6,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"array\"\n\nsums = from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"conversion_loss_kwh\" or r._field == \"derived_load_kwh\")\n  |> group(columns: [\"_field\"])\n  |> sum()\n\nn = (sums |> filter(fn: (r) => r._field == \"conversion_loss_kwh\")\n          |> findColumn(fn: (key) => true, column: \"_value\"))[0]\nd = (sums |> filter(fn: (r) => r._field == \"derived_load_kwh\")\n          |> findColumn(fn: (key) => true, column: \"_value\"))[0]\n\narray.from(rows: [{\n  _time: now(),\n  _value: if d == 0.0 then 0.0 else n / d * 100.0\n}])\n  |> yield(name: \"share\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Conversion loss as % of load",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Net energy the battery gained or lost over the picked range. The battery-loss figure is charge - discharge - this, so showing it makes the correction visible instead of implied: when it is large, the loss number is leaning on BATTERY_CAPACITY_KWH being right. Verify that with `efficiency.py --system-facts`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 4
+      },
+      "id": 7,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"delta_soc_kwh\")\n  |> group()\n  |> sum()\n  |> yield(name: \"delta SoC\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Delta SoC over range",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "How much of everything the battery took in came from the grid rather than the roof. Nothing in power_readings can derive this -- eGridCharge is only reported by getOneDateEnergyBySn. 47% over the first 19 days measured.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 4
+      },
+      "id": 8,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"array\"\n\nsums = from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"grid_charge_kwh_api\" or r._field == \"charge_kwh_api\")\n  |> group(columns: [\"_field\"])\n  |> sum()\n\nn = (sums |> filter(fn: (r) => r._field == \"grid_charge_kwh_api\")\n          |> findColumn(fn: (key) => true, column: \"_value\"))[0]\nd = (sums |> filter(fn: (r) => r._field == \"charge_kwh_api\")\n          |> findColumn(fn: (key) => true, column: \"_value\"))[0]\n\narray.from(rows: [{\n  _time: now(),\n  _value: if d == 0.0 then 0.0 else n / d * 100.0\n}])\n  |> yield(name: \"grid share\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Grid-charged share of battery",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The two losses stacked, one bar per local day. Conversion loss is the steadier of the two; the battery bar carries the SoC-estimate noise described on the stat above and can go negative on a single day.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "kWh",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "conversion"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "battery"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 9,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"conversion_loss_kwh\")\n  |> aggregateWindow(every: 1d, fn: sum, createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ _time: r._time, \"conversion\": r._value }))\n  |> yield(name: \"conversion\")\n",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"battery_loss_kwh\")\n  |> aggregateWindow(every: 1d, fn: sum, createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ _time: r._time, \"battery\": r._value }))\n  |> yield(name: \"battery\")\n",
+          "refId": "B"
+        }
+      ],
+      "title": "Loss per day",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The whole basis of the conversion figure. `derived` is pv + grid + battery from power_readings -- an identity, not a measurement. `metered` is what AlphaESS's 5-minute series reports independently. The gap between them is the loss; if the two lines ever cross, something is wrong with the data rather than with the inverter.\n\n`derived at 5m` is the derived series resampled onto the metered instants. It should sit on top of `derived`: a visible gap there means the difference is a sampling artefact rather than a physical loss.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "kWh",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "metered"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "derived"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "derived at 5m"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "light-blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"metered_load_kwh\")\n  |> aggregateWindow(every: 1d, fn: sum, createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ _time: r._time, \"metered\": r._value }))\n  |> yield(name: \"metered\")\n",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"derived_load_kwh\")\n  |> aggregateWindow(every: 1d, fn: sum, createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ _time: r._time, \"derived\": r._value }))\n  |> yield(name: \"derived\")\n",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"derived_load_kwh_at_5m\")\n  |> aggregateWindow(every: 1d, fn: sum, createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ _time: r._time, \"derived at 5m\": r._value }))\n  |> yield(name: \"derived at 5m\")\n",
+          "refId": "C"
+        }
+      ],
+      "title": "House load, metered vs derived",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "eCharge against eGridCharge, per local day. The gap is what the roof put in. This is the field pricing.py's cost model wants and cannot currently get.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "kWh",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 40,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "charged"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "from grid"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.drawStyle",
+                "value": "bars"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "discharged"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"charge_kwh_api\")\n  |> aggregateWindow(every: 1d, fn: sum, createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ _time: r._time, \"charged\": r._value }))\n  |> yield(name: \"charged\")\n",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"grid_charge_kwh_api\")\n  |> aggregateWindow(every: 1d, fn: sum, createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ _time: r._time, \"from grid\": r._value }))\n  |> yield(name: \"from grid\")\n",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"discharge_kwh_api\")\n  |> aggregateWindow(every: 1d, fn: sum, createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ _time: r._time, \"discharged\": r._value }))\n  |> yield(name: \"discharged\")\n",
+          "refId": "C"
+        }
+      ],
+      "title": "Battery charge: total vs from the grid",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Every stored field, per day, including the quality columns the gate ran on. `dropped` counts 5-minute records discarded as implausible -- AlphaESS intermittently returns a wildly wrong single `load` value (5832 W where the 30s series says 500 W), and 14 of them on 2026-08-01 were enough to take that day's conversion loss to -4.59 kWh before the filter existed. A day missing from this table failed the gate and was deliberately not stored; the reason is in the collector logs and in the Kuma notification.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "decimals": 2,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "id": 12,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Time"
+          }
+        ]
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"conversion_loss_kwh\" or r._field == \"battery_loss_kwh\"\n                    or r._field == \"total_loss_kwh\"\n                    or r._field == \"metered_load_kwh\" or r._field == \"derived_load_kwh\"\n                    or r._field == \"charge_kwh_api\" or r._field == \"discharge_kwh_api\"\n                    or r._field == \"grid_charge_kwh_api\"\n                    or r._field == \"delta_soc_percent\"\n                    or r._field == \"series_dropped\" or r._field == \"series_count\"\n                    or r._field == \"series_coverage\" or r._field == \"readings_coverage\"\n                    or r._field == \"soc_align_median_pp\")\n  |> aggregateWindow(every: 1d, fn: sum, createEmpty: false, timeSrc: \"_start\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({\n      _time: r._time,\n      \"conversion\": r.conversion_loss_kwh,\n      \"battery\": r.battery_loss_kwh,\n      \"total\": r.total_loss_kwh,\n      \"metered load\": r.metered_load_kwh,\n      \"derived load\": r.derived_load_kwh,\n      \"charged\": r.charge_kwh_api,\n      \"discharged\": r.discharge_kwh_api,\n      \"from grid\": r.grid_charge_kwh_api,\n      \"dSoC %\": r.delta_soc_percent,\n      \"dropped\": r.series_dropped,\n      \"records\": r.series_count,\n      \"series cov\": r.series_coverage,\n      \"readings cov\": r.readings_coverage,\n      \"soc align pp\": r.soc_align_median_pp\n    }))\n  |> yield(name: \"daily\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Day by day",
+      "type": "table"
+    }
+  ],
+  "preload": false,
+  "refresh": "30m",
+  "schemaVersion": 42,
+  "tags": [
+    "alphaess",
+    "battery",
+    "losses"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "text": "1",
+          "value": "1"
+        },
+        "description": "daily_energy model_version to read. Bump in efficiency.py when the stored schema or the loss definition changes; set the same value here so old and new rows are not double-counted.",
+        "hide": 0,
+        "label": "Model version",
+        "name": "model_version",
+        "options": [
+          {
+            "selected": true,
+            "text": "1",
+            "value": "1"
+          }
+        ],
+        "query": "1",
+        "skipUrlSync": false,
+        "type": "custom"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-14d/d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "AlphaESS Energy Losses",
+  "uid": "alphaess-energy-losses",
+  "version": 1,
+  "weekStart": ""
+}
