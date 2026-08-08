@@ -792,7 +792,7 @@ ignore, not just folders.
 
 ### The two battery-plan dashboards are generated, not exported
 
-Four of the six dashboards were exported from the Grafana UI. These two are built by
+Five of the seven dashboards were exported from the Grafana UI. These two are built by
 scripts, because their Flux queries were written and checked against the live database
 first, and those queries are the substance of the dashboard rather than its layout:
 

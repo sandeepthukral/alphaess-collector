@@ -218,6 +218,11 @@ services:
       - ./grafana/alphaess-dashboard.json:/etc/grafana/dashboard-src/alphaess-dashboard.json:ro
       - ./grafana/alphaess-energy-flow.json:/etc/grafana/dashboard-src/alphaess-energy-flow.json:ro
       - ./grafana/alphaess-battery-savings.json:/etc/grafana/dashboard-src/alphaess-battery-savings.json:ro
+      # "Energy" holds the daily/hourly detail the main dashboard used to carry: the
+      # per-day stats, both bar charts and both tables. The main dashboard keeps what is
+      # true right now -- SoC, battery power, collector status, the Sankey and the two
+      # timeseries -- so neither has to be scrolled to answer its own question.
+      - ./grafana/alphaess-energy.json:/etc/grafana/dashboard-src/alphaess-energy.json:ro
       - ./grafana/alphaess-collector-health.json:/etc/grafana/dashboard-src/alphaess-collector-health.json:ro
       - ./grafana/alphaess-energy-losses.json:/etc/grafana/dashboard-src/alphaess-energy-losses.json:ro
       # Both read the `planning` bucket, which the battery-planning repo writes to. The
