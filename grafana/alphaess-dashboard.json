@@ -401,6 +401,394 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "The plan running ahead of the measured line. Nothing executes the plan - the battery follows its own self-consumption logic - so the gap between the two lines is the question this whole project exists to answer, not a fault to be corrected.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 8,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "planned"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "actual"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "reserve"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    10,
+                    10
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "id": 20,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nfrom(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest and r._field == \"soc_wh\")\n  |> map(fn: (r) => ({ _time: r._time, \"planned\": r._value / float(v: ${capacity_wh}) * 100.0 }))\n  |> yield(name: \"planned\")\n",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"soc_percent\")\n  |> aggregateWindow(every: 15m, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({ _time: r._time, \"actual\": r._value }))\n  |> yield(name: \"actual\")\n",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nfrom(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest and r._field == \"reserve_wh\")\n  |> map(fn: (r) => ({ _time: r._time, \"reserve\": r._value / float(v: ${capacity_wh}) * 100.0 }))\n  |> yield(name: \"reserve\")\n",
+          "refId": "C"
+        }
+      ],
+      "title": "Planned SoC vs actual SoC",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "What to type into the alphaess app, and when. The app takes one High/Low pair at a time, so each row is a setting to enter at 'From' and replace when the next row of the same direction comes due. 'to ct/kWh' is chosen so the app trades in exactly the intervals the plan trades in - not merely the ones it must catch, but also none of the ones it must leave alone, for the whole time the setting is live. Raw market price, matching the price graph on the AlphaESS Battery Plan dashboard. 'Exact' is no when no single threshold can do both, and counts the intervals that then go against the plan; treat those rows as the best available compromise rather than an instruction. 'Target SoC' is what the battery should read by 'Until'. Nothing here is read by the optimiser - it is the reverse, these numbers are worked backwards out of the plan so the app can be made to follow it.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text"
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "from_t"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "From"
+              },
+              {
+                "id": "unit",
+                "value": "time:MM-DD HH:mm"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "until_t"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Until"
+              },
+              {
+                "id": "unit",
+                "value": "time:MM-DD HH:mm"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "action"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Set"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "set_to"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 2
+              },
+              {
+                "id": "displayName",
+                "value": "to ct/kWh"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "target_soc"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "Target SoC"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "exact"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Exact"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Set"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 99
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "to ct/kWh"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 94
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Target SoC"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 107
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "id": 21,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "From"
+          }
+        ]
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nfrom(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"app_setting\" and r.plan_run == newest)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> map(fn: (r) => ({\n      from_t: r._time,\n      // until_s is seconds because an InfluxDB field cannot hold a time.\n      until_t: time(v: int(v: r.until_s) * 1000000000),\n      action: if r.action == \"sell\" then \"sell above\" else \"buy below\",\n      set_to: r.set_to_eur_kwh * 100.0,\n      target_soc: r.target_soc_wh / float(v: ${capacity_wh}) * 100.0,\n      // Spelled out rather than left as a 0/1: a column of bare zeroes beside a column of\n      // prices reads as a price of zero, and the count is the part worth acting on.\n      exact: if r.exact > 0.0 then \"yes\"\n             else \"no - \" + string(v: int(v: r.extra_intervals)) + \" interval(s) against plan\"\n    }))\n  |> sort(columns: [\"from_t\"])\n  |> yield(name: \"app settings\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "What to set in the app",
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "indexByName": {
+              "action": 2,
+              "exact": 5,
+              "from_t": 0,
+              "set_to": 3,
+              "target_soc": 4,
+              "until_t": 1
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
       "description": "Estimated energy routing from sources (Solar / Battery discharge / Grid import) to uses (Home / Battery charge / Grid export) over the selected range. Set the time picker to a single day for a per-day flow. Links are modeled, not measured \u2014 see the query comment. Rendered with Apache ECharts (volkovlabs-echarts-panel).",
       "fieldConfig": {
         "defaults": {},
@@ -410,7 +798,7 @@
         "h": 11,
         "w": 8,
         "x": 0,
-        "y": 4
+        "y": 13
       },
       "id": 13,
       "options": {
@@ -454,9 +842,9 @@
           "refId": "A"
         }
       ],
+      "timeFrom": "24h",
       "title": "Energy Flow: Sources -> Uses",
-      "type": "volkovlabs-echarts-panel",
-      "timeFrom": "24h"
+      "type": "volkovlabs-echarts-panel"
     },
     {
       "datasource": {
@@ -641,7 +1029,7 @@
         "h": 11,
         "w": 8,
         "x": 8,
-        "y": 4
+        "y": 13
       },
       "id": 2,
       "options": {
@@ -675,9 +1063,9 @@
           "refId": "A"
         }
       ],
+      "timeFrom": "24h",
       "title": "Solar vs Load vs SoC",
-      "type": "timeseries",
-      "timeFrom": "24h"
+      "type": "timeseries"
     },
     {
       "datasource": {
@@ -777,7 +1165,7 @@
         "h": 11,
         "w": 8,
         "x": 16,
-        "y": 4
+        "y": 13
       },
       "id": 1,
       "options": {
@@ -811,355 +1199,9 @@
           "refId": "A"
         }
       ],
+      "timeFrom": "24h",
       "title": "Power",
-      "type": "timeseries",
-      "timeFrom": "24h"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "description": "The plan running ahead of the measured line. Nothing executes the plan - the battery follows its own self-consumption logic - so the gap between the two lines is the question this whole project exists to answer, not a fault to be corrected.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 8,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "stepAfter",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "percent"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "planned"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "blue",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "actual"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 0
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "reserve"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.fillOpacity",
-                "value": 0
-              },
-              {
-                "id": "custom.lineStyle",
-                "value": {
-                  "dash": [
-                    10,
-                    10
-                  ],
-                  "fill": "dash"
-                }
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 9,
-        "w": 24,
-        "x": 0,
-        "y": 15
-      },
-      "id": 20,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nfrom(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest and r._field == \"soc_wh\")\n  |> map(fn: (r) => ({ _time: r._time, \"planned\": r._value / float(v: ${capacity_wh}) * 100.0 }))\n  |> yield(name: \"planned\")\n",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"soc_percent\")\n  |> aggregateWindow(every: 15m, fn: mean, createEmpty: false)\n  |> map(fn: (r) => ({ _time: r._time, \"actual\": r._value }))\n  |> yield(name: \"actual\")\n",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nfrom(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest and r._field == \"reserve_wh\")\n  |> map(fn: (r) => ({ _time: r._time, \"reserve\": r._value / float(v: ${capacity_wh}) * 100.0 }))\n  |> yield(name: \"reserve\")\n",
-          "refId": "C"
-        }
-      ],
-      "title": "Planned SoC vs actual SoC",
       "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "description": "What to type into the alphaess app, and when. The app takes one High/Low pair at a time, so each row is a setting to enter at 'From' and replace when the next row of the same direction comes due. 'to ct/kWh' is chosen so the app trades in exactly the intervals the plan trades in - not merely the ones it must catch, but also none of the ones it must leave alone, for the whole time the setting is live. Raw market price, matching the price graph on the AlphaESS Battery Plan dashboard. 'Exact' is no when no single threshold can do both, and counts the intervals that then go against the plan; treat those rows as the best available compromise rather than an instruction. 'Target SoC' is what the battery should read by 'Until'. Nothing here is read by the optimiser - it is the reverse, these numbers are worked backwards out of the plan so the app can be made to follow it.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "from_t"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "From"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "until_t"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Until"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "action"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Set"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "set_to"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 2
-              },
-              {
-                "id": "displayName",
-                "value": "to ct/kWh"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "target_soc"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 0
-              },
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "displayName",
-                "value": "Target SoC"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Exact"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 24
-      },
-      "id": 21,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true,
-        "sortBy": [
-          {
-            "desc": false,
-            "displayName": "From"
-          }
-        ]
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nfrom(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"app_setting\" and r.plan_run == newest)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> map(fn: (r) => ({\n      from_t: r._time,\n      // until_s is seconds because an InfluxDB field cannot hold a time.\n      until_t: time(v: int(v: r.until_s) * 1000000000),\n      action: if r.action == \"sell\" then \"sell above\" else \"buy below\",\n      set_to: r.set_to_eur_kwh * 100.0,\n      target_soc: r.target_soc_wh / float(v: ${capacity_wh}) * 100.0,\n      // Spelled out rather than left as a 0/1: a column of bare zeroes beside a column of\n      // prices reads as a price of zero, and the count is the part worth acting on.\n      exact: if r.exact > 0.0 then \"yes\"\n             else \"no - \" + string(v: int(v: r.extra_intervals)) + \" interval(s) against plan\"\n    }))\n  |> sort(columns: [\"from_t\"])\n  |> yield(name: \"app settings\")\n",
-          "refId": "A"
-        }
-      ],
-      "title": "What to set in the app",
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "includeByName": {},
-            "indexByName": {
-              "action": 2,
-              "exact": 5,
-              "from_t": 0,
-              "set_to": 3,
-              "target_soc": 4,
-              "until_t": 1
-            },
-            "renameByName": {}
-          }
-        }
-      ],
-      "type": "table"
     },
     {
       "datasource": {
@@ -1181,8 +1223,7 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "text",
-                "value": null
+                "color": "text"
               }
             ]
           }
@@ -1242,7 +1283,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 24
       },
       "id": 22,
       "options": {
@@ -1334,5 +1375,5 @@
   "timezone": "browser",
   "title": "AlphaESS Dashboard",
   "uid": "alphaess-main",
-  "version": 10
+  "version": 13
 }

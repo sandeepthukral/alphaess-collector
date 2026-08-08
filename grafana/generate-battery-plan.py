@@ -502,10 +502,16 @@ panels.append({
             "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
         },
         "overrides": [
+            # Month-day and hour-minute only. The year is the same on every row of a
+            # 36-hour horizon and the seconds are always :00 -- both are width spent on
+            # nothing, and this table is read on a phone, where the columns are what get
+            # squeezed first.
             {"matcher": {"id": "byName", "options": "from_t"},
-             "properties": [{"id": "displayName", "value": "From"}]},
+             "properties": [{"id": "displayName", "value": "From"},
+                            {"id": "unit", "value": "time:MM-DD HH:mm"}]},
             {"matcher": {"id": "byName", "options": "until_t"},
-             "properties": [{"id": "displayName", "value": "Until"}]},
+             "properties": [{"id": "displayName", "value": "Until"},
+                            {"id": "unit", "value": "time:MM-DD HH:mm"}]},
             {"matcher": {"id": "byName", "options": "action"},
              "properties": [{"id": "displayName", "value": "Set"}]},
             {"matcher": {"id": "byName", "options": "set_to"},
@@ -708,7 +714,8 @@ dashboard = {
     # 3: price line switched to raw market price; sell/buy threshold lines added.
     # 8: price line reads the plan's own price_market ahead of now, so tomorrow's half of the
     #    horizon is no longer blank until refresh-prices.sh next runs.
-    "version": 8,
+    # 9: From/Until in the settings table drop the year and the seconds.
+    "version": 9,
     "weekStart": "",
 }
 
