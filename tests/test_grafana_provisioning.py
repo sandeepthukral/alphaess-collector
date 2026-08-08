@@ -193,6 +193,73 @@ def test_price_line_reads_the_plan_ahead_of_now():
         "the collector's stored price must be bounded at now(), or the two sources overlap")
 
 
+# The plan panels the main dashboard shows a second copy of, by title. They are copied
+# rather than shared because Grafana has no way to provision one panel into two dashboards.
+COPIED_PLAN_PANELS = [
+    "Planned SoC vs actual SoC",
+    "What to set in the app",
+    "Planned actions",
+]
+
+
+def _panels_by_title(name):
+    dash = json.loads((REPO / "grafana" / name).read_text(encoding="utf-8"))
+    return dash, {p.get("title"): p for p in dash["panels"]}
+
+
+def test_copied_plan_panels_match_their_source():
+    """The copies on the main dashboard must run the same queries as the originals.
+
+    Those queries are generated from grafana/generate-battery-plan.py, so a change there
+    lands in alphaess-battery-plan.json automatically and in alphaess-dashboard.json only
+    if someone remembers. Two dashboards then disagree about what the plan says, and both
+    look right. Mirror the change into grafana/alphaess-dashboard.json.
+    """
+    _, main = _panels_by_title("alphaess-dashboard.json")
+    _, plan = _panels_by_title("alphaess-battery-plan.json")
+
+    for title in COPIED_PLAN_PANELS:
+        assert title in main, f"{title} is missing from the main dashboard"
+        assert [t["query"] for t in main[title]["targets"]] == \
+               [t["query"] for t in plan[title]["targets"]], title
+
+
+def test_copied_plan_panels_span_the_plan_horizon():
+    """Each copy must carry a panel time override covering the whole horizon.
+
+    The main dashboard looks back 24 hours and stops at now; the plan is mostly in the
+    future. Without the override the panels query an empty window and the timeseries has no
+    axis to draw the forward half on -- three blank panels, no error. `timeFrom` back,
+    `timeShift` forward (negative), must land on the plan dashboard's own time range.
+    """
+    plan_dash, _ = _panels_by_title("alphaess-battery-plan.json")
+    _, main = _panels_by_title("alphaess-dashboard.json")
+
+    # "now-6h" / "now+36h" -> -6 / +36 hours either side of now.
+    want_start = int(plan_dash["time"]["from"].removeprefix("now").removesuffix("h"))
+    want_stop = int(plan_dash["time"]["to"].removeprefix("now+").removesuffix("h"))
+
+    for title in COPIED_PLAN_PANELS:
+        panel = main[title]
+        span = int(panel["timeFrom"].removesuffix("h"))
+        forward = -int(panel["timeShift"].removesuffix("h"))
+        assert (forward - span, forward) == (want_start, want_stop), title
+
+
+def test_both_dashboards_agree_on_battery_capacity():
+    """`capacity_wh` is not in InfluxDB, so each dashboard carries its own copy.
+
+    Every SoC percentage on both divides by it. Change it on one dashboard when the battery
+    changes and the other keeps reporting percentages that are merely plausible.
+    """
+    def capacity(name):
+        dash, _ = _panels_by_title(name)
+        var = next(v for v in dash["templating"]["list"] if v["name"] == "capacity_wh")
+        return var["query"], var["current"]["value"]
+
+    assert capacity("alphaess-dashboard.json") == capacity("alphaess-battery-plan.json")
+
+
 def test_alert_rule_names_its_datasource():
     path = PROVISIONING / "alerting" / "alphaess-staleness.yml"
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
