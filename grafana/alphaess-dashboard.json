@@ -455,7 +455,8 @@
         }
       ],
       "title": "Energy Flow: Sources -> Uses",
-      "type": "volkovlabs-echarts-panel"
+      "type": "volkovlabs-echarts-panel",
+      "timeFrom": "24h"
     },
     {
       "datasource": {
@@ -675,7 +676,8 @@
         }
       ],
       "title": "Solar vs Load vs SoC",
-      "type": "timeseries"
+      "type": "timeseries",
+      "timeFrom": "24h"
     },
     {
       "datasource": {
@@ -810,7 +812,8 @@
         }
       ],
       "title": "Power",
-      "type": "timeseries"
+      "type": "timeseries",
+      "timeFrom": "24h"
     },
     {
       "datasource": {
@@ -982,9 +985,7 @@
         }
       ],
       "title": "Planned SoC vs actual SoC",
-      "type": "timeseries",
-      "timeFrom": "42h",
-      "timeShift": "-36h"
+      "type": "timeseries"
     },
     {
       "datasource": {
@@ -1158,9 +1159,7 @@
           }
         }
       ],
-      "type": "table",
-      "timeFrom": "42h",
-      "timeShift": "-36h"
+      "type": "table"
     },
     {
       "datasource": {
@@ -1293,9 +1292,7 @@
           }
         }
       ],
-      "type": "table",
-      "timeFrom": "42h",
-      "timeShift": "-36h"
+      "type": "table"
     }
   ],
   "preload": false,
@@ -1330,12 +1327,12 @@
     ]
   },
   "time": {
-    "from": "now-24h",
-    "to": "now"
+    "from": "now-6h",
+    "to": "now+36h"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "AlphaESS Dashboard",
   "uid": "alphaess-main",
-  "version": 9
+  "version": 10
 }

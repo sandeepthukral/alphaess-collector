@@ -225,25 +225,41 @@ def test_copied_plan_panels_match_their_source():
 
 
 def test_copied_plan_panels_span_the_plan_horizon():
-    """Each copy must carry a panel time override covering the whole horizon.
+    """The main dashboard's own time range must cover the plan's horizon.
 
-    The main dashboard looks back 24 hours and stops at now; the plan is mostly in the
-    future. Without the override the panels query an empty window and the timeseries has no
-    axis to draw the forward half on -- three blank panels, no error. `timeFrom` back,
-    `timeShift` forward (negative), must land on the plan dashboard's own time range.
+    A panel time override cannot do this. `timeFrom` only ever ends at now, and Grafana
+    11.6 rejects a negative `timeShift` outright -- the panel header reads "invalid
+    timeshift" and the override is dropped, so the panels query `now-42h -> now` and the
+    forward half of the plan is simply absent. Seen on the NAS 2026-08-08.
+
+    So the dashboard carries the plan's range and the live panels are pinned back to 24h
+    instead; test_live_panels_keep_their_own_window is the other half of this.
     """
     plan_dash, _ = _panels_by_title("alphaess-battery-plan.json")
-    _, main = _panels_by_title("alphaess-dashboard.json")
+    main_dash, main = _panels_by_title("alphaess-dashboard.json")
 
-    # "now-6h" / "now+36h" -> -6 / +36 hours either side of now.
-    want_start = int(plan_dash["time"]["from"].removeprefix("now").removesuffix("h"))
-    want_stop = int(plan_dash["time"]["to"].removeprefix("now+").removesuffix("h"))
+    assert main_dash["time"] == plan_dash["time"]
 
     for title in COPIED_PLAN_PANELS:
         panel = main[title]
-        span = int(panel["timeFrom"].removesuffix("h"))
-        forward = -int(panel["timeShift"].removesuffix("h"))
-        assert (forward - span, forward) == (want_start, want_stop), title
+        assert "timeFrom" not in panel and "timeShift" not in panel, (
+            f"{title} must take the dashboard's range, not an override that ends at now")
+
+
+def test_live_panels_keep_their_own_window():
+    """The panels that show what is happening now must not stretch to the plan's horizon.
+
+    They share a dashboard with the plan panels, whose range runs 36 hours forward. Without
+    an override they would draw six hours of data against a day and a half of blank -- the
+    live view spending most of its width on the future it knows nothing about.
+
+    Only the three that read v.timeRange need it; the four stat panels range over a fixed
+    -1h or -90d by design and are unaffected by the picker.
+    """
+    _, main = _panels_by_title("alphaess-dashboard.json")
+
+    for title in ("Energy Flow: Sources -> Uses", "Solar vs Load vs SoC", "Power"):
+        assert main[title].get("timeFrom") == "24h", title
 
 
 def test_both_dashboards_agree_on_battery_capacity():
