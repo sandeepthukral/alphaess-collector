@@ -12,12 +12,6 @@
   "__elements": {},
   "__requires": [
     {
-      "type": "panel",
-      "id": "barchart",
-      "name": "Bar chart",
-      "version": ""
-    },
-    {
       "type": "grafana",
       "id": "grafana",
       "name": "Grafana",
@@ -33,12 +27,6 @@
       "type": "panel",
       "id": "stat",
       "name": "Stat",
-      "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "table",
-      "name": "Table",
       "version": ""
     },
     {
@@ -113,7 +101,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
+        "w": 6,
         "x": 0,
         "y": 0
       },
@@ -154,6 +142,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "Positive is charging, negative is discharging - the opposite of the raw battery_power_w field, which counts discharge as positive. Decimals are left automatic so the value reads as 1.50 kW above a kilowatt and 850 W below it.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -182,8 +171,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 4,
+        "w": 6,
+        "x": 6,
         "y": 0
       },
       "id": 10,
@@ -216,72 +205,6 @@
         }
       ],
       "title": "Battery Power Now",
-      "type": "stat",
-      "description": "Positive is charging, negative is discharging - the opposite of the raw battery_power_w field, which counts discharge as positive. Decimals are left automatic so the value reads as 1.50 kW above a kilowatt and 850 W below it."
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "kwatth"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
-        "y": 0
-      },
-      "id": 6,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else 0.0 }))\n  |> integral(unit: 1h)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))",
-          "refId": "A"
-        }
-      ],
-      "title": "Charged Today",
       "type": "stat"
     },
     {
@@ -289,12 +212,50 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "Is collection happening right now? Green while the newest sample is under 5 minutes old, red past that -- the collector's poll loop never exits on failure, so \"container up\" says nothing. Matches the 'AlphaESS collector data stale' alert exactly. Ignores the time picker: this is always about now.",
       "fieldConfig": {
         "defaults": {
           "color": {
             "mode": "thresholds"
           },
-          "mappings": [],
+          "decimals": 0,
+          "mappings": [
+            {
+              "options": {
+                "from": 0,
+                "result": {
+                  "color": "green",
+                  "index": 0,
+                  "text": "ALL OK"
+                },
+                "to": 300
+              },
+              "type": "range"
+            },
+            {
+              "options": {
+                "from": 300,
+                "result": {
+                  "color": "red",
+                  "index": 1,
+                  "text": "OUTAGE"
+                },
+                "to": 999999999
+              },
+              "type": "range"
+            },
+            {
+              "options": {
+                "match": "null",
+                "result": {
+                  "color": "red",
+                  "index": 2,
+                  "text": "NO DATA"
+                }
+              },
+              "type": "special"
+            }
+          ],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -303,23 +264,23 @@
               },
               {
                 "color": "red",
-                "value": 80
+                "value": 300
               }
             ]
           },
-          "unit": "kwatth"
+          "unit": "none"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
+        "w": 6,
         "x": 12,
         "y": 0
       },
-      "id": 7,
+      "id": 14,
       "options": {
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
@@ -332,7 +293,10 @@
           "values": false
         },
         "showPercentChange": false,
-        "textMode": "auto",
+        "text": {
+          "valueSize": 32
+        },
+        "textMode": "value",
         "wideLayout": true
       },
       "pluginVersion": "11.6.0",
@@ -342,11 +306,11 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value > 0.0 then r._value else 0.0 }))\n  |> integral(unit: 1h)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))\n",
+          "query": "// Age of the newest sample, in seconds. Deliberately the same signal as the\n// provisioned \"AlphaESS collector data stale\" alert (and the same 300s\n// threshold), so this panel and the alert can never disagree.\n//\n// Data staleness rather than the collector_health events, because an outage\n// is \"no data is arriving\", whatever the cause: a failing poll loop writes\n// failure events, but a dead container, a wrong bucket or a broken datasource\n// write nothing at all -- and those must show red too, not a stale \"ALL OK\".\n//\n// Fixed -1h lookback, not the time picker: the question is \"right now\", which\n// must not change when the dashboard is set to 7d.\nfrom(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"soc_percent\")\n  |> last()\n  |> map(fn: (r) => ({_time: r._time, _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0}))\n  |> keep(columns: [\"_time\", \"_value\"])\n  |> yield(name: \"data_age\")\n",
           "refId": "A"
         }
       ],
-      "title": "Discharged Today",
+      "title": "Collector status",
       "type": "stat"
     },
     {
@@ -354,31 +318,34 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "Time since the last failed poll. Large and rising is the healthy state.",
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "thresholds"
+            "fixedColor": "text",
+            "mode": "fixed"
           },
+          "decimals": 0,
           "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "yellow"
+                "color": "text"
               }
             ]
           },
-          "unit": "kwatth"
+          "unit": "s"
         },
         "overrides": []
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 16,
+        "w": 6,
+        "x": 18,
         "y": 0
       },
-      "id": 8,
+      "id": 15,
       "options": {
         "colorMode": "value",
         "graphMode": "none",
@@ -403,11 +370,11 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"pv_power_w\")\n  |> integral(unit: 1h)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))",
+          "query": "// Fixed long lookback, not the time picker: \"no failure in the selected\n// range\" would otherwise read as a suspiciously large uptime.\nfrom(bucket: \"alphaess\")\n  |> range(start: -90d)\n  |> filter(fn: (r) => r._measurement == \"collector_health\" and r.event == \"failure\" and r._field == \"failures\")\n  |> group()\n  |> last()\n  |> map(fn: (r) => ({_time: r._time, _value: float(v: int(v: now()) - int(v: r._time)) / 1000000000.0}))\n  |> yield(name: \"since_last_failure\")",
           "refId": "A"
         }
       ],
-      "title": "Solar Produced Today",
+      "title": "Since last failure",
       "type": "stat"
     },
     {
@@ -415,68 +382,11 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "Estimated energy routing from sources (Solar / Battery discharge / Grid import) to uses (Home / Battery charge / Grid export) over the selected range. Set the time picker to a single day for a per-day flow. Links are modeled, not measured \u2014 see the query comment. Rendered with Apache ECharts (volkovlabs-echarts-panel).",
       "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue"
-              }
-            ]
-          },
-          "unit": "kwatth"
-        },
+        "defaults": {},
         "overrides": []
       },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 0
-      },
-      "id": 9,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: today())\n  |> filter(fn: (r) => r._measurement == \"power_readings\")\n  |> filter(fn: (r) => r._field == \"pv_power_w\" or r._field == \"battery_power_w\" or r._field == \"grid_power_w\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ r with _value:\n      (if exists r.pv_power_w then r.pv_power_w else 0.0)\n    + (if exists r.battery_power_w then r.battery_power_w else 0.0)\n    + (if exists r.grid_power_w then r.grid_power_w else 0.0) }))\n  |> keep(columns: [\"_time\", \"_start\", \"_stop\", \"_value\"])\n  |> group(columns: [\"_start\", \"_stop\"])\n  |> integral(unit: 1h)\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0 }))\n",
-          "refId": "A"
-        }
-      ],
-      "title": "Household Consumption Today",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "description": "Estimated energy routing from sources (Solar / Battery discharge / Grid import) to uses (Home / Battery charge / Grid export) over the selected range. Set the time picker to a single day for a per-day flow. Links are modeled, not measured — see the query comment. Rendered with Apache ECharts (volkovlabs-echarts-panel).",
       "gridPos": {
         "h": 11,
         "w": 8,
@@ -497,7 +407,7 @@
           "key": "",
           "plugin": "AMap.Scale,AMap.ToolBar"
         },
-        "getOption": "const frame = context.panel.data.series && context.panel.data.series[0];\nif (!frame) {\n  return { backgroundColor: 'transparent', title: { text: 'No data in range', left: 'center', top: 'center', textStyle: { color: '#888', fontSize: 14 } } };\n}\n\nconst fieldVals = (name) => {\n  const f = frame.fields.find((x) => x.name === name);\n  if (!f) return [];\n  return f.values.buffer || f.values;\n};\nconst src = fieldVals('source');\nconst tgt = fieldVals('target');\nconst val = fieldVals('value');\n\n// Node colors mirror the bar-chart palette used elsewhere in the stack.\nconst colors = {\n  'Solar': '#F2CC0C',        // sources (left)\n  'Battery out': '#56A64B',\n  'Grid in': '#E02F44',\n  'Home': '#3D71D9',         // uses (right)\n  'Battery in': '#73BF69',\n  'Grid out': '#B877D9',\n};\n// Light-colored boxes get dark text for contrast.\nconst darkLabel = { 'Solar': true, 'Battery in': true };\n// The battery charge/discharge nodes must stay distinct (one is a source, one\n// a target — merging them would collapse the two-column layout), but both show\n// as just 'Battery'. disp() maps internal node id -> displayed label.\nconst displayName = { 'Battery out': 'Battery', 'Battery in': 'Battery', 'Home': 'Load' };\nconst disp = (n) => displayName[n] || n;\n// Top-to-bottom order within each column. layoutIterations:0 below makes the\n// sankey honour this order instead of auto-sorting to minimise crossings.\nconst order = ['Solar', 'Battery out', 'Grid in', 'Battery in', 'Home', 'Grid out'];\n\nconst present = new Set();\nfor (let i = 0; i < src.length; i++) { present.add(src[i]); present.add(tgt[i]); }\n\nconst nodes = order.filter((n) => present.has(n)).map((n) => ({\n  name: n,\n  itemStyle: { color: colors[n] || '#888', borderColor: 'transparent' },\n  label: { color: darkLabel[n] ? '#1F1F1F' : '#FFFFFF' },\n}));\n\nconst links = [];\nfor (let i = 0; i < src.length; i++) {\n  links.push({ source: src[i], target: tgt[i], value: Number(val[i]) });\n}\n\nreturn {\n  backgroundColor: 'transparent',\n  tooltip: {\n    trigger: 'item',\n    formatter: (p) => {\n      if (p.dataType === 'edge') {\n        return disp(p.data.source) + ' → ' + disp(p.data.target) + '<br/><b>' + p.value.toFixed(2) + ' kWh</b>';\n      }\n      return '<b>' + disp(p.name) + '</b><br/>' + (p.value != null ? p.value.toFixed(2) + ' kWh' : '');\n    },\n  },\n  series: [{\n    type: 'sankey',\n    left: 8,\n    right: 8,\n    top: 22,\n    bottom: 14,\n    nodeWidth: 96,\n    nodeGap: 14,\n    layoutIterations: 0,\n    draggable: false,\n    emphasis: { focus: 'adjacency' },\n    label: {\n      position: 'inside',\n      formatter: (p) => '{a|' + disp(p.name) + '}\\n{b|' + (p.value != null ? p.value.toFixed(1) + ' kWh' : '') + '}',\n      rich: {\n        a: { fontSize: 13, fontWeight: 'bold', lineHeight: 20 },\n        b: { fontSize: 11, lineHeight: 16 },\n      },\n    },\n    lineStyle: { color: 'gradient', opacity: 0.45, curveness: 0.5 },\n    data: nodes,\n    links: links,\n  }],\n};\n",
+        "getOption": "const frame = context.panel.data.series && context.panel.data.series[0];\nif (!frame) {\n  return { backgroundColor: 'transparent', title: { text: 'No data in range', left: 'center', top: 'center', textStyle: { color: '#888', fontSize: 14 } } };\n}\n\nconst fieldVals = (name) => {\n  const f = frame.fields.find((x) => x.name === name);\n  if (!f) return [];\n  return f.values.buffer || f.values;\n};\nconst src = fieldVals('source');\nconst tgt = fieldVals('target');\nconst val = fieldVals('value');\n\n// Node colors mirror the bar-chart palette used elsewhere in the stack.\nconst colors = {\n  'Solar': '#F2CC0C',        // sources (left)\n  'Battery out': '#56A64B',\n  'Grid in': '#E02F44',\n  'Home': '#3D71D9',         // uses (right)\n  'Battery in': '#73BF69',\n  'Grid out': '#B877D9',\n};\n// Light-colored boxes get dark text for contrast.\nconst darkLabel = { 'Solar': true, 'Battery in': true };\n// The battery charge/discharge nodes must stay distinct (one is a source, one\n// a target \u2014 merging them would collapse the two-column layout), but both show\n// as just 'Battery'. disp() maps internal node id -> displayed label.\nconst displayName = { 'Battery out': 'Battery', 'Battery in': 'Battery', 'Home': 'Load' };\nconst disp = (n) => displayName[n] || n;\n// Top-to-bottom order within each column. layoutIterations:0 below makes the\n// sankey honour this order instead of auto-sorting to minimise crossings.\nconst order = ['Solar', 'Battery out', 'Grid in', 'Battery in', 'Home', 'Grid out'];\n\nconst present = new Set();\nfor (let i = 0; i < src.length; i++) { present.add(src[i]); present.add(tgt[i]); }\n\nconst nodes = order.filter((n) => present.has(n)).map((n) => ({\n  name: n,\n  itemStyle: { color: colors[n] || '#888', borderColor: 'transparent' },\n  label: { color: darkLabel[n] ? '#1F1F1F' : '#FFFFFF' },\n}));\n\nconst links = [];\nfor (let i = 0; i < src.length; i++) {\n  links.push({ source: src[i], target: tgt[i], value: Number(val[i]) });\n}\n\nreturn {\n  backgroundColor: 'transparent',\n  tooltip: {\n    trigger: 'item',\n    formatter: (p) => {\n      if (p.dataType === 'edge') {\n        return disp(p.data.source) + ' \u2192 ' + disp(p.data.target) + '<br/><b>' + p.value.toFixed(2) + ' kWh</b>';\n      }\n      return '<b>' + disp(p.name) + '</b><br/>' + (p.value != null ? p.value.toFixed(2) + ' kWh' : '');\n    },\n  },\n  series: [{\n    type: 'sankey',\n    left: 8,\n    right: 8,\n    top: 22,\n    bottom: 14,\n    nodeWidth: 96,\n    nodeGap: 14,\n    layoutIterations: 0,\n    draggable: false,\n    emphasis: { focus: 'adjacency' },\n    label: {\n      position: 'inside',\n      formatter: (p) => '{a|' + disp(p.name) + '}\\n{b|' + (p.value != null ? p.value.toFixed(1) + ' kWh' : '') + '}',\n      rich: {\n        a: { fontSize: 13, fontWeight: 'bold', lineHeight: 20 },\n        b: { fontSize: 11, lineHeight: 16 },\n      },\n    },\n    lineStyle: { color: 'gradient', opacity: 0.45, curveness: 0.5 },\n    data: nodes,\n    links: links,\n  }],\n};\n",
         "google": {
           "callback": "gmapReady",
           "key": ""
@@ -882,804 +792,9 @@
       ],
       "title": "Power",
       "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "kWh",
-            "axisPlacement": "auto",
-            "fillOpacity": 85,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineWidth": 1,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "decimals": 1,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              }
-            ]
-          },
-          "unit": "kwatth"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "solar_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Solar Produced"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "yellow",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "grid_consumed_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Grid Consumed"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "battery_discharged_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Battery Discharged"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Time"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "time:YYYY-MM-DD"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 15
-      },
-      "id": 11,
-      "options": {
-        "barRadius": 0,
-        "barWidth": 0.85,
-        "fullHighlight": false,
-        "groupWidth": 0.6,
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "orientation": "auto",
-        "showValue": "auto",
-        "stacking": "normal",
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        },
-        "xField": "Time",
-        "xTickLabelRotation": 0,
-        "xTickLabelSpacing": 0
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"date\"\nimport \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"pv_power_w\")\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"solar_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"date\"\nimport \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value > 0.0 then r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"grid_consumed_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"date\"\nimport \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value > 0.0 then r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"battery_discharged_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "C"
-        }
-      ],
-      "title": "Daily energy sources",
-      "transformations": [
-        {
-          "id": "joinByField",
-          "options": {
-            "byField": "Time",
-            "mode": "outer"
-          }
-        }
-      ],
-      "type": "barchart"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "kWh",
-            "axisPlacement": "auto",
-            "fillOpacity": 85,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "lineWidth": 1,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "decimals": 1,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              }
-            ]
-          },
-          "unit": "kwatth"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "home_consumed_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Home Consumed"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "blue",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "grid_feedin_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Grid Feed in"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "purple",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "battery_charged_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Battery Charged"
-              },
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "super-light-green",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Time"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "time:YYYY-MM-DD"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 15
-      },
-      "id": 12,
-      "options": {
-        "barRadius": 0,
-        "barWidth": 0.85,
-        "fullHighlight": false,
-        "groupWidth": 0.6,
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "orientation": "auto",
-        "showValue": "auto",
-        "stacking": "normal",
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        },
-        "xField": "Time",
-        "xTickLabelRotation": 0,
-        "xTickLabelSpacing": 0
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"date\"\nimport \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"load_power_w\")\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"home_consumed_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"date\"\nimport \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"grid_feedin_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"date\"\nimport \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"battery_charged_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "C"
-        }
-      ],
-      "title": "Daily energy uses",
-      "transformations": [
-        {
-          "id": "joinByField",
-          "options": {
-            "byField": "Time",
-            "mode": "outer"
-          }
-        }
-      ],
-      "type": "barchart"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "decimals": 1,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "kwatth"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Time"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "time:YYYY-MM-DD"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "solar_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Solar Produced"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "battery_charged_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Battery Charged"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "battery_discharged_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Battery Discharged"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "home_consumed_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Home Consumed"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "grid_feedin_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Grid Feed in"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "grid_consumed_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Grid Consumed"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 24,
-        "x": 0,
-        "y": 23
-      },
-      "id": 3,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true,
-        "sortBy": [
-          {
-            "desc": true,
-            "displayName": "Time"
-          }
-        ]
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"battery_charged_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value > 0.0 then r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"battery_discharged_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"load_power_w\")\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"home_consumed_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"grid_feedin_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value > 0.0 then r._value else 0.0 }))\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"grid_consumed_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\nimport \"date\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: date.sub(d: 6d, from: today()))\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"pv_power_w\")\n  |> aggregateWindow(every: 1d, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"solar_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "F"
-        }
-      ],
-      "title": "Daily energy totals",
-      "transformations": [
-        {
-          "id": "joinByField",
-          "options": {
-            "byField": "Time",
-            "mode": "outer"
-          }
-        }
-      ],
-      "type": "table"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "decimals": 2,
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green"
-              },
-              {
-                "color": "red",
-                "value": 80
-              }
-            ]
-          },
-          "unit": "kwatth"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Time"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "time:YYYY-MM-DD HH:mm"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "battery_charged_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Battery Charged"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "battery_discharged_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Battery Discharged"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "home_consumed_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Home Consumed"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "grid_feedin_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Grid Feed In"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "grid_consumed_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Grid Consumed"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "solar_kwh",
-              "scope": "series"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Solar Produced"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 5,
-        "w": 24,
-        "x": 0,
-        "y": 27
-      },
-      "id": 4,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true,
-        "sortBy": [
-          {
-            "desc": true,
-            "displayName": "Time"
-          }
-        ]
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else 0.0 }))\n  |> aggregateWindow(every: 1h, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"battery_charged_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value > 0.0 then r._value else 0.0 }))\n  |> aggregateWindow(every: 1h, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"battery_discharged_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"load_power_w\")\n  |> aggregateWindow(every: 1h, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"home_consumed_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then -r._value else 0.0 }))\n  |> aggregateWindow(every: 1h, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"grid_feedin_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "D"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> map(fn: (r) => ({ r with _value: if r._value > 0.0 then r._value else 0.0 }))\n  |> aggregateWindow(every: 1h, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"grid_consumed_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "E"
-        },
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"timezone\"\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"pv_power_w\")\n  |> aggregateWindow(every: 1h, fn: (tables=<-, column) => tables |> integral(unit: 1h), createEmpty: false, timeSrc: \"_start\")\n  |> map(fn: (r) => ({ r with _value: r._value / 1000.0, _field: \"solar_kwh\" }))\n  |> keep(columns: [\"_time\", \"_value\", \"_field\"])",
-          "refId": "F"
-        }
-      ],
-      "title": "Hourly energy totals",
-      "transformations": [
-        {
-          "id": "joinByField",
-          "options": {
-            "byField": "Time",
-            "mode": "outer"
-          }
-        }
-      ],
-      "type": "table"
     }
   ],
+  "preload": false,
   "refresh": "1m",
   "schemaVersion": 41,
   "tags": [
@@ -1697,6 +812,5 @@
   "timezone": "browser",
   "title": "AlphaESS Dashboard",
   "uid": "alphaess-main",
-  "version": 5,
-  "weekStart": ""
+  "version": 8
 }
