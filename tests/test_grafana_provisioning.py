@@ -202,6 +202,23 @@ COPIED_PLAN_PANELS = [
 ]
 
 
+def _overrides(panel):
+    """{field: {property: value}} for the byName overrides that decide how a value reads.
+
+    custom.* is dropped: it is layout -- column width, axis side -- and the two copies of
+    a panel are allowed to be laid out differently.
+    """
+    out = {}
+    for ov in panel.get("fieldConfig", {}).get("overrides", []):
+        if ov.get("matcher", {}).get("id") != "byName":
+            continue
+        props = {p["id"]: p.get("value") for p in ov["properties"]
+                 if not p["id"].startswith("custom.")}
+        if props:
+            out.setdefault(ov["matcher"]["options"], {}).update(props)
+    return out
+
+
 def _panels_by_title(name):
     dash = json.loads((REPO / "grafana" / name).read_text(encoding="utf-8"))
     return dash, {p.get("title"): p for p in dash["panels"]}
@@ -222,6 +239,14 @@ def test_copied_plan_panels_match_their_source():
         assert title in main, f"{title} is missing from the main dashboard"
         assert [t["query"] for t in main[title]["targets"]] == \
                [t["query"] for t in plan[title]["targets"]], title
+        # Field overrides too, not just the queries: units, decimals and column names
+        # decide what the numbers mean on screen, and a unit changed on one dashboard and
+        # not the other is the same drift as a diverging query, and just as invisible.
+        #
+        # Compared per field rather than whole, and only for fields both carry: the main
+        # dashboard's copy is laid out half-width beside the SoC chart and has column
+        # widths of its own, which are presentation and are allowed to differ.
+        assert _overrides(main[title]) == _overrides(plan[title]), title
 
 
 def test_copied_plan_panels_span_the_plan_horizon():
