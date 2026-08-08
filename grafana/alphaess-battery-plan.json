@@ -948,6 +948,10 @@
               {
                 "id": "displayName",
                 "value": "From"
+              },
+              {
+                "id": "unit",
+                "value": "time:MM-DD HH:mm"
               }
             ]
           },
@@ -960,6 +964,10 @@
               {
                 "id": "displayName",
                 "value": "Until"
+              },
+              {
+                "id": "unit",
+                "value": "time:MM-DD HH:mm"
               }
             ]
           },
@@ -1260,6 +1268,6 @@
   "timezone": "browser",
   "title": "AlphaESS Battery Plan",
   "uid": "alphaess-battery-plan",
-  "version": 8,
+  "version": 9,
   "weekStart": ""
 }
