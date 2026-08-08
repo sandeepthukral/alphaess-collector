@@ -44,7 +44,7 @@ def test_dashboards_were_found():
     added to grafana/ but never mounted in docker-compose.yml, which provisions
     nothing and fails silently -- see test_every_dashboard_is_mounted below.
     """
-    assert len(DASHBOARDS) == 6
+    assert len(DASHBOARDS) == 7
 
 
 def test_generators_were_found():
@@ -57,7 +57,7 @@ def test_generators_were_found():
 def test_generated_dashboard_matches_its_generator(generator, tmp_path):
     """A generated dashboard must equal what its generator emits.
 
-    Two of the six are built from a script rather than exported from the Grafana UI,
+    Two of the seven are built from a script rather than exported from the Grafana UI,
     because their Flux queries were written and checked against the live database and are
     the substance of the dashboard. That only holds while the two agree. Hand-edit the
     JSON and the next regeneration silently reverts it; hand-edit it and never regenerate,
