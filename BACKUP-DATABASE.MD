@@ -13,8 +13,11 @@ fixed during verification:
   see below.
 - **2026-08-10: backups still were not reaching Drive**, and neither ownership
   nor timing was the cause. Cloud Sync does not observe anything written from
-  inside a container through a bind mount. The script now writes a host-side
-  trigger file as its last step (§3, "Making Cloud Sync notice").
+  inside a container through a bind mount. The backup is now staged by the
+  container and archived by the *host* into a single dated `.tgz` (§3, "Making
+  Cloud Sync notice"). An intermediate fix that same day — a host-written
+  trigger file inside the container-written folder — did not work, and is kept
+  below as the experiment that pinned down the rule.
 
 ## Context
 
@@ -104,38 +107,42 @@ start/done lines):
   the **admin** token specifically — `influx backup` requires operator-level
   permissions and rejects scoped/all-access tokens like
   `INFLUX_TOKEN_COLLECTOR`.
-- Run the backup into a dated subfolder so each day is independently
-  restorable and prunable. `influx backup` timestamps every file it writes
-  rather than overwriting, so a re-run into a non-empty dated folder silently
-  doubles the files instead of replacing them (confirmed by testing) — clear
-  the folder so a re-run (manual test, retry after failure) replaces today's
-  backup rather than piling up extra full snapshots next to it — **emptying it
-  in place, never `rm -rf` on the folder itself**:
+- Run `influx backup` into a fixed staging folder, then have the *host* tar it
+  into one dated archive per day, so each day stays independently restorable
+  and prunable. `influx backup` timestamps every file it writes rather than
+  overwriting, so a re-run into a non-empty folder silently doubles the files
+  instead of replacing them (confirmed by testing) — hence the clear before,
+  which also keeps a second uncompressed copy of the database off the disk:
   ```sh
   TS=$(date +%Y-%m-%d)
-  DEST="$BACKUP_HOST_DIR/$TS"
-  mkdir -p "$DEST"
-  find "$DEST" -mindepth 1 -exec rm -rf {} +      # not: rm -rf "$DEST"
-  docker compose exec -T influxdb influx backup "/backups/$TS" \
+  STAGING="$BACKUP_HOST_DIR/.staging"
+  DEST="$BACKUP_HOST_DIR/influxdb-$TS.tgz"
+  mkdir -p "$STAGING"
+  find "$STAGING" -mindepth 1 -exec rm -rf {} +
+  docker compose exec -T influxdb influx backup "/backups/.staging" \
     --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
+  tar -czf "$DEST" -C "$STAGING" .                # the host write; see below
+  find "$STAGING" -mindepth 1 -exec rm -rf {} +
   ```
-  Deleting the folder is a *host* operation and Cloud Sync does see those, so
-  it removes the folder from Drive; the replacement is written from inside the
-  container, which it does not see. A re-run with `rm -rf` therefore deletes a
-  good cloud backup and uploads nothing in its place.
+  Note there is no deletion of anything Drive has a copy of. Deleting is a
+  *host* operation and Cloud Sync does see those, so the earlier
+  `rm -rf "$DEST"`-then-rewrite shape actively destroyed good cloud backups:
+  the delete propagated, the container-written replacement did not. Overwriting
+  the archive in place has no such step.
 - `influx backup` runs as root inside the container (no `user:` pin in
   `docker-compose.yml`), and the bind mount carries that uid straight through
-  to the host, so the dated folder lands `root:root` — invisible to the Drive
-  sync client, which runs as a normal user. The script already runs as root
-  (Task Scheduler), so it re-owns the fresh folder to match whoever already
-  owns the parent `BACKUP_HOST_DIR` right after the backup completes:
+  to the host, and the archiving `tar` runs as root too, so the archive lands
+  `root:root`. The script already runs as root (Task Scheduler), so it re-owns
+  the archive to match whoever already owns `BACKUP_HOST_DIR` — the account the
+  Drive sync client runs as:
   ```sh
-  chown -R "$(stat -c '%U:%G' "$BACKUP_HOST_DIR")" "$BACKUP_HOST_DIR/$TS"
+  chown "$(stat -c '%U:%G' "$BACKUP_HOST_DIR")" "$DEST"
   ```
-  Worth being precise about what this does and does not fix: it makes the files
+  Worth being precise about what this does and does not fix: it makes the file
   belong to the account the sync client runs as, which is right. It is *not*
-  what makes them visible — the folders come out `0755` and are world-readable
-  and traversable throughout, so nothing was ever permission-blocked.
+  what makes it visible — the old dated folders came out `0755` and were
+  world-readable and traversable throughout, so nothing was ever
+  permission-blocked. That diagnosis cost two debugging attempts.
 
 #### Making Cloud Sync notice
 
@@ -147,29 +154,45 @@ the `rm -rf` above propagated a deletion to Drive immediately, and
 `backup-grafana.sh` — which writes its `.tgz` from the host — has always
 synced. That contrast is what identified the cause.
 
-The lever is that **one host-written file inside the folder makes Cloud Sync
-enumerate it and upload everything already there.** That is how the bug was
-found: adding a single file by hand pushed a whole day's unsynced backup to
-Drive at once. So the script's last step writes one:
+The first fix attempt assumed a weaker rule than the real one: that **one**
+host-written file inside a folder would make Cloud Sync enumerate that folder
+and upload everything already in it. Adding a file by hand through File Station
+had appeared to do exactly that. So the script's last step wrote one:
 
 ```sh
-date -u '+%Y-%m-%dT%H:%M:%SZ' > "$DEST/BACKUP-COMPLETE.txt"
+date -u '+%Y-%m-%dT%H:%M:%SZ' > "$DEST/BACKUP-COMPLETE.txt"      # did not work
 ```
 
-It is a trigger, not a payload — the contents are irrelevant, but it must be a
-fresh write on every run, and it must be written by the host rather than the
-container. It doubles as a marker that the run got past `influx backup`.
+The next night's folder arrived in Drive containing `BACKUP-COMPLETE.txt` and
+nothing else, while all fifteen backup files sat on the NAS beside it. That is
+the clean experiment, and it gives the actual rule:
+
+> **Cloud Sync uploads the individual writes it observed, and nothing else.**
+> There is no folder-level rescan to trigger. (The manual File Station add that
+> suggested otherwise went through DSM's own indexing path, not the plain
+> filesystem one.)
+
+So the payload itself has to be a host write. `influx backup` still has to run
+in the container — it is the container's database — but it writes to
+`$BACKUP_HOST_DIR/.staging`, which is never expected to sync, and the host then
+writes the one file that is: `influxdb-$TS.tgz`. That is the same shape
+`backup-grafana.sh` has always used, and it is the only part of this tree with
+an unbroken record of reaching Drive, which is what makes it the design to copy
+rather than another theory to test.
 
 Two things follow. Anything added to this tree in future must be written
-host-side, or it will sit there unsynced. And if a day's backup is ever missing
-from Drive, `touch`ing a file inside its folder is the manual recovery.
+host-side, or it will sit there unsynced. And restoring is the one place that
+rule cuts the other way: unpacking an archive into `.staging` *is* a host
+write, so clear it afterwards or a second full copy goes up to Drive.
 - Prune local backups older than `BACKUP_RETENTION_DAYS`, operating directly
   on the host path (the script runs on the NAS host, so no need to do this
   inside the container):
   ```sh
-  find "$BACKUP_HOST_DIR" -maxdepth 1 -mindepth 1 -type d \
-    -mtime +"$BACKUP_RETENTION_DAYS" -exec rm -rf {} +
+  find "$BACKUP_HOST_DIR" -maxdepth 1 -mindepth 1 -type f \
+    -name 'influxdb-*.tgz' -mtime +"$BACKUP_RETENTION_DAYS" -exec rm -f {} +
   ```
+  A second `-type d -name '20*'` pass ages out the dated folders left over from
+  before 2026-08-10; drop it once none remain.
 - `chmod +x scripts/backup-influxdb.sh`.
 
 ### 4. `DEPLOY.md` — new "Backing up InfluxDB" section
@@ -194,7 +217,8 @@ Placed alongside the existing "Battery-savings pricing jobs" section, covering:
   version with `docker compose exec influxdb influx restore --help`, since CLI
   flags can shift across versions):
   ```sh
-  docker compose exec influxdb influx restore "/backups/<date>" \
+  tar -xzf "$BACKUP_HOST_DIR/influxdb-<date>.tgz" -C "$BACKUP_HOST_DIR/.staging"
+  docker compose exec influxdb influx restore "/backups/.staging" \
     --full --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
   ```
 
@@ -238,5 +262,7 @@ section, matching how the battery-savings nightly job is already linked.
    `alphaess-influxdb-backups` as `root:root` (parent folder correctly
    `sandeep:users`), confirming it wasn't syncing. Added the `chown` step
    (§3); re-ran on the NAS — fresh dated folder came out owned
-   `sandeep:users`, matching the parent, and files subsequently appeared in
-   Google Drive.
+   `sandeep:users`, matching the parent. **This step was read as the fix and it
+   was not**: files appearing in Drive around the same time came from a manual
+   File Station add, not the chown. Backups stopped reaching Drive again
+   immediately, and it took until 2026-08-10 to find the real cause.
