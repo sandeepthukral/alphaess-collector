@@ -543,16 +543,17 @@ directly, because InfluxDB is a live, continuously-written database and a raw
 file copy risks a torn/corrupt snapshot; `influx backup` produces a
 consistent, portable backup while the server keeps running.
 
-**`BACKUP-COMPLETE.txt` in each dated folder is load-bearing, not litter.**
-Synology Cloud Sync never notices files written from inside a container through
-a bind mount, so a backup left as `influx backup` wrote it stays on the NAS and
-never reaches the cloud — with the local files all present and correct, which
-is what made this hard to spot. A single host-written file inside the folder
-makes Cloud Sync enumerate it and upload the lot, so the script writes one as
-its last step. Do not "tidy" it away, and if you add anything else to this
-tree, write it from the host. BACKUP-DATABASE.MD, "Making Cloud Sync notice",
-has the full account. If a day is ever missing from Drive, `touch` any file
-inside its folder to push it.
+**Each night's backup is one host-written `influxdb-<date>.tgz`, and that shape
+is load-bearing.** Synology Cloud Sync never notices files written from inside
+a container through a bind mount, so a backup left where `influx backup` wrote
+it stays on the NAS and never reaches the cloud — with the local files all
+present and correct, which is what made this hard to spot. Nor does a
+host-written marker file rescue the folder around it: Cloud Sync uploads the
+individual writes it saw and nothing else. So `influx backup` writes into
+`$BACKUP_HOST_DIR/.staging`, which is not expected to sync, and the host tars
+that into the archive, which is. Anything added to this tree in future must be
+written by the host, or it will sit there unsynced. BACKUP-DATABASE.MD,
+"Making Cloud Sync notice", has the full account.
 
 The script authenticates with the admin `INFLUX_TOKEN`, not a scoped
 per-service token — the one deliberate exception to the "Scoped tokens" rule
@@ -587,12 +588,25 @@ can shift across versions:
 docker compose exec influxdb influx restore --help
 ```
 
-Then, picking a dated backup folder:
+`influx restore` reads a directory, so unpack the chosen archive into the
+staging folder the container already sees — it is scratch space, emptied at the
+start of every backup run:
 
 ```sh
-docker compose exec influxdb influx restore "/backups/<date>" \
+cd /volume1/docker/alphaess-collector
+STAGING="$BACKUP_HOST_DIR/.staging"
+rm -rf "$STAGING" && mkdir -p "$STAGING"
+tar -xzf "$BACKUP_HOST_DIR/influxdb-<date>.tgz" -C "$STAGING"
+
+docker compose exec influxdb influx restore "/backups/.staging" \
   --full --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
+
+rm -rf "$STAGING"/*
 ```
+
+Clear it afterwards as shown. Unlike the nightly job, this extraction *is* a
+host write, so leaving it in place would push a second full copy of the backup
+up to Drive.
 
 ## Backing up Grafana
 
