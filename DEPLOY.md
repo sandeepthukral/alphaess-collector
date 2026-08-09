@@ -355,37 +355,55 @@ anything else where the job is happy but the data is not there, because it reads
 the data instead of trusting the writer. Add a second monitor:
 
 - Monitor Type: **HTTP(s) - Keyword**, Keyword: `FRESH`, Heartbeat Interval `3600`
+- **Retries**: `1` — at `0` a single blip pages you
 - Method: `POST`, URL: `http://<nas-host>:8086/api/v2/query?org=home`
+- **Body Encoding**: leave it on **JSON**
 - Headers:
 
   ```json
   {
     "Authorization": "Token <INFLUX_TOKEN_KUMA>",
-    "Content-Type": "application/vnd.flux",
+    "Content-Type": "application/json",
     "Accept": "application/csv"
   }
   ```
 
-- Body:
+- Body — InfluxDB's JSON query envelope, the Flux carried as a string:
 
-  ```flux
-  from(bucket: "alphaess")
-    |> range(start: -14d)
-    |> filter(fn: (r) => r._measurement == "daily_energy"
-          and r._field == "computed_at_unix")
-    |> max()
-    |> map(fn: (r) => ({
-        _value: if float(v: uint(v: now())) / 1000000000.0 - r._value < 108000.0
-                then "FRESH" else "STALE"
-      }))
-    |> yield(name: "freshness")
+  ```json
+  {"query":"from(bucket: \"alphaess\") |> range(start: -14d) |> filter(fn: (r) => r._measurement == \"daily_energy\" and r._field == \"computed_at_unix\") |> max() |> map(fn: (r) => ({_value: if float(v: uint(v: now())) / 1000000000.0 - r._value < 108000.0 then \"FRESH\" else \"STALE\"})) |> yield(name: \"freshness\")","type":"flux"}
   ```
+
+**Why the JSON envelope and not a raw Flux body.** Kuma validates the Body field
+against the Body Encoding dropdown, so a raw Flux body pasted under the default
+JSON encoding is rejected before the request is ever sent — the API's own
+`application/vnd.flux` content type is no help, because the objection is Kuma's
+and not InfluxDB's. Sending `application/vnd.flux` with a raw body *does* work
+if Body Encoding is switched to **XML**, which skips validation, but that
+misdescribes the payload twice over; prefer the envelope above.
+
+Readable form of the same query, for pasting into `influx query`:
+
+```flux
+from(bucket: "alphaess")
+  |> range(start: -14d)
+  |> filter(fn: (r) => r._measurement == "daily_energy"
+        and r._field == "computed_at_unix")
+  |> max()
+  |> map(fn: (r) => ({
+      _value: if float(v: uint(v: now())) / 1000000000.0 - r._value < 108000.0
+              then "FRESH" else "STALE"
+    }))
+  |> yield(name: "freshness")
+```
 
 No rows at all also fails the keyword match, which is what we want: nothing
 written in two weeks is the worst case, not a reason to stay quiet. Paste the
 Flux into `influx query` first and confirm it prints `FRESH`, then drop the
 `108000.0` to something tiny and confirm it prints `STALE` — a monitor never
-seen to fail is not known to work.
+seen to fail is not known to work. Do that last check in the monitor itself as
+well, not only in `influx query`: it is the only thing that proves the keyword
+match and the envelope are both wired up.
 
 **Why `computed_at_unix` and not the row's own timestamp.** `daily_energy` rows
 are stamped at the local midnight of the day they *describe*, so the 03:00 run on

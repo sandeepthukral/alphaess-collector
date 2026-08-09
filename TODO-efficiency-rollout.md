@@ -10,7 +10,13 @@ Kuma monitors green, gate proven to fire. PR not merged.
 
 ---
 
-## 1. Fix the Kuma recipe in DEPLOY.md (blocks merge)
+## 1. Fix the Kuma recipe in DEPLOY.md (blocks merge) — DONE 2026-08-09
+
+Applied. Two notes on what changed versus what is written below: the
+`localhost` correction turned out to be unnecessary — DEPLOY.md already said
+`http://<nas-host>:8086/...` — and the raw Flux is kept in the doc as a
+readable form for pasting into `influx query`, with the JSON envelope as the
+thing Kuma is actually given. Retries `1` was genuinely missing and is added.
 
 `## Monitoring the nightly efficiency job` documents Monitor B as a raw Flux
 body with `Content-Type: application/vnd.flux`. **Uptime Kuma rejects that** —
