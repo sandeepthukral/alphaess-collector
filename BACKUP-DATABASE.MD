@@ -17,7 +17,8 @@ fixed during verification:
   container and archived by the *host* into a single dated `.tgz` (§3, "Making
   Cloud Sync notice"). An intermediate fix that same day — a host-written
   trigger file inside the container-written folder — did not work, and is kept
-  below as the experiment that pinned down the rule.
+  below as the experiment that pinned down the rule. **Verified on the NAS the
+  same day** (step 7).
 
 ## Context
 
@@ -266,3 +267,20 @@ section, matching how the battery-savings nightly job is already linked.
    was not**: files appearing in Drive around the same time came from a manual
    File Station add, not the chown. Backups stopped reaching Drive again
    immediately, and it took until 2026-08-10 to find the real cause.
+7. ✅ 2026-08-10: ran the host-archiving script on the NAS;
+   `influxdb-2026-08-10.tgz` appeared in Google Drive. First time a backup has
+   reached the cloud unaided since this was set up.
+
+   Read the three failed attempts as one lesson: every wrong theory
+   (permissions, timing, folder-level rescan) was a guess at *why* Cloud Sync
+   behaves as it does, tested by changing the backup. The fix came from
+   noticing that something in the same tree already worked —
+   `backup-grafana.sh`'s host-written `.tgz` — and copying its shape. When a
+   system is opaque, copy the part of it already observed to work rather than
+   reasoning about the mechanism.
+
+   Still untested: whether `influx restore` is happy with a backup that has
+   been through the tar round-trip. The file set it sees is unchanged, so there
+   is no particular reason to expect trouble — but the restore path has not
+   been exercised end to end since this changed, and a backup nobody has
+   restored is a backup nobody knows works.
