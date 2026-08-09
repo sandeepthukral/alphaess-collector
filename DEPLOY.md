@@ -461,20 +461,13 @@ Set in `.env`:
   each run (the external backup target, e.g. Google Drive, keeps its own
   history independently).
 
-DSM **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined
-script**:
+It is scheduled through [scripts/backup-all.sh](scripts/backup-all.sh) rather
+than directly — see ["Scheduling the backups"](#scheduling-the-backups) below.
+Test it on its own first:
 
-- **General**: User = `root`
-- **Schedule**: Daily, first run time `01:00` (ahead of the `02:00`
-  battery-savings job)
-- **Task Settings → Run command**:
-
-  ```sh
-  /volume1/docker/alphaess-collector/scripts/backup-influxdb.sh
-  ```
-
-Test it once by hand first
-(`sudo /volume1/docker/alphaess-collector/scripts/backup-influxdb.sh`).
+```sh
+sudo /volume1/docker/alphaess-collector/scripts/backup-influxdb.sh
+```
 
 ### Restoring
 
@@ -528,23 +521,13 @@ already covers, as with the InfluxDB one. **Do not nest it inside
 under that path once it ages past `BACKUP_RETENTION_DAYS`, and would delete
 this one along with it. A sibling folder is safe.
 
-DSM **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined
-script**:
-
-- **General**: User = `root`
-- **Schedule**: Daily, first run time `00:45` (ahead of the `01:00` InfluxDB
-  backup, so the two never contend)
-- **Task Settings → Run command**:
-
-  ```sh
-  /volume1/docker/alphaess-collector/scripts/backup-grafana.sh
-  ```
-
-Test it once by hand first
-(`sudo /volume1/docker/alphaess-collector/scripts/backup-grafana.sh`) and
-confirm Grafana comes back:
+Scheduled through [scripts/backup-all.sh](scripts/backup-all.sh) alongside the
+InfluxDB one — see ["Scheduling the backups"](#scheduling-the-backups) below.
+Because this script stops Grafana, run it by hand at least once before it is
+ever scheduled, and confirm Grafana comes back:
 
 ```sh
+sudo /volume1/docker/alphaess-collector/scripts/backup-grafana.sh
 sudo docker compose ps grafana
 ```
 
@@ -563,6 +546,43 @@ sudo docker compose start grafana
 Then check Alerting → Notification policies still delivers to the Telegram
 contact point — that is the part the backup exists for, so it is the part
 worth verifying.
+
+## Scheduling the backups
+
+One DSM task runs them all. [scripts/backup-all.sh](scripts/backup-all.sh)
+calls each `backup-*.sh` in turn and, unlike the individual scripts, does
+**not** run under `set -e`: every job runs even if an earlier one fails, so a
+broken Grafana backup cannot cost you the database backup. It still exits
+non-zero if any job failed, so DSM reports the task as failed and can email
+about it.
+
+DSM **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined
+script**:
+
+- **General**: User = `root`
+- **Schedule**: Daily, first run time `01:00` (ahead of the `02:00`
+  battery-savings job)
+- **Task Settings → Run command**:
+
+  ```sh
+  /volume1/docker/alphaess-collector/scripts/backup-all.sh
+  ```
+
+Run each backup on its own first, as described in its section above — this
+wrapper only sequences them, so a job that is broken on this NAS is still
+broken here.
+
+**Adding a backup later:** write it as its own `scripts/backup-*.sh` and add
+the filename to `JOBS` at the top of `backup-all.sh`. Nothing in Task Scheduler
+changes. Order in `JOBS` is run order, most important first: a job that *hangs*
+(as opposed to failing) blocks the ones after it, so whatever you would most
+regret losing goes at the top — which is why InfluxDB is there now.
+
+One failure mode the wrapper does not remove: `backup-grafana.sh` stops Grafana
+for a few seconds, and if the task is killed outright in that window Grafana
+stays down. Its trap covers `TERM` and `INT`, so DSM's own "stop" is handled;
+a `SIGKILL` or a power cut is not. Recovery is
+`sudo docker compose start grafana`.
 
 ## Updating
 
