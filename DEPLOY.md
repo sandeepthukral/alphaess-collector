@@ -920,8 +920,8 @@ process stays up while collecting nothing. Expired credentials, API errors,
 InfluxDB write failures and the MTU problem above all look identical from the
 outside.
 
-Three checks cover this: two live signals from opposite ends of the
-pipeline, plus a record of what went wrong.
+Four checks cover this: three live signals, two of them from opposite ends of
+the pipeline and independent of each other, plus a record of what went wrong.
 
 **1. `HEARTBEAT_URL` (write side, primary).** Set it to an Uptime Kuma
 **Push** monitor URL and the collector pings it after each successful
@@ -998,13 +998,46 @@ have resumed, which is otherwise a matter of noticing the follow-up "up"
 notification. A test pins its threshold to the alert's, so the box cannot go
 green while the alert fires.
 
-The two live checks overlap substantially — the heartbeat already catches most
-stalls. The staleness alert adds the cases the heartbeat structurally cannot see, because
-it queries the data rather than trusting the writer: a wrong bucket, a
-retention policy quietly dropping data, a Grafana datasource pointed
-elsewhere, or `HEARTBEAT_URL` simply never being set. If you run only one, run
-the heartbeat.
+**4. A Kuma monitor that queries InfluxDB directly (read side, independent of
+Grafana).** Same shape as the freshness monitor under
+["Monitoring the nightly efficiency job"](#monitoring-the-nightly-efficiency-job),
+pointed at `power_readings`:
+
+- Monitor Type: **HTTP(s) - Keyword**, Keyword: `FRESH`, Heartbeat Interval `60`
+- **Retries**: `1` — with a 60 s interval that alerts ~2 minutes after the data
+  goes stale, matching how quickly check 3 detects it
+- Method: `POST`, URL: `http://<nas-host>:8086/api/v2/query?org=home`
+- **Body Encoding**: JSON; header `Content-Type: application/json`, plus the
+  same `Authorization: Token <INFLUX_TOKEN_KUMA>` and `Accept: application/csv`
+- Body:
+
+  ```json
+  {"query":"from(bucket: \"alphaess\") |> range(start: -1h) |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"soc_percent\") |> last() |> map(fn: (r) => ({_value: if float(v: int(v: now()) - int(v: r._time)) / 1000000000.0 < 300.0 then \"FRESH\" else \"STALE\"})) |> yield(name: \"freshness\")","type":"flux"}
+  ```
+
+The `300.0` is the same five minutes as check 3's threshold, and for the same
+reason: comfortably past the collector's 120 s backoff cap, so anything beyond
+it means the loop is failing repeatedly rather than merely between polls. Keep
+the two in step. A collector dead for over an hour returns no rows at all, so
+the keyword does not match and the monitor goes down — the severe case fails
+loudly rather than quietly, matching the alert rule's `noDataState: Alerting`.
+
+Note the contrast with the efficiency monitor, which cannot use a row's own
+timestamp and needs a `computed_at_unix` field instead: `power_readings` is
+written continuously, so here the newest row's timestamp *is* the freshness
+signal.
+
+**Why this duplicates check 3.** It does, in what it measures — and not at all
+in what it depends on. Check 3 only reaches you if Grafana is running, its
+datasource still points at the right InfluxDB, the rule provisioned cleanly,
+*and* the default notification policy routes somewhere real. That last one is
+easy to get wrong invisibly: an unrouted rule turns red on a dashboard nobody
+is looking at and notifies no one, which is indistinguishable from healthy. The
+Kuma monitor shares none of that machinery — it talks to InfluxDB directly and
+notifies through Kuma's own channel. If you run only one of the live checks,
+run the heartbeat (check 1); if you run two, make the second one this.
 
 Provisioned rules route through the **default notification policy**. Point
-that at a real contact point (Alerting → Contact points), otherwise the alert
-fires into nothing.
+that at a real contact point (Alerting → Contact points), otherwise check 3
+fires into nothing. Checks 1 and 4 are unaffected — they do not go through
+Grafana.
