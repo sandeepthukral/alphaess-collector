@@ -1,6 +1,6 @@
 # Nightly InfluxDB backups to the NAS's Google-Drive-synced folder
 
-Status: **complete and verified on the NAS**, 2026-07-31. All 5 changes below
+Status: **complete and verified on the NAS**, 2026-07-31. All 6 changes below
 are live; all verification steps passed (see checkmarks). Two bugs found and
 fixed during verification:
 - `influx backup` doesn't overwrite same-day files, so a re-run silently
@@ -19,6 +19,11 @@ fixed during verification:
   trigger file inside the container-written folder — did not work, and is kept
   below as the experiment that pinned down the rule. **Verified on the NAS the
   same day** (step 7).
+- **2026-08-10: the restore side is now exercised too**, by
+  `scripts/verify-influxdb-backup.sh` — a drill that restores an archive into a
+  throwaway container and checks the data came back (step 8). It found two
+  errors in the restore procedure this document and `DEPLOY.md` had been
+  carrying untested since the start.
 
 ## Context
 
@@ -220,8 +225,12 @@ Placed alongside the existing "Battery-savings pricing jobs" section, covering:
   ```sh
   tar -xzf "$BACKUP_HOST_DIR/influxdb-<date>.tgz" -C "$BACKUP_HOST_DIR/.staging"
   docker compose exec influxdb influx restore "/backups/.staging" \
-    --full --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
+    --full --token "$INFLUX_TOKEN"
   ```
+  No `--org`: `--full` restores every org in the backup and the CLI rejects
+  being narrowed. This line said `--org "$INFLUX_ORG"` until §6 ran it for the
+  first time on 2026-08-10 — checking `--help` for the flags' *existence*, as
+  the note above says to, is not the same as checking the command works.
 
 Also add a one-line callout in the existing "Scoped tokens" section pointing
 here — e.g. "the nightly backup script is the one exception; see 'Backing up
@@ -233,6 +242,28 @@ yet.
 
 One-line pointer from the NAS deployment section to the new DEPLOY.md
 section, matching how the battery-savings nightly job is already linked.
+
+### 6. `scripts/verify-influxdb-backup.sh` + `DEPLOY.md`, "Verifying a backup restores"
+
+Added 2026-08-10, once the backup itself was reaching Drive. Restores an
+archive into a throwaway `influxdb` container — own volume, no published port,
+off the compose network, destroyed afterwards — and checks the `alphaess`
+bucket came back with recent points in it. Run by hand, not scheduled.
+
+Two things it forced into the open, neither reachable by reading `--help`:
+
+- `--full` and `--org` cannot be combined (above).
+- `--full` replaces the KV store, tokens included, and then continues to the
+  SQL snapshot with the credentials it started with. A drill server set up with
+  its own throwaway token therefore 401s halfway through its own restore. The
+  drill initialises its container with `INFLUX_TOKEN` — the backup's own admin
+  token — so the credentials are identical either side of the switch. Restoring
+  into the real stack is fine for the same reason, which is why nobody would
+  ever have hit this without rehearsing.
+
+The drill extracts to a `mktemp` dir rather than `$BACKUP_HOST_DIR/.staging`:
+extraction is a host write, and a host write in that tree would push a second
+full copy of the database to Drive. A rehearsal should leave nothing behind.
 
 ## Verification
 
@@ -279,8 +310,28 @@ section, matching how the battery-savings nightly job is already linked.
    system is opaque, copy the part of it already observed to work rather than
    reasoning about the mechanism.
 
-   Still untested: whether `influx restore` is happy with a backup that has
-   been through the tar round-trip. The file set it sees is unchanged, so there
-   is no particular reason to expect trouble — but the restore path has not
-   been exercised end to end since this changed, and a backup nobody has
-   restored is a backup nobody knows works.
+   Still untested at that point: whether `influx restore` is happy with a
+   backup that has been through the tar round-trip. Addressed by step 8.
+8. ✅ 2026-08-10: `scripts/verify-influxdb-backup.sh` (§6) restores an archive
+   into a throwaway container and passes.
+
+   Verified end to end on a laptop rather than the NAS, deliberately: a source
+   `influxdb:2` container was seeded with points, backed up and tarred with the
+   exact command sequence `backup-influxdb.sh` uses, and the drill then
+   restored that archive and read the data back — 30 points, newest timestamp
+   correct. So the tar round-trip is fine. Also exercised the ways it should
+   fail: a truncated archive (tar aborts), a missing one, and `DRILL_RANGE=1s`
+   forcing the empty-data check to trip. No container or temp directory
+   survives any of those paths.
+
+   What this did **not** prove is the archive currently sitting on the NAS.
+   Run `sudo ./scripts/verify-influxdb-backup.sh` there against a real one —
+   that is the same procedure, against the data you would actually be
+   restoring.
+
+   The rehearsal was worth more than the reassurance: the restore commands in
+   this file and in `DEPLOY.md` were both wrong, in a way `--help` cannot show
+   you. `--full` refuses `--org` outright, and `--full` swaps out the token it
+   is authenticating with partway through — harmless against the real stack,
+   fatal against any server set up with a different admin token. Both had been
+   sitting in the documentation, unrun, since the day it was written.
