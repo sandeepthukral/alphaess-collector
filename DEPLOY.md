@@ -599,7 +599,7 @@ rm -rf "$STAGING" && mkdir -p "$STAGING"
 tar -xzf "$BACKUP_HOST_DIR/influxdb-<date>.tgz" -C "$STAGING"
 
 docker compose exec influxdb influx restore "/backups/.staging" \
-  --full --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
+  --full --token "$INFLUX_TOKEN"
 
 rm -rf "$STAGING"/*
 ```
@@ -607,6 +607,61 @@ rm -rf "$STAGING"/*
 Clear it afterwards as shown. Unlike the nightly job, this extraction *is* a
 host write, so leaving it in place would push a second full copy of the backup
 up to Drive.
+
+**No `--org` on that command.** `--full` restores every org in the backup and
+the CLI refuses to have that narrowed — `Error: --full restore cannot be
+limited to a single org or bucket`. This page carried the `--org` form until
+the restore drill below was written and ran it for the first time.
+
+`--full` also replaces the key-value store, tokens included, and then keeps
+going using the credentials it started with. That works here only because
+`INFLUX_TOKEN` is both the admin token of the running server and the admin
+token inside the backup; restore an archive into a server set up with a
+*different* admin token and it dies midway with `failed to restore SQL
+snapshot: 401 Unauthorized`, leaving it half-restored.
+
+### Verifying a backup restores
+
+A backup nobody has restored is a backup nobody knows works. Everything above
+only establishes that a file was written and reached Drive, which says nothing
+about whether it can be read back.
+
+[scripts/verify-influxdb-backup.sh](scripts/verify-influxdb-backup.sh) answers
+that without touching the live database. It starts a throwaway `influxdb`
+container — its own volume, no published port, not on the compose network —
+restores an archive into it, checks the `alphaess` bucket came back with recent
+data in it, and destroys the container:
+
+```sh
+cd /volume1/docker/alphaess-collector
+sudo ./scripts/verify-influxdb-backup.sh                    # newest archive
+sudo ./scripts/verify-influxdb-backup.sh /path/to/one.tgz   # a specific one
+```
+
+On success it prints roughly this — the point count and timestamp are the part
+worth reading, since a bucket can restore empty:
+
+```
+verify-influxdb-backup: PASS
+  bucket:  alphaess restored
+  points:  <n> in the last 7d
+  newest:  <most recent timestamp in the restored copy>
+  archive: .../influxdb-2026-08-10.tgz
+```
+
+It exits non-zero on any failure, so it can be run from Task Scheduler, but it
+is deliberately not scheduled: it takes a couple of minutes and pulls a full
+InfluxDB image up. Run it by hand after changing anything in the backup path,
+and once in a while regardless.
+
+`DRILL_RANGE` (default `7d`) sets how far back it looks for data. Shorten it to
+watch the check fail on purpose — `DRILL_RANGE=1s ./scripts/verify-influxdb-backup.sh`
+must report FAIL, and a verification you have never seen fail is not one you
+can trust.
+
+Note that the drill extracts to a `mktemp` directory rather than to
+`$BACKUP_HOST_DIR/.staging` as the manual restore above does, precisely so a
+rehearsal leaves nothing behind for Cloud Sync to pick up.
 
 ## Backing up Grafana
 
