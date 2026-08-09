@@ -29,6 +29,7 @@ import datetime as dt
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass
 
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -57,6 +58,15 @@ DAILY_MEASUREMENT = "daily_cost"
 #    export* are otherwise unchanged from v2.
 #    Keep the dashboard's `model_version` variable in step
 #    (grafana/alphaess-battery-savings.json).
+#
+# `computed_at_unix` was added to the stored row after 3 without bumping to 4,
+# which is a deliberate exception to the rule above rather than an oversight.
+# It records when the job ran and takes no part in the arithmetic, so a v3 row
+# written before it and one written after describe the same day identically.
+# Bumping would have hidden every existing savings row behind an empty
+# dashboard until a full backfill had run -- a real cost, for a field no panel
+# reads. The staleness monitor tolerates its absence on older rows by design:
+# max() simply ignores them.
 MODEL_VERSION = "3"
 
 # Defined before the settings below, which log through it while being parsed.
@@ -489,6 +499,17 @@ def process_day(day, samples, intervals, dry_run, write_ctx) -> None:
     for k, val in result.items():
         if val is not None:
             point = point.field(k, float(val))
+    # When the job ran, not the day it describes -- the staleness monitor reads
+    # this. daily_cost rows are stamped at the local midnight of the day they
+    # cover, so on a healthy system the newest row's own timestamp is already
+    # ~51h old just before the next nightly run; a check against it would need
+    # a threshold above that and would take two and a half days to notice a
+    # dead job. Mirrors the field of the same name in efficiency.py.
+    #
+    # Set here rather than in compute_day's result: compute_day is re-run by
+    # audit_day to judge rows already stored, and a wall-clock field would make
+    # it return something different every call for identical inputs.
+    point = point.field("computed_at_unix", float(int(time.time())))
     write_api.write(bucket=bucket, record=point)
     log.info("%s: wrote %s", day, DAILY_MEASUREMENT)
 

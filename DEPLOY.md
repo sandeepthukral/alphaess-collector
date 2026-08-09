@@ -426,10 +426,51 @@ alert fires.
 Provisioned rules route through the **default notification policy** — point that
 at a real contact point, or all of this fires into nothing.
 
-> The nightly `daily-savings.sh` has no equivalent check: `daily_cost` can stop
-> being written and only the savings dashboard going flat reveals it. The same
-> keyword monitor pointed at `daily_cost` (filtered on `model_version`) would
-> close that gap. Left undone deliberately rather than overlooked.
+## Monitoring the nightly savings job
+
+`daily-savings.sh` produces the money figure, and it fails the same four ways
+the efficiency job does — including the one that exits 0. Left unwatched, a
+dead job shows up only as the savings dashboard quietly going flat, which is
+easy to mistake for a quiet week.
+
+It has no push heartbeat of its own, so the freshness monitor is the check.
+Same shape as the efficiency one above, over `daily_cost`:
+
+- Monitor Type: **HTTP(s) - Keyword**, Keyword: `FRESH`, Heartbeat Interval `3600`
+- **Retries**: `1`
+- Method: `POST`, URL: `http://<nas-host>:8086/api/v2/query?org=home`
+- **Body Encoding**: JSON; headers exactly as above
+- Body:
+
+  ```json
+  {"query":"from(bucket: \"alphaess\") |> range(start: -14d) |> filter(fn: (r) => r._measurement == \"daily_cost\" and r._field == \"computed_at_unix\") |> max() |> map(fn: (r) => ({_value: if float(v: uint(v: now())) / 1000000000.0 - r._value < 108000.0 then \"FRESH\" else \"STALE\"})) |> yield(name: \"freshness\")","type":"flux"}
+  ```
+
+`108000.0` is 30 hours. `daily-savings.sh` runs at 02:00, so one missed night
+alerts and an hour's slip does not — the same reasoning as the efficiency job's
+threshold, which runs an hour later.
+
+**Deliberately not filtered on `model_version`,** unlike every panel on the
+Battery Savings dashboard. `max(computed_at_unix)` across all versions answers
+exactly the question being asked — "when did `pricing.py` last write anything"
+— and liveness is not a question about a model version. Filtering would make
+the monitor read STALE the moment `MODEL_VERSION` is bumped, for as long as the
+backfill takes, which is precisely when you are least able to tell a broken job
+from an expected gap. This matches the "Job age" stat's exemption on the Energy
+Losses dashboard, which `tests/test_model_version_consistency.py` pins in place
+for the same reason.
+
+**Deploy ordering.** `daily_cost` rows written before this change carry no
+`computed_at_unix`, so `max()` over them returns nothing and the monitor reads
+STALE until the first post-deploy run writes the field. Either run the job by
+hand straight after deploying:
+
+```sh
+sudo docker compose run --rm collector python pricing.py --date <yesterday> --force
+```
+
+or create the monitor the following day. Do **not** widen the `-14d` range to
+paper over it — that hides exactly the condition the monitor exists to report.
 
 ## Backing up InfluxDB
 

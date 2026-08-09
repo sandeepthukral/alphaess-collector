@@ -113,7 +113,32 @@ it needs fixing rather than ignoring.
 
 ---
 
-## 4. `daily_savings` has no staleness check at all
+## 4. `daily_savings` has no staleness check at all — DONE 2026-08-09
+
+Applied in the repo, with two deliberate departures from what is written below:
+
+- `computed_at_unix` is set on the `Point` in `process_day`, not added to
+  `compute_day`'s `result`. `compute_day` is re-run by `audit_day` to judge
+  rows already stored, and a wall-clock field would make it return something
+  different every call for identical inputs.
+- The monitor is **not** filtered on `model_version`, reversing step 3 below.
+  `max(computed_at_unix)` across all versions is exactly the liveness question;
+  filtering would read STALE for the whole of any post-bump backfill. This
+  matches the "Job age" panel's exemption, which
+  `tests/test_model_version_consistency.py` already pins.
+
+`MODEL_VERSION` stays at `3` — the field takes no part in the arithmetic, and
+bumping would have hidden every existing savings row until a full backfill ran.
+The reasoning is recorded in `pricing.py`'s version comment so it does not read
+as an oversight.
+
+Step 4 (a provisioned Grafana alert and a Job age stat on the savings
+dashboard) was scoped out, not done.
+
+**Still to do on the NAS:** create the Kuma monitor, minding the deploy
+ordering below — the field only appears on rows written after this deploys.
+
+
 
 The nightly `daily-savings.sh` produces the money figure, and it can stop
 writing with no symptom other than the savings dashboard quietly going flat.
