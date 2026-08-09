@@ -543,6 +543,17 @@ directly, because InfluxDB is a live, continuously-written database and a raw
 file copy risks a torn/corrupt snapshot; `influx backup` produces a
 consistent, portable backup while the server keeps running.
 
+**`BACKUP-COMPLETE.txt` in each dated folder is load-bearing, not litter.**
+Synology Cloud Sync never notices files written from inside a container through
+a bind mount, so a backup left as `influx backup` wrote it stays on the NAS and
+never reaches the cloud — with the local files all present and correct, which
+is what made this hard to spot. A single host-written file inside the folder
+makes Cloud Sync enumerate it and upload the lot, so the script writes one as
+its last step. Do not "tidy" it away, and if you add anything else to this
+tree, write it from the host. BACKUP-DATABASE.MD, "Making Cloud Sync notice",
+has the full account. If a day is ever missing from Drive, `touch` any file
+inside its folder to push it.
+
 The script authenticates with the admin `INFLUX_TOKEN`, not a scoped
 per-service token — the one deliberate exception to the "Scoped tokens" rule
 below. `influx backup`/`influx restore` require operator-level permissions;

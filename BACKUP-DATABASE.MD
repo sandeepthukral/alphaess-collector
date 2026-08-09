@@ -7,10 +7,14 @@ fixed during verification:
   doubled them — the script now clears the dated folder first (§3).
 - The dated backup folder landed `root:root` on the host (the container runs
   `influx backup` as root, and the bind mount carries that uid straight
-  through), which the Google Drive sync client — running as a normal user —
-  couldn't see, so backups were never actually reaching Drive. The script now
-  `chown`s the fresh folder to match whoever owns the parent `BACKUP_HOST_DIR`
-  after each run (§3).
+  through). The script now `chown`s the fresh folder to match whoever owns the
+  parent `BACKUP_HOST_DIR` after each run (§3). This was originally recorded as
+  the reason backups were not reaching Drive; **that diagnosis was wrong** —
+  see below.
+- **2026-08-10: backups still were not reaching Drive**, and neither ownership
+  nor timing was the cause. Cloud Sync does not observe anything written from
+  inside a container through a bind mount. The script now writes a host-side
+  trigger file as its last step (§3, "Making Cloud Sync notice").
 
 ## Context
 
@@ -104,14 +108,21 @@ start/done lines):
   restorable and prunable. `influx backup` timestamps every file it writes
   rather than overwriting, so a re-run into a non-empty dated folder silently
   doubles the files instead of replacing them (confirmed by testing) — clear
-  the folder first so a re-run (manual test, retry after failure) replaces
-  today's backup rather than piling up extra full snapshots next to it:
+  the folder so a re-run (manual test, retry after failure) replaces today's
+  backup rather than piling up extra full snapshots next to it — **emptying it
+  in place, never `rm -rf` on the folder itself**:
   ```sh
   TS=$(date +%Y-%m-%d)
-  rm -rf "${BACKUP_HOST_DIR:-./backups}/$TS"
+  DEST="$BACKUP_HOST_DIR/$TS"
+  mkdir -p "$DEST"
+  find "$DEST" -mindepth 1 -exec rm -rf {} +      # not: rm -rf "$DEST"
   docker compose exec -T influxdb influx backup "/backups/$TS" \
     --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
   ```
+  Deleting the folder is a *host* operation and Cloud Sync does see those, so
+  it removes the folder from Drive; the replacement is written from inside the
+  container, which it does not see. A re-run with `rm -rf` therefore deletes a
+  good cloud backup and uploads nothing in its place.
 - `influx backup` runs as root inside the container (no `user:` pin in
   `docker-compose.yml`), and the bind mount carries that uid straight through
   to the host, so the dated folder lands `root:root` — invisible to the Drive
@@ -121,6 +132,37 @@ start/done lines):
   ```sh
   chown -R "$(stat -c '%U:%G' "$BACKUP_HOST_DIR")" "$BACKUP_HOST_DIR/$TS"
   ```
+  Worth being precise about what this does and does not fix: it makes the files
+  belong to the account the sync client runs as, which is right. It is *not*
+  what makes them visible — the folders come out `0755` and are world-readable
+  and traversable throughout, so nothing was ever permission-blocked.
+
+#### Making Cloud Sync notice
+
+Synology Cloud Sync does not observe anything written from inside a container
+through a bind mount. Not the dated folder, not the files in it, ever — a
+folder written that way is still absent from Drive days later, so this is not a
+race that a delay could win. Host-side writes to the same tree *are* observed:
+the `rm -rf` above propagated a deletion to Drive immediately, and
+`backup-grafana.sh` — which writes its `.tgz` from the host — has always
+synced. That contrast is what identified the cause.
+
+The lever is that **one host-written file inside the folder makes Cloud Sync
+enumerate it and upload everything already there.** That is how the bug was
+found: adding a single file by hand pushed a whole day's unsynced backup to
+Drive at once. So the script's last step writes one:
+
+```sh
+date -u '+%Y-%m-%dT%H:%M:%SZ' > "$DEST/BACKUP-COMPLETE.txt"
+```
+
+It is a trigger, not a payload — the contents are irrelevant, but it must be a
+fresh write on every run, and it must be written by the host rather than the
+container. It doubles as a marker that the run got past `influx backup`.
+
+Two things follow. Anything added to this tree in future must be written
+host-side, or it will sit there unsynced. And if a day's backup is ever missing
+from Drive, `touch`ing a file inside its folder is the manual recovery.
 - Prune local backups older than `BACKUP_RETENTION_DAYS`, operating directly
   on the host path (the script runs on the NAS host, so no need to do this
   inside the container):
