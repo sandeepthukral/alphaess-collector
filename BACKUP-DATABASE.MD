@@ -5,6 +5,12 @@ are live; all verification steps passed (see checkmarks). Two bugs found and
 fixed during verification:
 - `influx backup` doesn't overwrite same-day files, so a re-run silently
   doubled them — the script now clears the dated folder first (§3).
+- **2026-08-10:** clearing it with `rm -rf` turned out to defeat Synology Cloud
+  Sync. It handles the deletion fine, but a folder created and filled a second
+  later often escapes its watcher, so the day's backup stayed on the NAS and
+  never reached Drive — indistinguishable, locally, from a healthy night. The
+  script now empties the folder in place and pre-creates tomorrow's a day
+  ahead (§3).
 - The dated backup folder landed `root:root` on the host (the container runs
   `influx backup` as root, and the bind mount carries that uid straight
   through), which the Google Drive sync client — running as a normal user —
@@ -103,15 +109,42 @@ start/done lines):
 - Run the backup into a dated subfolder so each day is independently
   restorable and prunable. `influx backup` timestamps every file it writes
   rather than overwriting, so a re-run into a non-empty dated folder silently
-  doubles the files instead of replacing them (confirmed by testing) — clear
-  the folder first so a re-run (manual test, retry after failure) replaces
-  today's backup rather than piling up extra full snapshots next to it:
+  doubles the files instead of replacing them (confirmed by testing) — the
+  folder has to be emptied so a re-run (manual test, retry after failure)
+  replaces today's backup rather than piling up extra full snapshots next to
+  it.
+
+  **Empty it in place; never `rm -rf` the folder itself.** Synology Cloud Sync
+  processes a deletion immediately, but a folder created and then filled within
+  the same second frequently escapes its watcher, and that day's backup never
+  reaches the cloud at all — with nothing on the NAS to suggest anything is
+  wrong, since the files are there locally. Deleting the dated folder and
+  letting `influx backup` recreate it is precisely that pattern. Emptying keeps
+  the inode Cloud Sync is already watching, so only the files inside change:
   ```sh
   TS=$(date +%Y-%m-%d)
-  rm -rf "${BACKUP_HOST_DIR:-./backups}/$TS"
+  DEST="$BACKUP_HOST_DIR/$TS"
+  find "$DEST" -mindepth 1 -exec rm -rf {} +      # not: rm -rf "$DEST"
   docker compose exec -T influxdb influx backup "/backups/$TS" \
     --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
   ```
+- **Pre-create tomorrow's folder at the end of each run**, empty and correctly
+  owned. That is what makes the rule above hold on the normal path: without it,
+  every night's folder is still new, and emptying-in-place has nothing to empty.
+  With it, the folder has existed for a full day — plenty of time for Cloud Sync
+  to notice a directory while there is nothing inside it to miss:
+  ```sh
+  TOMORROW=$(docker compose exec -T influxdb date -d '+1 day' +%Y-%m-%d | tr -d '\r')
+  mkdir -p "$BACKUP_HOST_DIR/$TOMORROW"
+  ```
+  The date comes from the container because it is Debian-based and its `date`
+  takes a relative offset; the NAS's busybox `date` does not. `TZ` is passed
+  into the containers, so "tomorrow" means the same thing on both sides.
+
+  The script still falls back to `mkdir` plus a `BACKUP_SETTLE_SECONDS` wait
+  (default 30) when the folder is genuinely absent — the first ever run, or the
+  morning after a night the job did not run. That path is a race being run
+  rather than avoided, which is why it is the exception and not the design.
 - `influx backup` runs as root inside the container (no `user:` pin in
   `docker-compose.yml`), and the bind mount carries that uid straight through
   to the host, so the dated folder lands `root:root` — invisible to the Drive
