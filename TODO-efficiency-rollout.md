@@ -5,8 +5,10 @@ commit `ea44944`). Delete this file once everything below is done — it is a
 rollout checklist, not permanent documentation. Anything here that turns out to
 be permanently true belongs in DEPLOY.md instead.
 
-Status as of 2026-08-06: code deployed on the NAS, 18 days backfilled, both
-Kuma monitors green, gate proven to fire. PR not merged.
+Status as of 2026-08-09: code deployed on the NAS, 18 days backfilled, both
+Kuma monitors green, gate proven to fire, Monitor B proven to fail. Item 1 is
+done in the repo; the token rotation is declined. PR #56 still open — what is
+left before merging is the DSM task and the notification policy below.
 
 ---
 
@@ -47,12 +49,16 @@ Two more corrections while in there:
 
 ## 2. Remaining rollout steps on the NAS
 
-- [ ] **Falsify Monitor B.** Change `108000.0` to `1.0` in the Body, save,
-      confirm the monitor goes red with `STALE`, change it back. A monitor never
-      seen to fail is not known to work.
-- [ ] **Rotate `INFLUX_TOKEN_KUMA`.** The current one was fully legible in a
-      screenshot shared during setup. Read-only on `alphaess` and LAN-only, so
-      the exposure is mild, but it is a live credential in an image.
+- [x] **Falsify Monitor B.** Done 2026-08-09: `108000.0` → `1.0` took the
+      monitor red with `STALE`, reverted. The monitor is now known to fail as
+      well as to pass.
+- [~] **Rotate `INFLUX_TOKEN_KUMA`** — **declined 2026-08-09**, risk accepted.
+      The token was fully legible in a screenshot shared during setup. It is
+      read-only on `alphaess` and reachable only from the LAN, so the exposure
+      is mild; the judgement is that it is not worth the rotation. Left here
+      rather than deleted so the decision is visible: if the NAS is ever exposed
+      beyond the LAN, or the screenshot travels, this becomes live again.
+      Commands kept for that day.
 
       ```sh
       cd /volume1/docker/alphaess-collector
