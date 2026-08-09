@@ -448,6 +448,40 @@ alert fires.
 Provisioned rules route through the **default notification policy** — point that
 at a real contact point, or all of this fires into nothing.
 
+### Checking the DST fold, each spring and autumn
+
+AlphaESS does not document what timezone `uploadTime` is in. `efficiency.py`
+assumes local time and folds the repeated hour accordingly, and the SoC
+alignment gate exists to catch a mis-parse — but on ordinary days it reads
+**0.00pp**, exactly zero, so lowering its threshold proves nothing. A real DST
+transition is the only thing that exercises it.
+
+So on the day after each transition (the last Sunday of March and of October in
+`Europe/Amsterdam`), run the dry-run for the transition day itself:
+
+```sh
+cd /volume1/docker/alphaess-collector && sudo docker compose run --rm collector \
+  python efficiency.py --dry-run --date <the transition day>
+```
+
+The metered series is 5-minute, so the record count is the length of the day
+times twelve — and that count is the first thing to check, because it is the
+cheapest evidence that the fold was handled at all:
+
+| Day | Length | Expect |
+|---|---|---|
+| Ordinary | 24 h | **288** records |
+| Last Sunday in March | 23 h | **276** records |
+| Last Sunday in October | 25 h | **300** records |
+
+`soc_align` should stay near zero throughout. If it jumps to tens of pp, the
+fold handling is wrong: the day will be *gated* rather than silently
+mis-integrated, which is the intended failure — but it needs fixing rather than
+waiting out. Diagnose with `--check-alignment` for that date.
+
+Nothing schedules this and nothing alerts on it; it is a twice-yearly manual
+check, and the gate is what protects the data in the meantime.
+
 ## Monitoring the nightly savings job
 
 `daily-savings.sh` produces the money figure, and it fails the same four ways
