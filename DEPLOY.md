@@ -356,6 +356,8 @@ the data instead of trusting the writer. Add a second monitor:
 
 - Monitor Type: **HTTP(s) - Keyword**, Keyword: `FRESH`, Heartbeat Interval `3600`
 - **Retries**: `1` — at `0` a single blip pages you
+- **Heartbeat Retry Interval**: `60` — see
+  ["Retries, and why the retry interval is short"](#retries-and-why-the-retry-interval-is-short)
 - Method: `POST`, URL: `http://<nas-host>:8086/api/v2/query?org=home`
 - **Body Encoding**: leave it on **JSON**
 - Headers:
@@ -405,6 +407,26 @@ seen to fail is not known to work. Do that last check in the monitor itself as
 well, not only in `influx query`: it is the only thing that proves the keyword
 match and the envelope are both wired up.
 
+### Retries, and why the retry interval is short
+
+Applies to every keyword monitor here. With **Retries** above `0`, a failing
+check does not go straight to DOWN — Kuma moves the monitor to **PENDING**
+(yellow) and only marks it DOWN (red) once the retries are used up.
+Notifications fire on the transition to DOWN and never on PENDING. So the
+**Heartbeat Retry Interval** is not a detail: it is how long the monitor sits
+yellow and silent before anyone is told. Set it to an hour and a dead job is
+known about an hour later than it needed to be — and falsifying the monitor
+looks broken, because it goes yellow and appears to stop there.
+
+`60` is right for all of these, and a long value buys nothing. Retries exist
+here to absorb a transient failure *reaching InfluxDB* — a dropped connection,
+a moment of load — not to smooth the measurement, which cannot be noisy: it is
+an elapsed time in hours, and no blip pushes "when did the job last run" across
+a 30-hour line. This is the same reasoning the provisioned alert rules give for
+`for: 0s`; the metric is inherently debounced, so debouncing it twice only adds
+delay. Keeping **Retries** at `1` is what stops a single failed HTTP request
+paging you, and that is the part worth having.
+
 **Why `computed_at_unix` and not the row's own timestamp.** `daily_energy` rows
 are stamped at the local midnight of the day they *describe*, so the 03:00 run on
 day D writes a row stamped D−1 00:00. Just before the next run, the newest row is
@@ -437,7 +459,8 @@ It has no push heartbeat of its own, so the freshness monitor is the check.
 Same shape as the efficiency one above, over `daily_cost`:
 
 - Monitor Type: **HTTP(s) - Keyword**, Keyword: `FRESH`, Heartbeat Interval `3600`
-- **Retries**: `1`
+- **Retries**: `1`, **Heartbeat Retry Interval**: `60` — see
+  ["Retries, and why the retry interval is short"](#retries-and-why-the-retry-interval-is-short)
 - Method: `POST`, URL: `http://<nas-host>:8086/api/v2/query?org=home`
 - **Body Encoding**: JSON; headers exactly as above
 - Body:
@@ -1065,8 +1088,9 @@ Grafana).** Same shape as the freshness monitor under
 pointed at `power_readings`:
 
 - Monitor Type: **HTTP(s) - Keyword**, Keyword: `FRESH`, Heartbeat Interval `60`
-- **Retries**: `1` — with a 60 s interval that alerts ~2 minutes after the data
-  goes stale, matching how quickly check 3 detects it
+- **Retries**: `1`, **Heartbeat Retry Interval**: `60` — alerts ~2 minutes after
+  the data goes stale, matching how quickly check 3 detects it; see
+  ["Retries, and why the retry interval is short"](#retries-and-why-the-retry-interval-is-short)
 - Method: `POST`, URL: `http://<nas-host>:8086/api/v2/query?org=home`
 - **Body Encoding**: JSON; header `Content-Type: application/json`, plus the
   same `Authorization: Token <INFLUX_TOKEN_KUMA>` and `Accept: application/csv`
