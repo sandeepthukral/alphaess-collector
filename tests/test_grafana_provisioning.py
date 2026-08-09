@@ -44,20 +44,20 @@ def test_dashboards_were_found():
     added to grafana/ but never mounted in docker-compose.yml, which provisions
     nothing and fails silently -- see test_every_dashboard_is_mounted below.
     """
-    assert len(DASHBOARDS) == 7
+    assert len(DASHBOARDS) == 8
 
 
 def test_generators_were_found():
     """The pairing glob has the same failure mode as the dashboard glob: match nothing,
     test nothing, pass."""
-    assert len(GENERATORS) == 2
+    assert len(GENERATORS) == 3
 
 
 @pytest.mark.parametrize("generator", GENERATORS, ids=lambda p: p.name)
 def test_generated_dashboard_matches_its_generator(generator, tmp_path):
     """A generated dashboard must equal what its generator emits.
 
-    Two of the seven are built from a script rather than exported from the Grafana UI,
+    Three of the eight are built from a script rather than exported from the Grafana UI,
     because their Flux queries were written and checked against the live database and are
     the substance of the dashboard. That only holds while the two agree. Hand-edit the
     JSON and the next regeneration silently reverts it; hand-edit it and never regenerate,
@@ -301,8 +301,16 @@ def test_both_dashboards_agree_on_battery_capacity():
     assert capacity("alphaess-dashboard.json") == capacity("alphaess-battery-plan.json")
 
 
-def test_alert_rule_names_its_datasource():
-    path = PROVISIONING / "alerting" / "alphaess-staleness.yml"
+ALERT_FILES = sorted((PROVISIONING / "alerting").glob("*.yml"))
+
+
+def test_alert_rules_were_found():
+    """Same failure mode as the dashboard glob: match nothing, test nothing, pass."""
+    assert len(ALERT_FILES) == 2
+
+
+@pytest.mark.parametrize("path", ALERT_FILES, ids=lambda p: p.name)
+def test_alert_rule_names_its_datasource(path):
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     uids = [
         query["datasourceUid"]
@@ -310,20 +318,29 @@ def test_alert_rule_names_its_datasource():
         for rule in group["rules"]
         for query in rule["data"]
     ]
-    assert uids, "expected the staleness rule to carry queries"
+    assert uids, f"expected {path.name} to carry queries"
     assert all(uid == DS_UID or uid in BUILTIN_UIDS for uid in uids), uids
 
 
+def test_alert_rule_uids_are_unique():
+    """Grafana keys provisioned rules by uid. A duplicate silently replaces the
+    other rule -- one of the two alerts simply never exists."""
+    uids = [rule["uid"]
+            for path in ALERT_FILES
+            for group in yaml.safe_load(path.read_text(encoding="utf-8"))["groups"]
+            for rule in group["rules"]]
+    assert len(uids) == len(set(uids)), uids
+
+
 def test_dashboard_provider_and_alert_folder_agree():
-    """Grafana matches the folder by title, so the two files must agree exactly."""
+    """Grafana matches the folder by title, so the files must agree exactly."""
     providers = yaml.safe_load(
         (PROVISIONING / "dashboards" / "dashboards.yml").read_text(encoding="utf-8")
     )["providers"]
-    alerting = yaml.safe_load(
-        (PROVISIONING / "alerting" / "alphaess-staleness.yml").read_text(encoding="utf-8")
-    )["groups"]
-
-    folders = {p["folder"] for p in providers} | {g["folder"] for g in alerting}
+    folders = {p["folder"] for p in providers}
+    for path in ALERT_FILES:
+        folders |= {g["folder"]
+                    for g in yaml.safe_load(path.read_text(encoding="utf-8"))["groups"]}
     assert folders == {"AlphaESS"}
 
 
@@ -365,3 +382,55 @@ def test_status_panel_and_staleness_alert_share_a_threshold():
     assert steps == alert_thresholds
     assert ok["options"]["to"] == alert_thresholds[0]
     assert outage["options"]["from"] == alert_thresholds[0]
+
+
+def _alert_thresholds(filename):
+    doc = yaml.safe_load((PROVISIONING / "alerting" / filename).read_text(encoding="utf-8"))
+    return [
+        param
+        for group in doc["groups"]
+        for rule in group["rules"]
+        for query in rule["data"]
+        for condition in query["model"].get("conditions", [])
+        for param in condition["evaluator"]["params"]
+    ]
+
+
+def test_job_age_panel_and_efficiency_alert_share_a_threshold():
+    """Same contract as the Collector status box above, for the nightly job.
+
+    The 'Job age' stat is the staleness alert rendered on screen. A green box
+    while the alert fires sends you hunting for a second, non-existent fault --
+    and here it would do so for a job whose only symptom is that a chart stopped
+    moving, which is hard enough to spot without the dashboard lying about it.
+    """
+    alert_thresholds = _alert_thresholds("alphaess-efficiency-staleness.yml")
+    assert len(alert_thresholds) == 1, alert_thresholds
+
+    dashboard = json.loads(
+        (REPO / "grafana" / "alphaess-energy-losses.json").read_text(encoding="utf-8")
+    )
+    panel = next(p for p in dashboard["panels"] if p["title"] == "Job age")
+    steps = [s["value"] for s in panel["fieldConfig"]["defaults"]["thresholds"]["steps"]
+             if s["value"] is not None]
+    assert steps[-1] == alert_thresholds[0]
+
+
+def test_the_staleness_checks_read_when_the_job_ran_not_which_day_it_wrote():
+    """daily_energy rows are stamped at the local midnight of the day they
+    describe, so the newest row is 51 hours old on a healthy system right before
+    the next nightly run. Anything measuring staleness from the row's own
+    timestamp needs a >51h threshold and takes two and a half days to notice a
+    dead job -- which is why efficiency.py stores computed_at_unix at all.
+
+    Pins that both readers actually use it.
+    """
+    alert = (PROVISIONING / "alerting" / "alphaess-efficiency-staleness.yml").read_text(
+        encoding="utf-8")
+    assert 'r._field == "computed_at_unix"' in alert
+
+    dashboard = json.loads(
+        (REPO / "grafana" / "alphaess-energy-losses.json").read_text(encoding="utf-8")
+    )
+    panel = next(p for p in dashboard["panels"] if p["title"] == "Job age")
+    assert 'computed_at_unix' in panel["targets"][0]["query"]

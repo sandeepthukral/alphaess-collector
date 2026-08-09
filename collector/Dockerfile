@@ -8,6 +8,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY collector.py .
 COPY prices.py .
 COPY pricing.py .
+COPY efficiency.py .
 
 RUN useradd --create-home collector
 USER collector

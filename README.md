@@ -17,7 +17,7 @@ with `sys_sn`:
 |---|---|---|
 | `pv_power_w` | W | Solar generation |
 | `grid_power_w` | W | Positive = import, negative = export (verify with `--once`) |
-| `load_power_w` | W | House load |
+| `load_power_w` | W | House load — **derived, not measured**: see below |
 | `battery_power_w` | W | Positive = discharge, negative = charge (verify with `--once`) |
 | `soc_percent` | % | Battery state of charge |
 
@@ -28,6 +28,52 @@ message, failures only), `outage_seconds` (`recovered` only). Successful polls
 write nothing here: `power_readings` arriving is the healthy signal. Read it
 through the **AlphaESS Collector Health** dashboard
 ([grafana/alphaess-collector-health.json](grafana/alphaess-collector-health.json)).
+
+> **`load_power_w` is an identity, not a measurement.**
+> `load_power_w == pv_power_w + grid_power_w + battery_power_w` holds *exactly*
+> on every sample — 56,969 of them checked, maximum residual 0 W — because
+> `getLastPowerData` derives house load as the residual rather than metering it.
+> Two consequences worth knowing before trusting it: it can go negative (−7847 W
+> observed), which no house can do; and the whole-house AC energy balance closes
+> by construction, so no conversion or standby loss can ever appear in it. That
+> is why the two measurements below exist.
+
+Measurement `metered_power` in the same bucket holds AlphaESS's own 5-minute
+history (`getOneDayPowerBySn`), tagged with `sys_sn` and `source`. Written by
+`efficiency.py`, once a night for the days just past — not by the live poll loop.
+
+| Field | Unit | Notes |
+|---|---|---|
+| `metered_load_w` | W | House load, **independently metered** — this is the one that is not the residual |
+| `metered_soc_percent` | % | Same quantity as `soc_percent`, by a second path; used to verify the timestamp timezone |
+| `feed_in_w` | W | Grid export |
+| `grid_charge_w` | W | Grid import |
+
+`ppv` from this endpoint is **deliberately not stored**: it reads `0.0` on every
+record on this system — three separate full days summed to 0.00 kWh while the
+daily endpoint reported 17–25 kWh of PV for the same days. Stored, it would
+render as a night that never ends. PV comes from `pv_kwh_api` below and from
+`power_readings.pv_power_w`. Please don't "fix" the missing column.
+`pchargingPile` is omitted for the simpler reason that there is no EV charger.
+
+Measurement `daily_energy`, one row per local day, tagged `sys_sn` and
+`model_version`, timestamped at local midnight (the same convention as
+`daily_cost`). It carries AlphaESS's daily totals verbatim —
+`charge_kwh_api`, `discharge_kwh_api`, `pv_kwh_api`, `export_kwh_api`,
+`import_kwh_api`, `grid_charge_kwh_api` — plus the loss decomposition computed
+from them: `conversion_loss_kwh` (derived load minus metered load),
+`battery_loss_kwh` (charge − discharge − ΔSoC×capacity) and `total_loss_kwh`,
+alongside `computed_at_unix` and the quality fields the gate ran on. Read it
+through the **AlphaESS Energy Losses** dashboard
+([grafana/alphaess-energy-losses.json](grafana/alphaess-energy-losses.json)); see
+[DEPLOY.md](DEPLOY.md#nightly-conversion-loss-update) to schedule it.
+
+> **Three different export figures now exist and must never meet in one
+> expression.** `daily_cost.export_kwh_actual` is this repo's own integration of
+> `grid_power_w`; `daily_energy.export_kwh_api` is AlphaESS's daily counter; the
+> raw `feed_in_w` series integrates to a third value. On 2026-08-05 the last two
+> were 11.55 and 12.28 kWh — a 6% disagreement between two endpoints of the same
+> API. That is why every field carries its provenance in its name.
 
 ## Setup
 
