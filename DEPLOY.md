@@ -329,7 +329,16 @@ Three checks cover them, in the same shape as
 - **Retries**: `1`, **Heartbeat Retry Interval**: `3600`
 
 which trips roughly 26 hours after the last good night — one missed 03:00 run
-alerts, a run that slips an hour does not. Paste the URL into
+alerts, a run that slips an hour does not.
+
+**`3600` is deliberate here, and this is the one monitor it belongs on.**
+["Retries, and why the retry interval is short"](#retries-and-why-the-retry-interval-is-short)
+argues for `60` everywhere else; that argument is about the keyword monitors,
+whose measurement is an elapsed time in hours read against a 30-hour line. A
+Push monitor has no such margin built into the check itself — the heartbeat
+interval *is* the deadline, so the slack has to come from the retry interval.
+Set this one to `60` and the monitor goes down 24 hours and one minute after
+the last push, i.e. any night the job starts a few minutes late. Paste the URL into
 `EFFICIENCY_HEARTBEAT_URL` in `.env`, quoted, for the same `. ./.env` reason as
 `HEARTBEAT_URL`.
 
@@ -418,7 +427,9 @@ yellow and silent before anyone is told. Set it to an hour and a dead job is
 known about an hour later than it needed to be — and falsifying the monitor
 looks broken, because it goes yellow and appears to stop there.
 
-`60` is right for all of these, and a long value buys nothing. Retries exist
+`60` is right for all of these — but only these; the Push monitor above wants
+`3600` for a reason that does not apply to a keyword check. For the keyword
+monitors a long value buys nothing. Retries exist
 here to absorb a transient failure *reaching InfluxDB* — a dropped connection,
 a moment of load — not to smooth the measurement, which cannot be noisy: it is
 an elapsed time in hours, and no blip pushes "when did the job last run" across
