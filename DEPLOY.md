@@ -492,6 +492,78 @@ docker compose exec influxdb influx restore "/backups/<date>" \
   --full --org "$INFLUX_ORG" --token "$INFLUX_TOKEN"
 ```
 
+## Backing up Grafana
+
+Almost everything in Grafana is provisioned from this repo — the datasource,
+every dashboard, and the alert *rules* — so a rebuild from an empty volume
+restores them by itself. Two things are not, and they are the ones that fail
+quietly:
+
+- **Contact points and the notification policy.** There is no file
+  provisioning for them here, so they exist only in `grafana.db` inside the
+  `alphaess-grafana-data` volume. Lose that volume and the alert rules
+  provision straight back while the routing does not — every rule then fires
+  into nothing, which is indistinguishable from healthy. That is the whole
+  reason this backup exists.
+- **The admin password.** `GF_SECURITY_ADMIN_PASSWORD` binds only at first
+  init (see ["Changing the Grafana admin password"](#changing-the-grafana-admin-password)),
+  so a restored volume keeps whatever password it was carrying.
+
+Annotations and the installed `volkovlabs-echarts-panel` plugin ride along too.
+
+[scripts/backup-grafana.sh](scripts/backup-grafana.sh) stops Grafana, tars the
+volume into `GRAFANA_BACKUP_HOST_DIR/grafana-<date>.tgz`, starts it again, and
+prunes archives older than `BACKUP_RETENTION_DAYS`.
+
+**Why it stops Grafana.** `grafana.db` is SQLite, written live, and Grafana
+ships no equivalent of `influx backup`. The same argument that rules out
+copying InfluxDB's files raw applies here, so the consistency has to come from
+there being no writer at all. The stop costs a few seconds in the middle of the
+night; a trap restarts Grafana even if the tar or the prune fails, so a bad run
+cannot leave it down.
+
+Set `GRAFANA_BACKUP_HOST_DIR` in `.env` to a folder your NAS backup tool
+already covers, as with the InfluxDB one. **Do not nest it inside
+`BACKUP_HOST_DIR`** — `backup-influxdb.sh` prunes every directory directly
+under that path once it ages past `BACKUP_RETENTION_DAYS`, and would delete
+this one along with it. A sibling folder is safe.
+
+DSM **Control Panel → Task Scheduler → Create → Scheduled Task → User-defined
+script**:
+
+- **General**: User = `root`
+- **Schedule**: Daily, first run time `00:45` (ahead of the `01:00` InfluxDB
+  backup, so the two never contend)
+- **Task Settings → Run command**:
+
+  ```sh
+  /volume1/docker/alphaess-collector/scripts/backup-grafana.sh
+  ```
+
+Test it once by hand first
+(`sudo /volume1/docker/alphaess-collector/scripts/backup-grafana.sh`) and
+confirm Grafana comes back:
+
+```sh
+sudo docker compose ps grafana
+```
+
+### Restoring Grafana
+
+```sh
+sudo docker compose stop grafana
+VOL=$(sudo docker inspect -f \
+  '{{range .Mounts}}{{if eq .Destination "/var/lib/grafana"}}{{.Source}}{{end}}{{end}}' \
+  "$(sudo docker compose ps -aq grafana)")
+sudo rm -rf "$VOL"/*
+sudo tar -xzf "$GRAFANA_BACKUP_HOST_DIR/grafana-<date>.tgz" -C "$VOL"
+sudo docker compose start grafana
+```
+
+Then check Alerting → Notification policies still delivers to the Telegram
+contact point — that is the part the backup exists for, so it is the part
+worth verifying.
+
 ## Updating
 
 ```sh
