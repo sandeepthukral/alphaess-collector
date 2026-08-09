@@ -74,15 +74,22 @@ Two more corrections while in there:
       `influx auth list` / `influx auth delete -i <id>` the old one. Delete only
       the row described `uptime-kuma: r alphaess` — the list also holds the admin
       token and the collector's rw token.
-- [ ] **Register the DSM task.** Task Scheduler → user-defined script, user
-      `root`, daily **03:00** (after daily-savings at 02:00), command
-      `/volume1/docker/alphaess-collector/scripts/daily-efficiency.sh`. Run it
-      once from the DSM list — that exercises DSM's minimal environment, which
-      is why the script carries its own `PATH` prelude.
-- [ ] **Check the Grafana notification policy.** Alerting → Notification
-      policies must point at a real contact point. Provisioned rules route
-      through the default policy; if it points nowhere, every alert in this
-      feature fires into silence. DEPLOY.md already records this trap.
+- [x] **Register the DSM task.** Done — registered at 03:00 as documented, and
+      it has run four consecutive nights.
+- [x] **Check the Grafana notification policy.** Done 2026-08-09: the default
+      policy delivers to a **Telegram Bot** contact point, reusing the channel
+      Uptime Kuma already notifies through, and its Test delivered. There are no
+      child policies, so the tree is a single node and every alert instance
+      reaches it regardless of labels — nothing to preview or match. Timings
+      left at the defaults (30s group wait, 5m group interval, 4h repeat), which
+      suit a once-nightly job. Both provisioned rules show up under Alerting →
+      Alert rules in Normal state, confirming the files were picked up.
+
+      Not provisioned, though: `grafana/provisioning/` covers datasources,
+      dashboards and rules, but neither contact points nor policies. This
+      routing lives only in Grafana's SQLite inside the `alphaess-grafana-data`
+      volume, which `backup-influxdb.sh` does not reach — lose that volume and
+      the rules come back while the routing silently does not.
 - [ ] **Merge the PR** once item 1 is pushed.
 
 ## 3. Check the DST fold by hand on 2026-10-26
