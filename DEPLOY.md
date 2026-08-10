@@ -1136,7 +1136,8 @@ the pipeline and independent of each other, plus a record of what went wrong.
 **Push** monitor URL and the collector pings it after each successful
 InfluxDB write — a dead-man's switch over the whole collect→write path. Set
 the Kuma monitor's grace period above `POLL_INTERVAL_SECONDS`; allow for the
-5-minute backoff cap, so ~10 minutes is a sensible floor or you will get
+2-minute backoff cap (`MAX_BACKOFF_SECONDS`, `DEFAULT_MAX_BACKOFF_S = 120`),
+so ~10 minutes is a sensible floor or you will get
 false alarms on a transient blip.
 
 The pings carry a status and a message, so the alert explains itself:
@@ -1146,12 +1147,43 @@ The pings carry a status and a message, so the alert explains itself:
 | Successful poll | `status=up&msg=OK` | — |
 | 2nd+ consecutive failure | `status=down` + the error | `ReadTimeout: HTTPSConnectionPool(host='openapi.alphaess.com'...): Read timed out. (read timeout=30)` |
 | 3rd+ consecutive failure | the error + a verdict | `SSLError: SSLEOFError(8, '[SSL: UNEXPECTED_EOF...' (3 consecutive failures) [upstream]` |
-| First poll after an outage | `status=up` + duration | `OK (recovered after 5 failures, 12m11s)` |
+| First poll after an outage | `status=up` + duration + the cause | `OK (recovered after 5 failures, 12m11s; fetch: ConnectionError: NameResolutionError... [local-dns])` |
 
 The first failure never pushes `down` — a single failed poll is usually an
 upstream blip the next poll rides out, and paging on it means being woken for
 something already fixed. From the second onwards the grace period would expire
 anyway, so this only changes *what the alert says*, not when it fires.
+
+**Why the recovery message repeats what the `down` message already said.**
+Because the `down` message is the one you cannot count on receiving. On
+2026-08-10 the collector failed three times in twelve minutes, every time on
+DNS (`Failed to resolve 'openapi.alphaess.com'`), and Kuma delivered none of
+the three `down` notifications:
+
+```
+[MONITOR] ERROR: Cannot send notification to My Telegram Alert (1)
+Error: getaddrinfo EAI_AGAIN api.telegram.org
+```
+
+Sending to Telegram means resolving `api.telegram.org` through the resolver
+that had just failed, from a container on the same NAS — and Kuma has no retry
+queue, so a notification that throws is simply gone. All three `up` messages
+arrived: by then DNS was working again, which is exactly what "up" means. The
+result was a phone showing three identical `OK (recovered after 2 failures,
+3m00s)` and no way to tell what had happened.
+
+That is not a DNS quirk. Any outage of the link the NAS reaches the internet
+through takes out the notification channel and the monitored path together,
+and the recovery notification is the one sent from the other side of it. So
+the message that survives by construction is the one that has to carry the
+diagnosis. It is the same argument as "Why this duplicates check 3" under
+check 4 below, applied to a channel rather than a check: the duplication is
+the point.
+
+Nothing about this is worth fixing on the delivery side. Pinning Telegram's
+addresses in `extra_hosts` trades a transient failure for a silent permanent
+one the day they rotate, and no local configuration reaches Telegram while the
+uplink is down.
 
 That matters because the failure modes are not equivalent and the phone should
 say which one you have. The exception alone does not settle it — a TLS EOF is

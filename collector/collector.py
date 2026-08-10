@@ -373,16 +373,35 @@ def write_health_event(write_api, bucket: str, sys_sn: str, event: str,
         log.warning("Health event write failed: %s", exc)
 
 
-def recovery_message(failures: int, outage_seconds: float) -> str:
+def recovery_message(failures: int, outage_seconds: float,
+                     cause: str = "") -> str:
     """Heartbeat message for a successful poll.
 
     Kuma sends an "up" notification when pings resume but cannot say what the
     outage was or how long it lasted, so carry that in the message itself.
+
+    `cause` -- the last failure, in the same "stage: summary [verdict]" shape
+    the "down" message uses -- is carried too, because the "down" notification
+    is the one that most often does not arrive. On 2026-08-10 three outages in
+    twelve minutes all had the same cause, DNS resolution failing on the NAS,
+    and Kuma could not send a single one of the "down" messages that said so:
+    reaching Telegram means resolving api.telegram.org through the resolver
+    that had just failed, so every send died with `getaddrinfo EAI_AGAIN` and
+    Kuma has no retry queue for notifications. The three "up" messages arrived
+    intact -- by then DNS was working again -- and said only "recovered after
+    2 failures", which is the half of the story that cannot act on itself.
+
+    That failure mode is not specific to DNS. Any outage of the link the NAS
+    reaches the internet through takes out the notification channel and the
+    thing being monitored together, and the "up" message is the one sent from
+    the other side of it. So the message that survives by construction is the
+    one that has to carry the diagnosis.
     """
     if not failures:
         return "OK"
+    detail = f"; {cause}" if cause else ""
     return (f"OK (recovered after {failures} failures, "
-            f"{format_duration(outage_seconds)})")
+            f"{format_duration(outage_seconds)}{detail})")
 
 
 def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
@@ -484,6 +503,9 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
     consecutive_failures = 0
     first_failure_at = 0.0
     verdict = ""
+    # The last failure, kept alive past the iteration that raised it so the
+    # recovery heartbeat can name it -- see recovery_message.
+    last_failure = ""
     while running:
         started = time.monotonic()
         # Which half of the poll is in flight. An exception says what went
@@ -500,8 +522,15 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                 stage = "write"
                 write_api.write(bucket=influx_bucket, record=point)
                 log.debug("Wrote point: %s", fields)
+                # verdict is appended here rather than stored with the
+                # failure: diagnose_network runs on a later poll than the one
+                # that first failed, so at the moment last_failure is set it
+                # does not exist yet.
+                cause = last_failure
+                if cause and verdict:
+                    cause = f"{cause} [{verdict}]"
                 send_heartbeat(heartbeat_url, msg=recovery_message(
-                    consecutive_failures, started - first_failure_at))
+                    consecutive_failures, started - first_failure_at, cause))
             else:
                 log.warning("No usable fields in response, skipping write")
             # An outage that ends on its own is otherwise silent: the failures
@@ -516,9 +545,11 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                      "outage_seconds": round(outage_seconds, 1)})
             consecutive_failures = 0
             verdict = ""
+            last_failure = ""
         except Exception as exc:
             consecutive_failures += 1
             summary = error_summary(exc)
+            last_failure = f"{stage}: {summary}"
             write_health_event(
                 write_api, influx_bucket, sys_sn, "failure",
                 {"failures": consecutive_failures, "error": summary},
