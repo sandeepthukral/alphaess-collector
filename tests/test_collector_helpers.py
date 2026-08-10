@@ -87,6 +87,23 @@ def test_recovery_message_after_an_outage():
     assert "15m05s" in msg
 
 
+def test_recovery_message_carries_the_cause():
+    msg = recovery_message(2, 180, "fetch: ConnectionError: EAI_AGAIN [upstream]")
+    assert "2 failures" in msg
+    assert "3m00s" in msg
+    assert "fetch: ConnectionError: EAI_AGAIN [upstream]" in msg
+
+
+def test_recovery_message_omits_an_empty_cause():
+    """No dangling separator when the outage healed before anything diagnosed
+    it -- the message still has to read as a sentence on a phone."""
+    assert recovery_message(2, 180) == "OK (recovered after 2 failures, 3m00s)"
+
+
+def test_a_cause_on_a_healthy_poll_is_ignored():
+    assert recovery_message(0, 0.0, "fetch: ConnectionError") == "OK"
+
+
 # --------------------------------------------------------------------------
 # parse_fields
 # --------------------------------------------------------------------------

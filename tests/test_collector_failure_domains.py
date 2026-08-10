@@ -225,6 +225,46 @@ def test_recovery_after_an_api_outage_is_recorded(harness):
     assert "recovered after 3 failures" in up[0]
 
 
+def test_the_recovery_heartbeat_names_what_broke(harness):
+    """The "up" message is the one that survives a link outage; see
+    recovery_message. Kuma could not deliver a single "down" notification on
+    2026-08-10 because sending one needed the DNS that had just failed, so
+    everything the operator learns has to be in here."""
+    def flaky(poll):
+        if poll <= 3:
+            return unreachable_api(poll)
+        return dict(GOOD_SAMPLE)
+
+    state = harness(fetch=flaky, stop_after=5)
+    up = [msg for status, msg in state["heartbeats"] if status == "up"]
+
+    assert "fetch: ConnectionError" in up[0], \
+        "the recovery message must name the stage and the error"
+    assert "[upstream]" in up[0], \
+        "and the verdict, which is computed on a later poll than the failure"
+
+
+def test_a_healed_outage_does_not_haunt_later_recoveries(harness):
+    """The cause is loop-scoped state like `verdict` and `stage` before it: a
+    second, unrelated outage must not be reported with the first one's error,
+    and a healthy ping must carry no cause at all."""
+    def flaky(poll):
+        if poll in (2, 3):
+            return unreachable_api(poll)
+        return dict(GOOD_SAMPLE)
+
+    state = harness(fetch=flaky, stop_after=6)
+    up = [msg for status, msg in state["heartbeats"] if status == "up"]
+
+    assert up[0] == "OK", "the first poll never failed"
+    recovery = [msg for msg in up if "recovered" in msg]
+    assert len(recovery) == 1
+    assert "fetch: ConnectionError" in recovery[0]
+    assert [msg for msg in up[up.index(recovery[0]) + 1:]] == ["OK"] * (
+        len(up) - up.index(recovery[0]) - 1), \
+        "polls after the recovery are plain OK, not a stale error"
+
+
 def test_stage_resets_once_the_write_recovers(harness):
     """A run of write failures must not leave later polls mislabelled.
 
