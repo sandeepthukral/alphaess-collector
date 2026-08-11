@@ -111,7 +111,7 @@ sudo docker compose start influxdb
 > `MAX_GAP_S` is 1200 s, so a gap over **20 minutes excludes that whole day**
 > from `daily_cost`. Backoff makes it worse — once the database is back the
 > collector may still be sleeping up to 300 s before it retries, so budget the
-> stop at 20 min *minus* 5 min of backoff. (`MIN_COVERAGE` 0.98 ≈ 29 min is the
+> stop at 20 min *minus* 5 min of backoff. (`MIN_COVERAGE` 0.96 ≈ 58 min is the
 > looser of the two limits; max-gap is the one that bites.) If the tar looks
 > like it will run long, `sudo docker compose stop collector` first and start it
 > afterwards — the gap is no smaller, but you are not also fighting backoff on

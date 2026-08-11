@@ -160,7 +160,7 @@ Pass it consistently. Reconstruction writes quarter rows under a different
 fetched both ways ends up holding both — see `CODE-REVIEW.md` #23. Both
 scheduled jobs pass it.
 
-`pricing.py` skips days already written and only stores days with ≥98% sample
+`pricing.py` skips days already written and only stores days with ≥96% sample
 coverage, so a range is cheap to re-run and self-heals days skipped for late
 prices or gaps. Optionally set `BATTERY_CAPACITY_KWH` in `.env` to also show
 each day's SoC change in kWh.

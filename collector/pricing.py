@@ -94,7 +94,7 @@ def _num_env(name: str, default: str, cast=float):
 
 # Complete-day gate. Both are settable via .env -- see .env.example.
 POLL_INTERVAL_S = _num_env("POLL_INTERVAL_SECONDS", "30", int)
-MIN_COVERAGE = _num_env("PRICING_MIN_COVERAGE", "0.98")
+MIN_COVERAGE = _num_env("PRICING_MIN_COVERAGE", "0.96")
 MAX_GAP_S = _num_env("PRICING_MAX_GAP_S", "1200")  # 20 min
 
 # Minimum fraction of the day that must be covered by price intervals. Unlike

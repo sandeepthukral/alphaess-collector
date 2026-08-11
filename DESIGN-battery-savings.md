@@ -298,7 +298,7 @@ For each **complete** day not already processed at the current `model_version`:
   *missing time*: `1 − (un-sampled head/tail + Σ gaps beyond 3× the poll
   interval) / local-day length` (DST-aware, 23/25 h days handled). Normal cadence
   and a skipped poll or two never count as missing.
-- Process a day only if **coverage ≥ 98%** *and* **max single gap ≤ 20 min**.
+- Process a day only if **coverage ≥ 96%** *and* **max single gap ≤ 20 min**.
   Scattered misses barely move an integral (linear interpolation self-corrects);
   one long contiguous gap distorts a specific price slot, so it's gated
   separately. Both thresholds are configurable (`PRICING_MIN_COVERAGE`,
