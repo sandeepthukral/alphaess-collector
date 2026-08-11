@@ -97,7 +97,7 @@ services:
       # Use the `:-` form, not a bare `-`: `:-` substitutes on empty as well as
       # unset, so a stray `PRICING_MAX_GAP_S=` line in .env falls back instead
       # of feeding an empty string to float().
-      PRICING_MIN_COVERAGE: ${PRICING_MIN_COVERAGE:-0.98}
+      PRICING_MIN_COVERAGE: ${PRICING_MIN_COVERAGE:-0.96}
       PRICING_MAX_GAP_S: ${PRICING_MAX_GAP_S:-1200}
       # Complete-day gates for efficiency.py, which runs from this same image
       # via scripts/daily-efficiency.sh. Same `:-` reasoning as above.

@@ -221,7 +221,7 @@ docker compose run --rm collector python prices.py  --backfill 2026-07-01 2026-0
 docker compose run --rm collector python pricing.py --backfill 2026-07-01 2026-07-19
 ```
 
-`pricing.py` skips days already written and only stores days with ≥98% sample
+`pricing.py` skips days already written and only stores days with ≥96% sample
 coverage *and* essentially complete prices, so re-running a range is cheap and
 self-healing (days skipped for late prices or gaps are retried once the data
 lands). Optional: set `BATTERY_CAPACITY_KWH` in `.env` to also express each
