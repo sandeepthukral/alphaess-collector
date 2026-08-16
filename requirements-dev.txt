@@ -2,6 +2,10 @@
 # awtrix-pusher/requirements.txt; install those too so tests import the real
 # modules rather than stubs.
 -r collector/requirements.txt
+# The dispatcher's Modbus client. Needed by the Layer C simulator test, which runs
+# pymodbus's own TCP server in-process -- the only layer where a simulator earns its keep,
+# and the one that catches the 0x0883/0x0885 class of error before it reaches an inverter.
+-r dispatch/requirements.txt
 
 pytest==9.1.1
 ruff==0.16.0

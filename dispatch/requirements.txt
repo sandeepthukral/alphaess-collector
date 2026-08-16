@@ -1,0 +1,21 @@
+# Deliberately separate from the collector's requirements. The collector never speaks
+# Modbus -- it reads the AlphaESS cloud API -- and the dispatcher is a separate image and
+# a separate compose service (DESIGN-dispatch.md §2). Mixing them would put a hardware
+# control dependency into a read-only process.
+#
+# Set up with:
+#   python3 -m venv dispatch/.venv
+#   dispatch/.venv/bin/pip install -r dispatch/requirements.txt
+#
+# The first round of hardware testing ran from a venv in a temp folder, which is why the
+# 2026-08-15 experiment could not simply be re-run. This one lives beside the code.
+#
+# NOT pinned to a patch version on purpose: the one API difference that bites is the
+# slave= -> device_id= rename, and the scripts here detect that at import time with
+# inspect.signature rather than depending on a specific release.
+pymodbus>=3.6
+
+# Same client and pin as the collector, so the two halves of this repo speak to InfluxDB the
+# same way. The translator reads bucket `planning`; the dispatcher writes `dispatch_state`
+# into `alphaess`.
+influxdb-client==1.49.0

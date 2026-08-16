@@ -12,14 +12,14 @@ testpaths = ["tests"]
 # The services import each other flat (`from prices import ...`), matching the
 # Dockerfile layout where every module lands in /app. Put both source dirs on
 # the path so tests import exactly what runs in production.
-pythonpath = ["collector", "awtrix-pusher"]
+pythonpath = ["collector", "awtrix-pusher", "dispatch"]
 addopts = "-q --strict-markers --strict-config"
 filterwarnings = ["error"]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["collector", "awtrix-pusher", "tests"]
+src = ["collector", "awtrix-pusher", "dispatch", "tests"]
 
 [tool.ruff.lint]
 select = [
