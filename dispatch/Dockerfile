@@ -20,7 +20,12 @@ COPY entrypoint.sh .
 # connection, which would steal the dispatcher's single connection if it were ever run inside
 # this container by mistake (section 1). Neither has any business in the running image.
 
-RUN useradd --create-home dispatch \
+# The UID is PINNED. Docker seeds a named volume's ownership from the image the first time it
+# creates it, and never again -- so `alphaess-dispatch-data` is already chowned to whatever
+# `useradd` picked on the day it was first deployed. Leaving the UID implicit means any future
+# edit that adds a user above this line shifts `dispatch` to 1001 and the rebuilt container
+# cannot write slots.json to its own volume, with the plan file simply going stale.
+RUN useradd --uid 1000 --create-home dispatch \
     && mkdir -p /data \
     && chown dispatch /data /app \
     && chmod +x entrypoint.sh

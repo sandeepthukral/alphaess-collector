@@ -121,6 +121,15 @@ class TestTranslate:
         with pytest.raises(PlanFormatError, match="planner has not run since"):
             T.translate(FakeQueryApi(records(NOW, 1)), "planning", NOW, 27900.0)
 
+    def test_a_plan_down_to_its_last_interval_blames_the_planner_too(self):
+        """The adjacent boundary to the lone-interval case, and it arrives by a different
+        road: the window holds a translatable plan, but all of it except the final interval
+        has already elapsed. That is a planner three hours overdue, and the message has to say
+        so rather than reporting the cadence it can no longer infer from one interval."""
+        lapsing = records(NOW - dt.timedelta(hours=1), 5)  # only the last still ends after NOW
+        with pytest.raises(PlanFormatError, match="planner has not run since"):
+            T.translate(FakeQueryApi(lapsing), "planning", NOW, 27900.0)
+
     def test_an_empty_window_names_the_bucket_and_the_range(self):
         with pytest.raises(PlanFormatError, match="no plan points in bucket 'planning'"):
             T.translate(FakeQueryApi([]), "planning", NOW, 27900.0)
@@ -155,6 +164,20 @@ class TestAtomicWrite:
         T.atomic_write(path, {"slots": []})
         assert json.loads(path.read_text()) == {"slots": []}
         assert not list(path.parent.glob("*.tmp")), "temp file left behind"
+
+    def test_a_failed_write_leaves_no_debris(self, tmp_path, monkeypatch):
+        """The half-written file must not survive next to the real one. An operator finding
+        `slots.json.tmp` on the volume has to be able to read it as evidence of a write
+        happening now, not of one that failed at some unknown point in the past."""
+        path = tmp_path / "slots.json"
+
+        def boom(self, *a, **kw):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(Path, "replace", boom)
+        with pytest.raises(OSError, match="no space"):
+            T.atomic_write(path, {"slots": []})
+        assert not list(tmp_path.glob("*.tmp")), "temp file left behind by a failed write"
 
 
 class Pings:
@@ -202,6 +225,18 @@ class TestRun:
         path.write_text('{"previous": true}')
         assert _run(FakeQueryApi([], error=PlanFormatError("boom")), path, pings) == 1
         assert json.loads(path.read_text()) == {"previous": True}
+
+    def test_a_database_failure_still_reports_monitor_2(self, tmp_path, pings):
+        """Not every read failure is a format failure. An expired token, a DNS miss or a NAS
+        reboot arrives from the Influx client as an HTTP or socket error, and an uncaught one
+        would end the run having pinged nothing at all -- leaving Kuma to report the silence
+        as "no ping received", the one message that cannot say what broke."""
+        dead = FakeQueryApi([], error=ConnectionRefusedError("[Errno 111] 192.168.68.105:8086"))
+        assert _run(dead, tmp_path / "slots.json", pings) == 1
+        status, msg = pings.by_url(PLAN_URL)[0]
+        assert status == "down"
+        assert "ConnectionRefusedError" in msg and "8086" in msg
+        assert pings.by_url(SLOTS_URL) == [], "a read failure is not evidence about the writer"
 
     def test_a_read_failure_reports_monitor_2_and_stays_quiet_on_3(self, tmp_path, pings):
         """"The plan could not be read" is not evidence about the translator."""

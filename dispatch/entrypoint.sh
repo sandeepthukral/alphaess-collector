@@ -24,6 +24,21 @@ SLOTS="${SLOTS_PATH:-/data/slots.json}"
 # nothing and keeps `slots.json` within an hour of the newest plan.
 INTERVAL="${TRANSLATE_INTERVAL_S:-3600}"
 
+# Validated, because `set -e` makes a bad value fatal to the refresh loop and NOT to the
+# container: `sleep abc` exits non-zero, the subshell dies, and the scheduler keeps dispatching
+# PID 1 as if nothing happened -- against a slots.json that now silently never refreshes. That
+# is the worst shape this failure could take, and a typo in one compose variable is enough.
+#
+# Note this is not `sleep ... || true`, which is the obvious fix and the wrong one: it keeps
+# the loop alive by turning the delay into a no-op, and the translator would then re-query
+# InfluxDB as fast as the NAS can answer.
+case "$INTERVAL" in
+    ''|*[!0-9]*|0)
+        echo "TRANSLATE_INTERVAL_S='$INTERVAL' is not a positive integer -- using 3600" >&2
+        INTERVAL=3600
+        ;;
+esac
+
 # Absolute paths, and the working directory is /data rather than /app: the audit log and the
 # heartbeat file are opened relative to the cwd, and both belong on the volume.
 python -u /app/translate.py --slots "$SLOTS" || \

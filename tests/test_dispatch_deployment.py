@@ -92,6 +92,25 @@ def test_the_scheduler_is_the_process_that_receives_sigterm():
     assert "exec python -u /app/scheduler.py" in ENTRYPOINT
 
 
+def test_the_container_user_has_a_pinned_uid():
+    """Docker seeds a named volume's ownership from the image only when it CREATES the volume.
+    `alphaess-dispatch-data` already exists on the NAS, chowned to the UID `useradd` happened
+    to pick. An implicit UID means a later edit adding a user above it shifts this one, and the
+    rebuilt container cannot write slots.json to its own volume."""
+    assert "--uid 1000" in DOCKERFILE
+
+
+def test_the_refresh_interval_is_validated_before_it_reaches_sleep():
+    """Under `set -e` a bad TRANSLATE_INTERVAL_S kills the background loop but NOT the
+    container: the scheduler keeps dispatching as PID 1 against a slots.json that silently
+    stops refreshing. One typo in a compose variable is enough to get there."""
+    assert "TRANSLATE_INTERVAL_S" in ENTRYPOINT
+    assert "*[!0-9]*" in ENTRYPOINT, "the interval reaches `sleep` unvalidated"
+    assert "sleep \"$INTERVAL\" ||" not in ENTRYPOINT, (
+        "`|| true` keeps the loop alive by removing the delay -- it would re-query InfluxDB "
+        "as fast as the NAS can answer")
+
+
 def test_a_failed_first_translation_does_not_stop_the_container():
     """A stale slots.json is a monitored, gracefully-degrading state. A container that refuses
     to start because InfluxDB blinked is a worse failure than the one it avoids."""

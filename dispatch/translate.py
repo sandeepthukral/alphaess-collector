@@ -63,11 +63,19 @@ def atomic_write(path: Path, doc: dict) -> None:
 
     The temp file is a sibling, not in /tmp: `Path.replace` is only atomic within a filesystem,
     and in the container /tmp and the slots volume are different mounts.
+
+    A failed write takes the temp file with it. The volume is small and long-lived, and the
+    debris would otherwise sit next to `slots.json` looking like a real artefact -- a truncated
+    plan is exactly the thing somebody debugging a quiet battery does not need to find.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(doc, indent=1) + "\n")
-    tmp.replace(path)
+    try:
+        tmp.write_text(json.dumps(doc, indent=1) + "\n")
+        tmp.replace(path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def upcoming(intervals: list, now: dt.datetime) -> list:
@@ -99,9 +107,14 @@ def translate(query_api, bucket: str, now: dt.datetime, capacity_wh: float) -> t
             f"a lone plan interval at {raw[0].start.isoformat()} in the window ending "
             f"{(now + LOOKAHEAD).isoformat()} -- the planner has not run since")
     intervals = upcoming(raw, now)
-    if not intervals:
+    # And again after the trim, for the same reason: a plan on its last interval is a plan
+    # about to lapse, not a plan with a broken cadence. The two guards look redundant and are
+    # not -- this one fires on a plan that WAS translatable an hour ago and has since drained
+    # past `now`, which is what a stalled planner actually looks like from here.
+    if len(intervals) < 2:
         raise PlanFormatError(
-            f"the newest plan ends before {now.isoformat()} -- the planner has not run since")
+            f"the newest plan is down to {len(intervals)} interval(s) after "
+            f"{now.isoformat()} -- the planner has not run since")
     return build_document(intervals, capacity_wh, now)
 
 
@@ -136,6 +149,17 @@ def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.da
         # field from a dead NAS.
         log.error("plan unreadable: %s", e)
         send_heartbeat(plan_url, "down", str(e)[:200])
+        return 1
+    except Exception as e:
+        # Deliberately broad. `from_influx` speaks `PlanFormatError`, but the client under it
+        # speaks HTTP: an expired token, a DNS failure or a NAS reboot arrives as an
+        # `ApiException` or a socket error, and letting those escape would exit the run having
+        # pinged NOTHING. Kuma would eventually notice the silence, but "no ping received" is
+        # the one message that cannot say whether the planner, the database or the credentials
+        # broke -- which is the whole reason this module pings at all. The type name goes in
+        # the message because it is often the only part of an HTTP failure worth reading.
+        log.exception("plan read failed")
+        send_heartbeat(plan_url, "down", f"{type(e).__name__}: {e}"[:200])
         return 1
     send_heartbeat(plan_url, "up", f"plan_run {doc['plan_run']}")
 
