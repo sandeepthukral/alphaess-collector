@@ -36,9 +36,8 @@ import logging
 import os
 import sys
 from pathlib import Path
-from urllib.parse import urlencode, urlsplit, urlunsplit
-from urllib.request import urlopen
 
+from heartbeat import send_heartbeat
 from plan import PlanFormatError, from_influx, interval_minutes, newest_by_interval
 from translator import build_document
 
@@ -57,28 +56,6 @@ LOOKAHEAD = dt.timedelta(hours=48)
 # places and any change has to be made in both on the same day. 27,900 is the commandable
 # capacity, not the pack's absolute ceiling -- see DESIGN-dispatch.md section 4.1.
 DEFAULT_CAPACITY_WH = 27900.0
-
-
-def send_heartbeat(url: str, status: str = "up", msg: str = "OK", timeout: float = 5) -> None:
-    """Ping a Kuma 'Push' monitor. Never raises.
-
-    The same shape as `collector/collector.py:407`, including the rebuilt query string -- the
-    push URL Kuma displays already carries `?status=up&msg=OK&ping=`, and appending to it
-    makes Express parse `status` as an array, which matches neither value, so every ping
-    registers as DOWN. Rebuild the query rather than adding to it.
-
-    Written against `urllib` rather than `requests` on purpose: this image ships pymodbus and
-    influxdb-client and nothing else, and a monitoring convenience is a poor reason to add a
-    dependency to a process that drives hardware.
-    """
-    if not url:
-        return
-    target = urlunsplit(urlsplit(url)._replace(query=urlencode({"status": status, "msg": msg})))
-    try:
-        with urlopen(target, timeout=timeout):
-            pass
-    except Exception as exc:
-        log.warning("heartbeat ping failed: %s", exc)
 
 
 def atomic_write(path: Path, doc: dict) -> None:

@@ -7,6 +7,10 @@ handful of properties an operator depends on at 03:00:
   - a failed run leaves the previous slots.json intact,
   - a reader never sees a half-written file,
   - and the monitor that goes down names the cause, rather than going silent.
+
+The ping itself is `dispatch/heartbeat.py`, shared with the control loop and tested in
+`test_dispatch_monitors.py`. Here it is faked, so these tests are about WHICH monitor speaks
+and WHEN, never about the HTTP.
 """
 from __future__ import annotations
 
@@ -211,30 +215,3 @@ class TestRun:
         assert pings.by_url(SLOTS_URL) == []
 
 
-class TestSendHeartbeat:
-    def test_no_url_is_not_an_error(self):
-        T.send_heartbeat("", "up", "OK")
-
-    def test_the_query_string_is_rebuilt_not_appended(self, monkeypatch):
-        """Kuma's own push URL already carries ?status=up&msg=OK&ping=. Appending makes
-        Express parse status as an array, which matches neither value, so every ping registers
-        as DOWN -- the bug collector.py's send_heartbeat exists to avoid."""
-        seen = []
-
-        class Resp:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-        monkeypatch.setattr(T, "urlopen", lambda url, timeout=5: seen.append(url) or Resp())
-        T.send_heartbeat("http://kuma/api/push/abc?status=up&msg=OK&ping=", "down", "why")
-        assert seen == ["http://kuma/api/push/abc?status=down&msg=why"]
-
-    def test_a_failed_ping_never_raises(self, monkeypatch):
-        def boom(url, timeout=5):
-            raise OSError("no route to host")
-
-        monkeypatch.setattr(T, "urlopen", boom)
-        T.send_heartbeat("http://kuma/api/push/abc", "up", "OK")
