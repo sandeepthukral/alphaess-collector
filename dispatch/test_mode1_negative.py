@@ -70,45 +70,29 @@ except ImportError:
 _PARAMS = inspect.signature(AsyncModbusTcpClient.read_holding_registers).parameters
 _ID_KWARG = "device_id" if "device_id" in _PARAMS else "slave"
 
-# --- dispatch block, 0x0880-0x0888 -------------------------------------------------
-REG_START = 2176           # 0x0880  1 word
-REG_POWER = 2177           # 0x0881  2 words, 32000 offset, >0 discharge / <0 charge
-REG_MODE = 2181            # 0x0885  1 word   (0x0883-84 is reactive power, unused here)
-REG_SOC = 2182             # 0x0886  1 word,  raw = pct / 0.4
-REG_TIME = 2183            # 0x0887  2 words, seconds -- the dead man's switch
+# Addresses and encodings come from `registers.py` -- imported, never re-transcribed. An
+# earlier copy of this script carried its own table, which is how 0x0883 (reactive power) once
+# stood in for the mode register: two tables, one of them wrong, and nothing comparing them.
+# The import works when the script is run by path because its own directory leads sys.path.
+import registers as R  # noqa: E402  -- after the pymodbus guard, which must fail first
 
-# --- measurement -------------------------------------------------------------------
-REG_GRID_POWER = 33        # 0x0021  2 words, signed, W. Positive = importing.
-REG_BATTERY_SOC = 258      # 0x0102  1 word,  raw / 10 -> %
-REG_BATTERY_POWER = 294    # 0x0126  1 word,  signed, W. Positive = discharging.
-REG_PV_METER = 161         # 0x00A1  2 words, signed, W. The AC-coupled PV meter --
-                           # the DC MPPT registers read 0 forever on this site.
-
-POWER_OFFSET = 32000
+# THE SIGN CONVENTION HERE IS THE REGISTER'S, NOT `registers.Command`'s.
+#
+# This script speaks in raw dispatch terms -- `watts` below is negative for charging, matching
+# 0x0881 -- because its whole subject is what the inverter does with a genuinely negative
+# Pdispatch. `Command` flips that to charging-positive for the dashboards. Both conventions
+# are correct in their own layer; the flip is deliberate and lives in `registers.encode_power`,
+# which this script therefore does NOT use.
 
 # Thresholds. All in watts unless noted.
 MIN_SURPLUS = 200          # below this there is nothing for Mode 1 to charge from
 MARGIN = 2000              # how far the command must exceed surplus to be decisive
 MIN_MARGIN = 1500          # ...and the floor below which we refuse to run at all
-MAX_POWER = 5000           # inverter ceiling
+MAX_POWER = 5000           # inverter ceiling. Same physical fact as slots.HARD_MAX_POWER_W;
+                           # not imported, so this script stays runnable on its own.
 IMPORT_CONFIRMED = 500     # grid import that cannot be read as measurement noise
 MAX_SOC = 85               # above this there is no room to charge
 SOLAR_JITTER = 300         # baseline solar spread that means a cloud is moving through
-
-
-def decode(regs, signed=False):
-    if len(regs) == 1:
-        value, bits = regs[0], 16
-    else:
-        value, bits = (regs[0] << 16) | regs[1], 32
-    if signed and value >= (1 << (bits - 1)):
-        value -= 1 << bits
-    return value
-
-
-def encode_int32(value):
-    value &= 0xFFFFFFFF
-    return [(value >> 16) & 0xFFFF, value & 0xFFFF]
 
 
 class Inverter:
@@ -119,7 +103,7 @@ class Inverter:
         r = await self.c.read_holding_registers(addr, **{"count": count, _ID_KWARG: self.slave})
         if r.isError():
             raise OSError(f"read {addr} failed: {r}")
-        return decode(r.registers, signed)
+        return R.decode(r.registers, signed)
 
     async def _write(self, addr, values):
         if self.dry_run:
@@ -130,26 +114,27 @@ class Inverter:
     async def sample(self):
         return {
             "time": datetime.now().strftime("%H:%M:%S"),
-            "soc_pct": await self._read(REG_BATTERY_SOC) / 10,
-            "battery_w": await self._read(REG_BATTERY_POWER, signed=True),
-            "grid_w": await self._read(REG_GRID_POWER, 2, signed=True),
-            "solar_w": await self._read(REG_PV_METER, 2, signed=True),
-            "d_start": await self._read(REG_START),
-            "d_mode": await self._read(REG_MODE),
-            "d_power_w": await self._read(REG_POWER, 2) - POWER_OFFSET,
-            "d_soc_pct": round(await self._read(REG_SOC) * 0.4, 1),
-            "d_time_s": await self._read(REG_TIME, 2),
+            "soc_pct": await self._read(R.REG_BATTERY_SOC) / 10,
+            "battery_w": await self._read(R.REG_BATTERY_POWER, signed=True),
+            "grid_w": await self._read(R.REG_GRID_POWER, 2, signed=True),
+            "solar_w": await self._read(R.REG_PV_METER, 2, signed=True),
+            "d_start": await self._read(R.REG_START),
+            "d_mode": await self._read(R.REG_MODE),
+            # Register convention, not Command's -- see the note beside the import.
+            "d_power_w": await self._read(R.REG_POWER, 2) - R.POWER_OFFSET,
+            "d_soc_pct": round(await self._read(R.REG_SOC) * R.SOC_STEP, 1),
+            "d_time_s": await self._read(R.REG_TIME, 2),
         }
 
     async def dispatch(self, mode, watts, target_soc, duration_s):
-        await self._write(REG_MODE, [mode])
-        await self._write(REG_POWER, encode_int32(POWER_OFFSET + watts))
-        await self._write(REG_SOC, [round(target_soc / 0.4)])
-        await self._write(REG_TIME, encode_int32(duration_s))
-        await self._write(REG_START, [1])
+        await self._write(R.REG_MODE, [mode])
+        await self._write(R.REG_POWER, R.encode_int32(R.POWER_OFFSET + watts))
+        await self._write(R.REG_SOC, R.encode_soc(target_soc))
+        await self._write(R.REG_TIME, R.encode_int32(duration_s))
+        await self._write(R.REG_START, [1])
 
     async def release(self):
-        await self._write(REG_START, [0])
+        await self._write(R.REG_START, [0])
 
 
 def house_load(s):
