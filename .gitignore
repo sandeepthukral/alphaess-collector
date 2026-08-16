@@ -222,3 +222,13 @@ __marimo__/
 
 # default local target for scripts/backup-influxdb.sh (non-NAS docker compose up)
 /backups
+
+# Real plan archive snapshotted from InfluxDB for dispatch translator testing.
+# The `plan` measurement carries load_forecast_wh -- household occupancy data at 15-minute
+# resolution, showing when the house is empty and which weeks we were away. This repo is
+# PUBLIC. Same reasoning battery-planning applies by using invented load/PV numbers in its
+# own golden fixtures.
+#
+# Committed fixtures live in tests/fixtures/plans/ and are SYNTHETIC only (synthetic_*.txt).
+# See PLAN-repo-seams.md and DESIGN-dispatch.md.
+dispatch/testdata/
