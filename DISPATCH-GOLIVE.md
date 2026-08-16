@@ -146,12 +146,23 @@ problem and a real one.
 
 - [x] `dispatch/test_mode1_negative.py --live` — **run 2026-08-16 13:51.** Grid import ruled
       out (median +8 W against a command 2 kW above surplus), so DEMAND is dead and Mode 1 is
-      harmless. But CAP is unproven: the battery tracked surplus identically before, during
-      and after the command, so "accepted and ignored" fits every sample. **§4.1's `self` row
-      stays as a release, and the goldens do not regenerate.** See §9 open question 1
-- [ ] The follow-up that would actually settle it: Mode 1 while **house load exceeds PV**,
-      where a release discharges and Mode 1 claims it cannot. Needs no sun, so it is not
-      weather-blocked the way the first run was
+      harmless. CAP unproven from this run alone: the battery tracked surplus identically
+      before, during and after, so "accepted and ignored" fitted every sample
+- [x] `--undercommand` — **run 2026-08-16 14:22, and this one settles it.** 402 W commanded
+      into a ~1,220 W surplus: charge held 331–361 W while PV swung 1,657–2,780 W, and export
+      rose ~1,014 W. Surplus moved 1,172 W, charge moved 30 W. **Mode 1 is a real, honoured,
+      PV-only charge setpoint** — it exports rather than exceed the setpoint, so it can never
+      import. **§4.1's `self` row still stays a release** (an obeyed setpoint is a charge
+      command, not self-consumption) **and the goldens do not regenerate.** See §9 question 1
+- [ ] Explain the release transient: one sample at 14:27:05, immediately after `start=0`,
+      read **−4,791 W battery with +3,555 W grid import**, gone by the next sample 11 s later.
+      ~10 Wh and internally consistent (load reconciles at 694 W), so probably real rather
+      than a read artefact. The dispatcher releases on every slot transition, so this wants
+      pinning down — sample at 2 s across a release, or cross-check the collector's own
+      Influx series, which measures the same inverter independently
+- [ ] Whether Mode 1 honours its **SoC target** is still untested and now matters, since the
+      power setpoint turned out to be real. ~2.8 kWh from 73 % to 83 %, so it needs its own
+      long run rather than a 4-minute window
 - [ ] Delete Grafana panel 8 when the app's price bands stop mattering (a go-live change)
 - [ ] Plan-vs-actual reconciliation, monitor #9 (§5.4) — the daily job that catches "every
       monitor green, battery not following the plan"
