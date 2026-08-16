@@ -1,0 +1,123 @@
+{
+ "reviewed_on": "2026-08-16",
+ "capacity_wh": 27900.0,
+ "generated_at": "2026-08-16T12:00:00Z",
+ "runs": [
+  {
+   "plan_run": "2026-07-30T17:26:14+02:00",
+   "reason": "oldest run -- `+02:00` plan_run tag",
+   "slots": 68,
+   "actions": {
+    "charge": 22,
+    "discharge": 38,
+    "hold": 8
+   },
+   "warnings": [],
+   "digest": "5e7db58a5d84cbe43663593bfaa3dc0b05733a5fc4166bbe71e7850c3edaf197"
+  },
+  {
+   "plan_run": "2026-08-05T06:05:03Z",
+   "reason": "lowest SoC -- reserve-binding tail",
+   "slots": 48,
+   "actions": {
+    "charge": 24,
+    "discharge": 19,
+    "hold": 3,
+    "self": 2
+   },
+   "warnings": [],
+   "digest": "6a18b719bd210659c4bc323aa665a9c6d3d63742a48754d12a0d157987f83901"
+  },
+  {
+   "plan_run": "2026-08-05T12:05:03Z",
+   "reason": "adds 2 previously-uncovered `self` intervals",
+   "slots": 84,
+   "actions": {
+    "charge": 32,
+    "discharge": 38,
+    "hold": 10,
+    "self": 4
+   },
+   "warnings": [],
+   "digest": "a1359f89819c151937997ec4f8034528bb8351a65d5b6137ab1668b02c67dc3c"
+  },
+  {
+   "plan_run": "2026-08-05T15:05:03Z",
+   "reason": "consecutive with 2026-08-05T12:05:03Z -- overlapping horizons",
+   "slots": 75,
+   "actions": {
+    "charge": 24,
+    "discharge": 39,
+    "hold": 10,
+    "self": 2
+   },
+   "warnings": [],
+   "digest": "cfdb671fe022162a886eaa545dcfd16af8ecebd918a05272fce39172be1341ee"
+  },
+  {
+   "plan_run": "2026-08-06T12:05:04Z",
+   "reason": "deepest total charge",
+   "slots": 81,
+   "actions": {
+    "charge": 33,
+    "discharge": 38,
+    "hold": 8,
+    "self": 2
+   },
+   "warnings": [],
+   "digest": "7b3ac4b357838f6f88733b8b3c98cc31e84d06998208f4de21f506411aa72d6e"
+  },
+  {
+   "plan_run": "2026-08-07T06:05:02Z",
+   "reason": "adds 2 previously-uncovered `self` intervals",
+   "slots": 47,
+   "actions": {
+    "charge": 22,
+    "discharge": 19,
+    "hold": 3,
+    "self": 3
+   },
+   "warnings": [],
+   "digest": "0feafd8586336ef697f0bffb24978e875b254875adb11296b2d96cff240c21e4"
+  },
+  {
+   "plan_run": "2026-08-09T09:05:02Z",
+   "reason": "adds 2 previously-uncovered `self` intervals",
+   "slots": 45,
+   "actions": {
+    "charge": 20,
+    "discharge": 19,
+    "hold": 4,
+    "self": 2
+   },
+   "warnings": [],
+   "digest": "b68cf3619ecac989c82dcc3e8a6890982b53288796c5f0cfc09e349375d4ea82"
+  },
+  {
+   "plan_run": "2026-08-13T15:05:03Z",
+   "reason": "deepest total discharge",
+   "slots": 69,
+   "actions": {
+    "charge": 22,
+    "discharge": 40,
+    "hold": 5,
+    "self": 2
+   },
+   "warnings": [],
+   "digest": "057795cb728ba22972f475b6d8d614b1188554b8465d9d5d96306ed05c464422"
+  },
+  {
+   "plan_run": "2026-08-15T21:05:05Z",
+   "reason": "newest run in the archive",
+   "slots": 47,
+   "actions": {
+    "charge": 22,
+    "discharge": 19,
+    "hold": 4,
+    "self": 2
+   },
+   "warnings": [],
+   "digest": "cd839107f8724d8343d9cbc93fcd73fe571872b6b9639880ad489ff89ade979e"
+  }
+ ]
+}

@@ -1,0 +1,90 @@
+{
+ "warnings": [],
+ "document": {
+  "generated_at": "2026-08-16T12:00:00Z",
+  "plan_run": "synthetic_negative_prices",
+  "plan_runs": [
+   "synthetic_negative_prices"
+  ],
+  "horizon_end": "2026-04-12T14:00:00Z",
+  "interval_minutes": 15,
+  "capacity_wh": 27900.0,
+  "slots": [
+   {
+    "start": "2026-04-12T10:00:00Z",
+    "end": "2026-04-12T10:15:00Z",
+    "action": "charge",
+    "power_w": 4800,
+    "target_soc": 25.5
+   },
+   {
+    "start": "2026-04-12T10:15:00Z",
+    "end": "2026-04-12T10:30:00Z",
+    "action": "charge",
+    "power_w": 4800,
+    "target_soc": 29.6
+   },
+   {
+    "start": "2026-04-12T10:30:00Z",
+    "end": "2026-04-12T10:45:00Z",
+    "action": "charge",
+    "power_w": 4800,
+    "target_soc": 33.6
+   },
+   {
+    "start": "2026-04-12T10:45:00Z",
+    "end": "2026-04-12T11:00:00Z",
+    "action": "charge",
+    "power_w": 4800,
+    "target_soc": 37.7
+   },
+   {
+    "start": "2026-04-12T11:00:00Z",
+    "end": "2026-04-12T11:15:00Z",
+    "action": "charge",
+    "power_w": 4800,
+    "target_soc": 41.7
+   },
+   {
+    "start": "2026-04-12T11:15:00Z",
+    "end": "2026-04-12T11:30:00Z",
+    "action": "charge",
+    "power_w": 4800,
+    "target_soc": 45.8
+   },
+   {
+    "start": "2026-04-12T11:30:00Z",
+    "end": "2026-04-12T11:45:00Z",
+    "action": "charge",
+    "power_w": 4800,
+    "target_soc": 49.8
+   },
+   {
+    "start": "2026-04-12T11:45:00Z",
+    "end": "2026-04-12T12:00:00Z",
+    "action": "charge",
+    "power_w": 4800,
+    "target_soc": 53.8
+   },
+   {
+    "start": "2026-04-12T12:00:00Z",
+    "end": "2026-04-12T12:15:00Z",
+    "action": "charge",
+    "power_w": 4800,
+    "target_soc": 57.9
+   },
+   {
+    "start": "2026-04-12T12:15:00Z",
+    "end": "2026-04-12T12:30:00Z",
+    "action": "charge",
+    "power_w": 4800,
+    "target_soc": 61.9
+   },
+   {
+    "start": "2026-04-12T12:30:00Z",
+    "end": "2026-04-12T14:00:00Z",
+    "action": "hold"
+   }
+  ]
+ }
+}
