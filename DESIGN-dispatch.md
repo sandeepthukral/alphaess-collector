@@ -638,21 +638,29 @@ No extra Modbus traffic — this is publishing a read it already did.
 
 **Decode at write time, not in Flux.** Store both:
 
-| Field | Type | From | Example |
-|---|---|---|---|
-| `dispatch_active` | int 0/1 | `0x0880` | `1` |
-| `mode` | int | `0x0885` | `2` |
-| `mode_name` | string | decoded | `"SoC control"` |
-| `action` | string | decoded | `"charging from grid"` |
-| `setpoint_w` | int, signed | `raw − 32000`, **sign-flipped** | `−2500` → `+2500` |
-| `target_soc_pct` | float | `raw × 0.4` | `78.0` |
-| `duration_s` | int | `0x0887/8` | `900` |
-| `expires_at` | int, unix s | write time + duration | — |
-| `slot_start` | int, unix s | the slot being served | — |
-| `plan_run` | string | the plan that slot came from | `"2026-08-15T15:00:00Z"` |
-| `raw_0880`…`raw_0888` | int | verbatim | — |
+| Field | Type | From | Written | Example |
+|---|---|---|---|---|
+| `dispatch_active` | int | `0x0880`, verbatim | every tick | `1` |
+| `mode` | int | `0x0885` | every tick | `2` |
+| `mode_name` | string | decoded | every tick | `"SoC control"` |
+| `action` | string | decoded | every tick | `"charging from grid"` |
+| `setpoint_w` | int, signed | `raw − 32000`, **sign-flipped** | every tick | `−2500` → `+2500` |
+| `target_soc_pct` | float | `raw × 0.4` | every tick | `78.0` |
+| `duration_s` | int | `0x0887/8` | every tick | `900` |
+| `raw_0880`…`raw_0888` | int | verbatim | every tick | — |
+| `expires_at` | int, unix s | write time + duration | **only while active** | — |
+| `slot_start` | int, unix s | the slot being served | **only when serving one** | — |
+| `slot_action` | string | the slot being served | **only when serving one** | `"discharge"` |
+| `plan_run` | string | the plan that slot came from | **only when known** | `"2026-08-15T15:00:00Z"` |
 
-Three things about that table are load-bearing:
+Four things about that table are load-bearing:
+
+- **The `Written` column is a contract with every query, not documentation.** The last four
+  fields stop being written the moment there is nothing to say, and §7.3's third guard is
+  entirely about what that does to a panel. `dispatch_active` is in the first group and is
+  the raw register word rather than a bool: the dispatcher only ever writes 0 or 1, but the
+  AlphaESS app writes this register too, and a readback of anything else is precisely the
+  case worth seeing. Test it as `!= 0`, never `== 1`.
 
 - **`setpoint_w` is flipped into the dashboard's convention.** The register counts discharge
   positive; every other panel on this dashboard counts charging positive — panel 9 already
@@ -716,13 +724,35 @@ forever, and a panel querying `range(start: -1h) |> last()` will cheerfully rend
 that expired fifty minutes ago as the current state of the battery. That is worse than a
 blank panel: it is a confident wrong answer, in the one place you go to check.
 
-Two guards, both required:
+Three guards, all required:
 
 1. **Query a short window.** `range(start: -5m) |> last()` — five loop iterations. Past that
    the panel goes to No data.
 2. **Map No data to a loud value.** `NO DISPATCHER` in red, via the stat panel's
    `noValue` option, not an empty cell. The existing "Plan age" stat is the precedent for
    treating age as a first-class reading rather than an absence.
+3. **Treat a stale *field* as its own case.** Guards 1 and 2 assume staleness is
+   all-or-nothing. It is not: the conditional fields in §7.1's table stop being written while
+   everything beside them keeps flowing, so `last()` returns each field at a *different*
+   timestamp and the point a panel thinks it is reading never existed.
+
+   Two consequences, and both were shipped as bugs before being caught in review:
+
+   - **`pivot(rowKey: ["_time"], …)` splits into two rows** — one at the live tick, one at
+     whenever the conditional field was last written, each blank where the other is filled.
+     A table built by mapping over that renders every row twice for as long as the stale
+     field stays inside the window. So a pivot must filter to fields written on every tick,
+     and the moment a query needs a conditional field it needs guard 3 explicitly.
+   - **A `last()` on a conditional field alone reads a value with no present tense.**
+     `expires_at` outlives the command that set it, so counting it down turns a panel red
+     and reports a healthy dispatcher as stopped after every normal release.
+
+   The test is `exists` on the conditional field **and** on an unconditional one, which
+   passes only when the same tick wrote both. Note this is not the same as testing
+   `dispatch_active` — a loop that dies mid-command leaves both fields stale together, at one
+   shared timestamp, and that case must still render. Distinguishing "no command" from "the
+   dispatcher stopped" is the entire job of these panels, and the two look identical unless
+   the query asks the question this way.
 
 Note that `Released — following house` and `NO DISPATCHER` describe the *same register
 contents* — `start=0`, the point §4.1 already flags. Only the freshness of the point
