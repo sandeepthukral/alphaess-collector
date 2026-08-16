@@ -24,7 +24,8 @@ import datetime as dt
 import json
 from pathlib import Path
 
-from plan import PlanFormatError, PlanInterval
+from plan import PlanFormatError, PlanInterval, run_time
+from plan import iso_z as _iso
 
 SCHEMA = 1
 
@@ -39,10 +40,6 @@ _FLOAT_FIELDS = (
 )
 
 
-def _iso(t: dt.datetime) -> str:
-    return t.astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
 def run_filename(plan_run: str) -> str:
     """A filesystem-safe name for a run tag.
 
@@ -50,7 +47,7 @@ def run_filename(plan_run: str) -> str:
     plus signs both appear. Both are legal on this filesystem and neither is legal everywhere,
     and a corpus that only unpacks on macOS would be a poor test fixture.
     """
-    safe = plan_run.replace(":", "").replace("+", "p").replace("-", "").replace("Z", "Z")
+    safe = plan_run.replace(":", "").replace("+", "p").replace("-", "")
     return f"run_{safe}.json"
 
 
@@ -121,4 +118,8 @@ def load_all(directory: Path | None = None) -> list[tuple[list[PlanInterval], di
     if not d.is_dir():
         return []
     loaded = [load_run(p) for p in sorted(d.glob("run_*.json"))]
-    return sorted(loaded, key=lambda pair: pair[1]["plan_run"])
+    # Ordered by PARSED tag, never by the string. The archive's oldest runs carry `+02:00`
+    # and the rest carry `Z`, so a lexical sort silently interleaves them -- and this order
+    # is what names the pytest fixture ids and lays out the HTML review page, so getting it
+    # wrong means a reviewer reads runs out of sequence without anything looking wrong.
+    return sorted(loaded, key=lambda pair: run_time(pair[1]["plan_run"]))

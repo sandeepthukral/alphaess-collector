@@ -27,6 +27,7 @@ import datetime as dt
 from dataclasses import dataclass
 
 from plan import PlanFormatError, PlanInterval, interval_minutes
+from plan import iso_z as _iso
 
 # Below this, an interval's energy is a rounding artefact rather than an intention.
 # `advise.py` uses 1 Wh, which is right for a human-readable report and far too low here: at
@@ -84,10 +85,6 @@ class Slot:
             d["power_w"] = self.power_w
             d["target_soc"] = self.target_soc
         return d
-
-
-def _iso(t: dt.datetime) -> str:
-    return t.astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _can_harvest(

@@ -43,7 +43,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "dispatch"))
 
 import corpus  # noqa: E402
-from plan import PlanFormatError, from_influx, interval_minutes, run_time  # noqa: E402
+from plan import PlanFormatError, from_influx, interval_minutes, iso_z, run_time  # noqa: E402
 from translator import ENERGY_FLOOR_WH, classify  # noqa: E402
 
 DEFAULT_CAPACITY_WH = 27900.0
@@ -80,13 +80,17 @@ def features_of(intervals: list, capacity_wh: float, floor: float) -> dict:
     it is in the corpus without re-running the selection.
     """
     ivs = sorted(intervals, key=lambda i: i.start)
-    actions = [classify(iv, floor) for iv in ivs]
+    # `capacity_wh` is passed because the translator passes it. Without it the harvest rule
+    # is off, so `self` is undercounted here while the real translation counts it -- and
+    # `self` coverage is the first thing selection ranks on, so scoring on the wrong number
+    # picks the wrong runs and the printed action mix disagrees with the goldens.
+    actions = [classify(iv, floor, capacity_wh=capacity_wh) for iv in ivs]
     counts: dict[str, int] = defaultdict(int)
     for a in actions:
         counts[a] += 1
 
     self_starts = [
-        iv.start.strftime("%Y-%m-%dT%H:%M:%SZ")
+        iso_z(iv.start)
         for iv, a in zip(ivs, actions) if a == "self"
     ]
     socs = [iv.soc_wh for iv in ivs]
@@ -94,7 +98,7 @@ def features_of(intervals: list, capacity_wh: float, floor: float) -> dict:
 
     return {
         "interval_minutes": interval_minutes(ivs),
-        "first_interval": ivs[0].start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "first_interval": iso_z(ivs[0].start),
         "horizon_hours": round(span_h, 2),
         "actions": dict(counts),
         "self_starts": self_starts,
@@ -152,8 +156,11 @@ def select(runs: dict[str, dict], budget: int) -> list[tuple[str, str]]:
     #    extremes below because it is a structural requirement of the test suite, not a
     #    stress case -- ranked lower, it gets squeezed out by the budget, which is exactly
     #    what happened on the first survey run.
+    #    Compared as parsed instants, like the newest-run pick below: a `>` between two tag
+    #    STRINGS puts a `+02:00` run after a `Z` run from a later instant, so "the run
+    #    immediately following" could be a run that precedes it.
     if picked:
-        after = sorted(t for t in runs if t > picked[0][0])
+        after = sorted((t for t in runs if run_time(t) > run_time(picked[0][0])), key=run_time)
         take(after[0] if after else None, f"consecutive with {picked[0][0]} -- overlapping horizons")
 
     # 3. The NEWEST run. Structural, not a stress case: it is the only run whose horizon
@@ -171,7 +178,7 @@ def select(runs: dict[str, dict], budget: int) -> list[tuple[str, str]]:
     # 4. The oldest run, for the `+02:00` plan_run tag. Also structural: a format the overlap
     #    resolver must parse rather than string-sort, and only the archive's tail has it.
     offset = [t for t in runs if runs[t]["plan_run_format"] == "offset"]
-    take(min(offset) if offset else None, "oldest run -- `+02:00` plan_run tag")
+    take(min(offset, key=run_time) if offset else None, "oldest run -- `+02:00` plan_run tag")
 
     # 5. The extremes, with whatever budget is left. A golden over an average day proves the
     #    code runs; a golden over the deepest cycle in the archive proves it runs where the
@@ -272,9 +279,9 @@ def main() -> int:
         written += 1
 
     manifest = {
-        "fetched_at": dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "fetched_at": iso_z(dt.datetime.now(dt.UTC)),
         "source": {"url": a.url, "bucket": a.bucket, "org": a.org},
-        "window": {"start": a.start, "stop": stop.strftime("%Y-%m-%dT%H:%M:%SZ")},
+        "window": {"start": a.start, "stop": iso_z(stop)},
         "capacity_wh": a.capacity_wh,
         "energy_floor_wh": a.floor_wh,
         "run_count": written,
