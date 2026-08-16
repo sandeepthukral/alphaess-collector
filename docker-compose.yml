@@ -164,6 +164,78 @@ services:
     networks:
       - alphaess-net
 
+  # Modbus dispatch. DESIGN-dispatch.md sections 5 and 10.
+  #
+  # EXACTLY ONE CONTAINER MAY EVER RUN THIS. The inverter accepts a single Modbus TCP
+  # connection and this service holds it for its whole life, so there is no scaling, no second
+  # replica, and nothing else on the host may open 192.168.68.151:502 -- not a debug script,
+  # not a Kuma TCP port monitor (section 6.2).
+  #
+  # Starts in DRY RUN. `command:` below carries no `--live`, so the loop reads the inverter,
+  # decides, logs and publishes, and writes nothing. Going live is a deliberate edit by an
+  # operator who is watching the dashboard, per the plan's verification step 6 -- and step 7
+  # first: the AlphaESS app's own price control must be off, or two controllers fight over the
+  # same registers.
+  #
+  # Deploy with `sudo docker compose up -d dispatch`. Two things in that line, both
+  # learned the hard way: docker on the Synology needs `sudo`, and a bare `up -d` recreates
+  # the collector, which cost 922 s of samples on 2026-08-10.
+  dispatch:
+    build: ./dispatch
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["--ip", "${INVERTER_IP:-192.168.68.151}"]
+    environment:
+      <<: *default-timezone
+      INFLUX_URL: http://influxdb:8086
+      # Read on `planning` (the plan the translator consumes) and write on `alphaess` (the
+      # dispatch_state readback behind section 7's panels). A separate token from the
+      # collector's: this is the only process in the stack that needs to read another
+      # project's bucket. Mint per DEPLOY.md, "Scoped tokens".
+      INFLUX_TOKEN: ${INFLUX_TOKEN_DISPATCH:?set INFLUX_TOKEN_DISPATCH in .env -- see DEPLOY.md, "Scoped tokens"}
+      INFLUX_ORG: ${INFLUX_ORG:-home}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
+      PLANNING_BUCKET: ${PLANNING_BUCKET:-planning}
+      # Tags dispatch_state so the panels can sit beside the collector's series.
+      ALPHAESS_SYS_SN: ${ALPHAESS_SYS_SN}
+      # Usable capacity in Wh, used to turn the plan's Wh-per-interval into a target SoC.
+      # Duplicated with battery-planning/hardware.py until PLAN-repo-seams.md section 2a
+      # publishes it on the plan itself. 27,900 is the COMMANDABLE capacity and is not
+      # expected to change; the ~30,500 Wh in hardware.py is headroom the pack only reaches
+      # after a long hold at 100 %, deliberately unmodelled (DESIGN-dispatch.md section 4.1).
+      # If this number ever does change, both copies have to change on the same day or the
+      # two halves disagree about what 100 % means.
+      BATTERY_CAPACITY_WH: ${BATTERY_CAPACITY_WH:-27900}
+      # How often the translator re-reads the plan. Hourly by default although the planner
+      # runs every 3 h -- see dispatch/entrypoint.sh for why a 3 h loop lags a 3 h producer.
+      TRANSLATE_INTERVAL_S: ${TRANSLATE_INTERVAL_S:-3600}
+      # Kuma push URLs, section 6.1. Unset = no heartbeat, which is the right default for a
+      # dry run and the wrong one once this is live: DISPATCH-GOLIVE.md section 3 creates all
+      # seven and confirms each goes green before `--live` is added.
+      #
+      # #2 and #3 are pinged by the translator, around a batch job that runs hourly.
+      PLAN_INFLUX_HEARTBEAT_URL: ${PLAN_INFLUX_HEARTBEAT_URL:-}
+      SLOTS_WRITTEN_HEARTBEAT_URL: ${SLOTS_WRITTEN_HEARTBEAT_URL:-}
+      # #4-#8 are pinged by the control loop, every tick. Note that #5's Kuma interval must
+      # stay above the 60 s loop interval or it flaps on a single slow tick.
+      SLOTS_FRESH_HEARTBEAT_URL: ${SLOTS_FRESH_HEARTBEAT_URL:-}
+      DISPATCHER_ALIVE_HEARTBEAT_URL: ${DISPATCHER_ALIVE_HEARTBEAT_URL:-}
+      DISPATCH_CONFIRMED_HEARTBEAT_URL: ${DISPATCH_CONFIRMED_HEARTBEAT_URL:-}
+      INVERTER_NOT_HIJACKED_HEARTBEAT_URL: ${INVERTER_NOT_HIJACKED_HEARTBEAT_URL:-}
+      SOC_FLOOR_HEARTBEAT_URL: ${SOC_FLOOR_HEARTBEAT_URL:-}
+      # The floor monitor #8 reports against. Matches the planner's `minBatterySOCPct`; it is
+      # a backstop, not a control input -- nothing refuses a command because of it.
+      SOC_FLOOR_PCT: ${SOC_FLOOR_PCT:-10}
+    volumes:
+      # slots.json, the heartbeat file and the audit log. On a volume rather than in the image
+      # so a rebuild does not discard the schedule the battery is currently following.
+      - alphaess-dispatch-data:/data
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - alphaess-net
+
   grafana:
     image: grafana/grafana-oss:11.6.0
     restart: unless-stopped
@@ -281,3 +353,4 @@ networks:
 volumes:
   alphaess-influxdb-data:
   alphaess-grafana-data:
+  alphaess-dispatch-data:
