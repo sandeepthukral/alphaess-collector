@@ -16,11 +16,13 @@ bucket: 46 slots written, inverter read, direction guard correctly refused a dis
 
 3,009 tests pass, ruff clean, `docker compose config` passes with `.env.example`.
 
-**Update, 2026-08-16 (later):** section 1 is done except the push. Six commits on six stacked
-branches, each one verified green on its own. Nothing is pushed and no PR is open.
+**Update, 2026-08-16 (later):** section 1 is done. Six PRs open, #75–#80, stacked in merge
+order, and the PR 75 review fixes are folded into the branches they belong to rather than
+carried as a follow-up. 3,018 tests pass, ruff clean, `docker compose config` passes with
+`.env.example`.
 
-Next action: push the stack and open the PRs. Then **section 2**, which is the part that
-needs you at a keyboard on the NAS — nothing in section 3 can start until it is done.
+Next action: **section 2**, which is the part that needs you at a keyboard on the NAS —
+nothing in section 3 can start until it is done. The PRs are waiting on review, not on work.
 
 ---
 
@@ -48,7 +50,18 @@ needs you at a keyboard on the NAS — nothing in section 3 can start until it i
       `dispatch-core`, 2,959 at `dispatch-corpus`, 3,009 at `dispatch-panels`, ruff clean
       throughout. The sweep also checked both ways — 2,489 tests with the corpus present,
       23 skips without it, which is the CI case
-- [ ] **Push and open the PRs** — nothing is pushed yet. Merge in stack order
+- [x] **Push and open the PRs** — six, #75–#80, 2026-08-16. Merge in stack order
+- [x] Act on the PR 75 review. Four findings were real and are fixed in the stack: monitors
+      #4–#8 were documented and never pinged; `clamp()` read a 0 W hardware limit as
+      "unknown"; the idle path published a pre-release readback; the inverter limits were read
+      once and held forever. Two more were declined and why is worth keeping — the duplicated
+      capacity constant is tracked as `PLAN-repo-seams.md` §2a and is not a new finding, and
+      `entrypoint.sh` forking a fresh translator process per interval is deliberate: a batch
+      job that leaks or wedges is contained by its own exit
+- [x] A hazard the review did not raise, found while staging the fixes: `dispatch/testdata/`
+      was only gitignored from the *third* commit in the stack, so a `git add -A` from either
+      of the first two would have staged the real plan archive into a public repo. Moved to
+      the first commit
 - [ ] Re-confirm `dispatch/testdata/` is still ignored after the merges
 
 ## 2. Prerequisites for going live
@@ -75,11 +88,17 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
 - [ ] Confirm `dispatch_state` is arriving in InfluxDB and the §7.2 panels are populated
 - [ ] Watch a full day of dry-run decisions against what the battery actually did. This is
       the last chance to catch a wrong decision for free
-- [ ] Create the Kuma monitors and confirm each goes green — `DESIGN-dispatch.md` §6.1:
+- [ ] Create the Kuma monitors, put each push URL in the NAS `.env`, and confirm each goes
+      green — `DESIGN-dispatch.md` §6.1. All seven are pinged by code now; an unset URL makes
+      the ping a no-op, so a monitor left out of `.env` stays silent rather than failing:
   - [ ] #2 `plan-in-influx` (2 h) and #3 `slots-written` (2 h) — pinged by the translator
-  - [ ] #4 `slots-fresh` (15 min) and #5 `dispatcher-alive` (2 min)
+  - [ ] #4 `slots-fresh` (15 min) and #5 `dispatcher-alive` (2 min). Keep #5's interval
+        above the 60 s tick or one slow tick flaps it
   - [ ] #6 `dispatch-confirmed` (5 min), #7 `inverter-not-hijacked` (5 min),
-        #8 `soc-floor` (15 min)
+        #8 `soc-floor` (15 min). **#7 will fire, correctly, until the app's price control is
+        off** — the block is being hijacked as of 2026-08-16. Create it last, or expect it red
+  - [ ] Set `SOC_FLOOR_PCT` to match the planner's `minBatterySOCPct`. Two repos, nothing
+        comparing them
   - [ ] **Do NOT create a TCP port monitor on `192.168.68.151:502`.** It would steal the
         inverter's single Modbus connection from the dispatcher — §6.2
 

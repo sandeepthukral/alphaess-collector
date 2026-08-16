@@ -456,12 +456,14 @@ EVERY 60 seconds:
 
 7. WRITE the dispatch block, duration = 300 s (5x the refresh interval).
 
-8. READ BACK. Ping dispatcher-alive always; ping dispatch-confirmed only
-   when the readback matched. Append to dispatch_audit.log: slot, command,
-   readback, live SoC, live power.
+8. READ BACK, whenever anything was written -- including the single release
+   on the way into idle, which is a write like any other.
 
-9. ON error: log, do NOT exit, retry next tick. Never open a second
-   Modbus connection.
+9. PING monitors #4-#8 from the completed tick. Append to
+   dispatch_audit.log: slot, command, readback, live SoC, live power.
+
+10. ON error: log, do NOT exit, retry next tick. Never open a second
+    Modbus connection.
 ```
 
 The same command is rewritten ~15 times per 15-minute slot. That is intentional and
@@ -562,6 +564,21 @@ the time it runs, the plan is printed and on disk, and its own comment says a mi
 dashboard point is a smaller loss than a planning run that dies at the last step. That
 reasoning was correct when Influx held only a dashboard copy. Now it is the control path's
 only input, so the failure must be visible even though the plan run itself "succeeded".
+
+Three of #4-#8 depart from the obvious rule, and each departure exists to stop a monitor
+crying wolf -- which is the failure mode that ends with all of them ignored:
+
+- **#6 `dispatch-confirmed` is UP when there was nothing to confirm.** A release or an idle
+  tick writes no command, so a readback proving nothing is not evidence of a rejected write.
+  It is also unconditionally up in dry run, where nothing is written and every readback
+  therefore mismatches — left unguarded it would sit red for the whole observation phase.
+- **#8 `soc-floor` is not pinged at all when the SoC register could not be read.** A `down`
+  would assert the battery is below its floor, which is not what was observed. Its 15-minute
+  window still turns a *persistent* read failure into a down without a single dropped read
+  doing so.
+- **#4 `slots-fresh` carries the staleness reason verbatim**, because "the translator died"
+  and "the plan ran out" have different fixes and that string is the only thing separating
+  them on a phone.
 
 Monitors 4 and 5 look similar and are not. #5 down means the process is gone. #4 down means
 the process is fine and is deliberately refusing to dispatch because its input went stale.
@@ -783,6 +800,18 @@ translator.
    constant belongs to any future capacity change, since a bigger battery may arrive with a
    bigger inverter.
 
+   Two corrections from the PR 75 review, both about what a *reported* limit means:
+
+   - **0 is not "unknown".** `max_charge_w or hard_max_w` could not tell them apart, so a
+     limit register reading 0 — the inverter refusing that direction outright — fell through
+     to the 5 kW fallback. The one reading that means stop produced the largest command the
+     clamp allows. A genuine 0 now refuses the command and holds instead; only `None`, a
+     failed read, falls back.
+   - **The limits are re-read hourly, not once at startup.** They move: 15,015 / 13,728 W in
+     the morning of 2026-08-16 and 15,592 / 15,645 W the same afternoon. A container running
+     for weeks against a number read at boot is clamping against history — and a derate, the
+     case the clamp exists for, is precisely when that number changes mid-run.
+
    What is still worth doing, unchanged: log every interval that clamps. If it ever fires on a
    real plan, publish the planner's tuned figures on the `plan` point as `PLAN-repo-seams.md`
    §2a proposes for capacity, rather than raising the constant to make the warning go away.
@@ -804,8 +833,9 @@ translator.
 - **One service in this compose file.** Translator and dispatcher ship in one image. The
   translator runs on a timer inside it rather than as a second container, so `slots.json`
   never leaves the container's own volume and there is nothing to bind-mount across projects.
-- **Deploy with `docker compose up -d <service>`, never bare `up -d`.** A bare recreate in
-  this stack cost 922 s of samples on 2026-08-10.
+- **Deploy with `sudo docker compose up -d <service>`, never bare `up -d`.** A bare recreate
+  in this stack cost 922 s of samples on 2026-08-10. The `sudo` is repeated here rather than
+  left to the bullet above because this is the line that gets copied.
 - **The single-connection limit is a deployment constraint.** Exactly one container may ever
   hold `:502`. A single compose service with a restart policy and no scaling is the
   enforcement.
