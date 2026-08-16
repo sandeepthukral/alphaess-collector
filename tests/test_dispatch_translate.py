@@ -134,6 +134,27 @@ class TestTranslate:
         with pytest.raises(PlanFormatError, match="no plan points in bucket 'planning'"):
             T.translate(FakeQueryApi([]), "planning", NOW, 27900.0)
 
+    def test_a_hole_in_the_elapsed_lookback_does_not_abort_a_good_future(self):
+        """The cadence used for the trim comes from the tail, not the whole window.
+
+        The query reaches an hour back, and `interval_minutes()` rejects a window whose gaps
+        disagree -- so a single point missing from that already-elapsed hour used to abort a
+        plan whose entire future was intact. The strictness still applies to what survives the
+        trim, which is the part the dispatcher actually follows."""
+        holed = records(NOW - dt.timedelta(hours=1), 12)
+        del holed[1]  # 11:15 never made it into Influx; 11:00 -> 11:30 is now a 30 min gap
+        doc, _ = T.translate(FakeQueryApi(holed), "planning", NOW, 27900.0)
+        assert doc["slots"][0]["start"] == "2026-08-16T12:00:00Z"
+        assert doc["interval_minutes"] == 15
+
+    def test_a_gap_in_the_dispatchable_window_is_still_an_error(self):
+        """The other side of that boundary: a hole AFTER `now` is a plan the dispatcher would
+        act on, and it has to fail rather than be quietly stepped over."""
+        holed = records(NOW, 12)
+        del holed[4]
+        with pytest.raises(PlanFormatError, match="inconsistent interval spacing"):
+            T.translate(FakeQueryApi(holed), "planning", NOW, 27900.0)
+
     def test_a_renamed_field_names_itself(self):
         broken = records(NOW, 4)
         for rec in broken:
@@ -178,6 +199,28 @@ class TestAtomicWrite:
         with pytest.raises(OSError, match="no space"):
             T.atomic_write(path, {"slots": []})
         assert not list(tmp_path.glob("*.tmp")), "temp file left behind by a failed write"
+
+
+class TestCapacity:
+    """`BATTERY_CAPACITY_WH` is the divisor that turns the plan's Wh into a target SoC, and it
+    arrives from the environment, where a typo has nothing to bounce off."""
+
+    def test_a_plain_number_is_accepted(self):
+        assert T.capacity_wh("27900") == 27900.0
+
+    def test_a_thousands_separator_names_the_variable(self):
+        """Without this the `ValueError` escapes argparse's constructor -- before logging is
+        configured and before either heartbeat can fire -- as a traceback that never mentions
+        which setting was wrong."""
+        with pytest.raises(ValueError, match="BATTERY_CAPACITY_WH"):
+            T.capacity_wh("27,900")
+
+    @pytest.mark.parametrize("bad", ["0", "-27900"])
+    def test_a_non_positive_capacity_is_refused(self, bad):
+        """The dangerous one, because it parses. Zero capacity makes every SoC percentage
+        either a division by zero or a number nothing downstream would question."""
+        with pytest.raises(ValueError, match="positive"):
+            T.capacity_wh(bad)
 
 
 class Pings:
@@ -248,6 +291,23 @@ class TestRun:
         assert status == "down"
         assert "export_wh" in msg, "the alert must name the field, not just say 'unreadable'"
         assert pings.by_url(SLOTS_URL) == []
+
+    def test_a_translator_bug_reports_monitor_3_not_the_other_repo(
+            self, tmp_path, pings, monkeypatch):
+        """The monitors are split by WHERE THE FIX IS: #2 means look at `battery-planning`,
+        #3 means look here. A plan that read cleanly and then failed in this repo's own
+        arithmetic is a #3 -- reporting it as #2 sends the operator across a repo boundary to
+        hunt a fault that is not there, while the monitor that means "the translation failed"
+        stays green throughout."""
+        def boom(*a, **kw):
+            raise ZeroDivisionError("float division by zero")
+
+        monkeypatch.setattr(T, "build_document", boom)
+        assert _run(api(NOW, 8), tmp_path / "slots.json", pings) == 1
+        assert pings.by_url(PLAN_URL)[0][0] == "up", "the plan itself read fine"
+        status, msg = pings.by_url(SLOTS_URL)[0]
+        assert status == "down"
+        assert "ZeroDivisionError" in msg
 
     def test_a_write_failure_reports_monitor_3_with_the_plan_still_up(self, tmp_path, pings):
         # A directory where the file should be: the write fails, the read did not.

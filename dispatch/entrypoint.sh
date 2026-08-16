@@ -32,12 +32,20 @@ INTERVAL="${TRANSLATE_INTERVAL_S:-3600}"
 # Note this is not `sleep ... || true`, which is the obvious fix and the wrong one: it keeps
 # the loop alive by turning the delay into a no-op, and the translator would then re-query
 # InfluxDB as fast as the NAS can answer.
+#
+# Two checks, in this order and not one: the glob rejects anything non-numeric, and only then
+# is `[ -gt ]` safe to run -- it errors out on `abc` under `set -e`, which is the failure this
+# guard exists to prevent. The numeric test is what catches `00`, which a literal `|0)` pattern
+# happily passes and `sleep` then treats as no delay at all.
+valid=yes
 case "$INTERVAL" in
-    ''|*[!0-9]*|0)
-        echo "TRANSLATE_INTERVAL_S='$INTERVAL' is not a positive integer -- using 3600" >&2
-        INTERVAL=3600
-        ;;
+    ''|*[!0-9]*) valid=no ;;
+    *) [ "$INTERVAL" -gt 0 ] || valid=no ;;
 esac
+if [ "$valid" = no ]; then
+    echo "TRANSLATE_INTERVAL_S='$INTERVAL' is not a positive integer -- using 3600" >&2
+    INTERVAL=3600
+fi
 
 # Absolute paths, and the working directory is /data rather than /app: the audit log and the
 # heartbeat file are opened relative to the cwd, and both belong on the volume.

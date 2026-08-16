@@ -106,6 +106,9 @@ def test_the_refresh_interval_is_validated_before_it_reaches_sleep():
     stops refreshing. One typo in a compose variable is enough to get there."""
     assert "TRANSLATE_INTERVAL_S" in ENTRYPOINT
     assert "*[!0-9]*" in ENTRYPOINT, "the interval reaches `sleep` unvalidated"
+    assert "-gt 0" in ENTRYPOINT, (
+        "a digits-only glob passes '00', which `sleep` treats as no delay at all -- the "
+        "hourly loop becomes a tight loop against InfluxDB. Zero needs a numeric test")
     assert "sleep \"$INTERVAL\" ||" not in ENTRYPOINT, (
         "`|| true` keeps the loop alive by removing the delay -- it would re-query InfluxDB "
         "as fast as the NAS can answer")

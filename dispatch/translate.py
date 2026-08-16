@@ -38,7 +38,7 @@ import sys
 from pathlib import Path
 
 from heartbeat import send_heartbeat
-from plan import PlanFormatError, from_influx, interval_minutes, newest_by_interval
+from plan import PlanFormatError, from_influx, interval_minutes, iso_z, newest_by_interval
 from translator import build_document
 
 log = logging.getLogger("dispatch")
@@ -84,16 +84,28 @@ def upcoming(intervals: list, now: dt.datetime) -> list:
     The query reaches an hour back so the CURRENT interval is never missed; without this trim
     that lookback would also land three finished intervals in the file, where they do nothing
     but make `horizon_end` and the slot list disagree with what the dispatcher can act on.
+
+    The cadence comes from the LAST two intervals, not the whole window. `interval_minutes()`
+    rejects a window whose gaps disagree, and applying that to the untrimmed list lets a hole
+    in the already-elapsed lookback hour -- a partial write from the previous run, say -- abort
+    a plan whose future is perfectly good. The strictness is not lost, only moved to where it
+    can act: `build_document()` runs the same check over the intervals that survive the trim,
+    which are the ones the dispatcher will actually follow.
     """
-    step = dt.timedelta(minutes=interval_minutes(sorted(intervals, key=lambda i: i.start)))
-    return [iv for iv in intervals if iv.start + step > now]
+    ordered = sorted(intervals, key=lambda i: i.start)
+    step = dt.timedelta(minutes=interval_minutes(ordered[-2:]))
+    return [iv for iv in ordered if iv.start + step > now]
 
 
-def translate(query_api, bucket: str, now: dt.datetime, capacity_wh: float) -> tuple[dict, list]:
-    """Plan in InfluxDB -> the slots document. Raises `PlanFormatError` on anything unusable.
+def read_plan(query_api, bucket: str, now: dt.datetime) -> list:
+    """The plan as intervals the translator can use, or `PlanFormatError`.
 
-    Split out from `run()` so the whole read-and-translate path can be tested with a fake
-    query API and no filesystem.
+    Separate from the translation itself because the two failures point at different repos,
+    and section 6.1 spends a whole monitor on telling them apart. Everything that can go wrong
+    in HERE is evidence about `battery-planning` or about InfluxDB -- a missing field, an empty
+    window, a plan that stopped advancing -- and belongs to monitor #2. Everything after it is
+    this repo's own arithmetic and belongs to #3. `run()` is what keeps that boundary; drawing
+    it here is what makes it possible to.
     """
     raw = newest_by_interval(from_influx(query_api, bucket, now - LOOKBACK, now + LOOKAHEAD))
     # Thinness is decided BEFORE the cadence is inferred. `upcoming()` has to call
@@ -104,8 +116,8 @@ def translate(query_api, bucket: str, now: dt.datetime, capacity_wh: float) -> t
     # `from_influx` reports the empty window itself, naming the bucket and the range.)
     if len(raw) < 2:
         raise PlanFormatError(
-            f"a lone plan interval at {raw[0].start.isoformat()} in the window ending "
-            f"{(now + LOOKAHEAD).isoformat()} -- the planner has not run since")
+            f"a lone plan interval at {iso_z(raw[0].start)} in the window ending "
+            f"{iso_z(now + LOOKAHEAD)} -- the planner has not run since")
     intervals = upcoming(raw, now)
     # And again after the trim, for the same reason: a plan on its last interval is a plan
     # about to lapse, not a plan with a broken cadence. The two guards look redundant and are
@@ -114,8 +126,43 @@ def translate(query_api, bucket: str, now: dt.datetime, capacity_wh: float) -> t
     if len(intervals) < 2:
         raise PlanFormatError(
             f"the newest plan is down to {len(intervals)} interval(s) after "
-            f"{now.isoformat()} -- the planner has not run since")
-    return build_document(intervals, capacity_wh, now)
+            f"{iso_z(now)} -- the planner has not run since")
+    return intervals
+
+
+def translate(query_api, bucket: str, now: dt.datetime, capacity_wh: float) -> tuple[dict, list]:
+    """Read and translate in one call, for tests and for `--dry-run` reasoning.
+
+    `run()` deliberately does NOT use this: it needs the seam between the two halves so it can
+    ping the right monitor. Kept because the golden and boundary tests want the whole path.
+    """
+    return build_document(read_plan(query_api, bucket, now), capacity_wh, now)
+
+
+def newest_run(intervals: list) -> str:
+    """The plan run monitor #2's "up" message names. Same rule `build_document` uses for
+    `plan_run`, so the two artefacts never disagree about which run is in force."""
+    runs = sorted(iv.plan_run for iv in intervals if iv.plan_run)
+    return runs[-1] if runs else ""
+
+
+def capacity_wh(raw: str) -> float:
+    """`BATTERY_CAPACITY_WH` as a number, or an argparse error naming the variable.
+
+    Validated rather than trusted for two different failure modes. A malformed value --
+    `27,900` with the thousands separator is the obvious one -- would otherwise raise a bare
+    `ValueError` from inside argparse BEFORE logging is configured and before `run()` can ping
+    anything, so the container's only trace of it is a traceback that never names the setting.
+    A zero or negative one is worse, because it parses: capacity is the divisor that turns the
+    plan's Wh into a target SoC percentage, and nothing downstream would question the answer.
+    """
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"BATTERY_CAPACITY_WH={raw!r} is not a number of Wh") from None
+    if not value > 0 or value == float("inf"):
+        raise ValueError(f"BATTERY_CAPACITY_WH={raw!r} must be a positive number of Wh")
+    return value
 
 
 def summarise(doc: dict, warnings: list) -> str:
@@ -142,7 +189,7 @@ def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.da
     could not be read" is not evidence about the translator. #3 only speaks once #2 is up.
     """
     try:
-        doc, warnings = translate(query_api, bucket, now, capacity_wh)
+        intervals = read_plan(query_api, bucket, now)
     except PlanFormatError as e:
         # The field name (or the empty window) travels in the message -- PLAN-repo-seams.md
         # section 2b. An alert reading "no ping received" would not distinguish a renamed
@@ -161,7 +208,19 @@ def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.da
         log.exception("plan read failed")
         send_heartbeat(plan_url, "down", f"{type(e).__name__}: {e}"[:200])
         return 1
-    send_heartbeat(plan_url, "up", f"plan_run {doc['plan_run']}")
+    send_heartbeat(plan_url, "up", f"plan_run {newest_run(intervals)}")
+
+    try:
+        doc, warnings = build_document(intervals, capacity_wh, now)
+    except Exception as e:
+        # #3, not #2 -- and this is the whole reason the read is a separate call. The plan
+        # arrived and parsed; what failed is arithmetic in `translator.py`, in this repo, on
+        # this side of the boundary. Routing it to #2 would send somebody to `battery-planning`
+        # to look for a fault that is not there, while #3 -- the monitor whose entire meaning
+        # is "the plan was readable but the translation failed" -- sat green through it.
+        log.exception("translation failed")
+        send_heartbeat(slots_url, "down", f"{type(e).__name__}: {e}"[:200])
+        return 1
 
     line = summarise(doc, warnings)
     for w in warnings:
@@ -204,8 +263,11 @@ def main():
     p.add_argument("--bucket", default=os.environ.get("PLANNING_BUCKET", "planning"))
     p.add_argument("--influx-url", default=os.environ.get("INFLUX_URL", ""))
     p.add_argument("--influx-org", default=os.environ.get("INFLUX_ORG", "home"))
-    p.add_argument("--capacity-wh", type=float,
-                   default=float(os.environ.get("BATTERY_CAPACITY_WH") or DEFAULT_CAPACITY_WH))
+    # The default is a STRING so argparse runs `capacity_wh` over it too -- a bad environment
+    # value has to fail the same way a bad flag does, and it is the environment that carries
+    # this one in production.
+    p.add_argument("--capacity-wh", type=capacity_wh,
+                   default=os.environ.get("BATTERY_CAPACITY_WH") or str(DEFAULT_CAPACITY_WH))
     p.add_argument("--dry-run", action="store_true", help="Translate and report, write nothing")
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args()

@@ -41,7 +41,14 @@ USER dispatch
 
 # `--alive` reads only the heartbeat file. It must never open a Modbus connection -- see
 # section 6.2 on why the obvious TCP port monitor would break the system.
-HEALTHCHECK --interval=120s --timeout=10s --start-period=90s \
+#
+# The start period covers a cold boot, which is the slowest one: the entrypoint runs a
+# synchronous translation first -- an Influx query over a 48 h window, with no client timeout --
+# and only then does the scheduler connect over Modbus and write its first heartbeat. 90 s was
+# tight for that on a NAS that has just rebooted, which is exactly when this container starts.
+# Being generous costs nothing here: an actually-dead dispatcher is caught by monitor #5, not
+# by Docker, which does not restart on unhealthy anyway.
+HEALTHCHECK --interval=120s --timeout=10s --start-period=180s \
     CMD python /app/scheduler.py --alive || exit 1
 
 ENTRYPOINT ["/app/entrypoint.sh"]
