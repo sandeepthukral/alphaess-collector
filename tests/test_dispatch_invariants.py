@@ -17,7 +17,7 @@ import datetime as dt
 import pytest
 
 import corpus
-from plan import interval_minutes, newest_by_interval
+from plan import interval_minutes, newest_by_interval, run_time
 from translator import ENERGY_FLOOR_WH, build_document, classify, to_slots
 
 UTC = dt.UTC
@@ -44,12 +44,27 @@ def _ids():
     return [meta["plan_run"] for _, meta in CORPUS]
 
 
-@pytest.fixture(params=range(len(CORPUS)), ids=_ids() or None)
+@pytest.fixture(params=range(len(CORPUS)), ids=_ids() or None, scope="module")
 def run(request):
-    """One archived plan run: (intervals, metadata, slots, warnings)."""
+    """One archived plan run: (intervals, metadata, slots, warnings).
+
+    Module-scoped because the translation is the expensive part and every test below only
+    reads it. Function-scoped, each archived run was re-translated once per dependent test
+    -- around fifteen times per run, across the whole archive, for one distinct result.
+    """
     intervals, meta = CORPUS[request.param]
     slots, warnings = to_slots(intervals, CAPACITY_WH)
     return intervals, meta, slots, warnings
+
+
+@pytest.fixture(scope="module")
+def document(run):
+    """The same run as a slots document. Separate fixture so `TestDocumentContract` builds
+    it once rather than once per assertion about it."""
+    intervals, _meta, _slots, _warnings = run
+    generated = dt.datetime.now(UTC)
+    doc, _ = build_document(intervals, CAPACITY_WH, generated_at=generated)
+    return doc, generated
 
 
 class TestEveryRunTranslates:
@@ -190,30 +205,34 @@ class TestEnergyReconciles:
         hours = span.total_seconds() / 3600.0
 
         for action, field in (("charge", "charge_wh"), ("discharge", "discharge_wh")):
+            matching = [s for s in slots if s.action == action]
             commanded = sum(
-                s.power_w * (s.end - s.start).total_seconds() / 3600.0
-                for s in slots if s.action == action)
+                s.power_w * (s.end - s.start).total_seconds() / 3600.0 for s in matching)
             planned = sum(getattr(i, field) for i in ivs)
-            assert commanded <= planned + hours, (action, commanded, planned)
+            # The allowance SCALES with the number of slots, because the error does: each
+            # slot's power is rounded to a whole watt, so each contributes at most
+            # 0.5 W x its own hours. A fixed one-interval allowance happened to hold over
+            # the 136 runs in the archive and would start failing on a longer horizon or a
+            # finer interval -- as a CI flake on a corpus re-fetch, months from the change
+            # that caused it. Still tight: at 15-minute slots this is 0.25 Wh apiece
+            # against plans of several kWh.
+            tolerance = hours * max(1, len(matching))
+            assert commanded <= planned + tolerance, (action, commanded, planned, tolerance)
 
 
 class TestDocumentContract:
-    def test_no_slot_cites_a_run_newer_than_generated_at(self, run):
-        intervals, _meta, _, _ = run
-        generated = dt.datetime.now(UTC)
-        doc, _ = build_document(intervals, CAPACITY_WH, generated_at=generated)
+    def test_no_slot_cites_a_run_newer_than_generated_at(self, document):
+        doc, generated = document
         for tag in doc["plan_runs"]:
-            assert dt.datetime.fromisoformat(tag.replace("Z", "+00:00")) <= generated
+            assert run_time(tag) <= generated
 
-    def test_horizon_end_matches_the_last_slot(self, run):
-        intervals, _, _, _ = run
-        doc, _ = build_document(intervals, CAPACITY_WH, generated_at=dt.datetime.now(UTC))
+    def test_horizon_end_matches_the_last_slot(self, document):
+        doc, _ = document
         assert doc["horizon_end"] == doc["slots"][-1]["end"]
 
-    def test_the_document_is_json_serialisable(self, run):
+    def test_the_document_is_json_serialisable(self, document):
         import json
-        intervals, _, _, _ = run
-        doc, _ = build_document(intervals, CAPACITY_WH, generated_at=dt.datetime.now(UTC))
+        doc, _ = document
         assert json.loads(json.dumps(doc))["slots"]
 
 
