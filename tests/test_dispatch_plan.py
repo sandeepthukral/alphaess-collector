@@ -1,0 +1,193 @@
+"""Reading the planner's output. `dispatch/plan.py`.
+
+The synthetic fixtures under `tests/fixtures/plans/` cover the three shapes the real August
+archive physically cannot contain: a DST transition, negative prices, and a `self`-heavy day.
+Everything else is tested against the real corpus (see test_dispatch_invariants.py), because
+inventing plan data teaches the tests only what the author already believed.
+"""
+from __future__ import annotations
+
+import datetime as dt
+from pathlib import Path
+
+import pytest
+
+from plan import (
+    PLANNER_TZ,
+    PlanFormatError,
+    PlanInterval,
+    from_table,
+    interval_minutes,
+    newest_by_interval,
+)
+
+FIXTURES = Path(__file__).parent / "fixtures" / "plans"
+UTC = dt.UTC
+
+
+def load(name: str, plan_run: str = "2026-01-01T00:00:00Z"):
+    return from_table((FIXTURES / f"synthetic_{name}.txt").read_text(), plan_run)
+
+
+@pytest.fixture
+def dst():
+    return load("dst_autumn")
+
+
+class TestTableParsing:
+    def test_header_is_parsed_not_assumed(self):
+        """The column set has changed before; positional parsing would misalign silently."""
+        text = (FIXTURES / "synthetic_self_heavy.txt").read_text()
+        shuffled = text.replace("  imp   exp", "  exp   imp")  # header only, data unchanged
+        a = from_table(text)[0]
+        b = from_table(shuffled)[0]
+        assert (a.import_wh, a.export_wh) == (b.export_wh, b.import_wh)
+
+    def test_missing_column_names_itself(self):
+        text = (FIXTURES / "synthetic_self_heavy.txt").read_text().replace(" soc ", " sock ")
+        with pytest.raises(PlanFormatError, match="missing column"):
+            from_table(text)
+
+    def test_unparseable_number_names_the_column_and_line(self):
+        lines = (FIXTURES / "synthetic_self_heavy.txt").read_text().splitlines()
+        lines[2] = lines[2].replace("15", "NaNe", 1)
+        with pytest.raises(PlanFormatError, match="line 3"):
+            from_table("\n".join(lines))
+
+    def test_empty_plan_raises(self):
+        with pytest.raises(PlanFormatError, match="empty plan"):
+            from_table("   \n\n")
+
+    def test_header_without_rows_raises(self):
+        head = (FIXTURES / "synthetic_self_heavy.txt").read_text().splitlines()[0]
+        with pytest.raises(PlanFormatError, match="no rows"):
+            from_table(head + "\n")
+
+    def test_all_starts_are_aware_utc(self):
+        for iv in load("self_heavy"):
+            assert iv.start.tzinfo is not None
+            assert iv.start.utcoffset() == dt.timedelta(0)
+
+    def test_naive_start_is_rejected_at_construction(self):
+        with pytest.raises(ValueError, match="timezone-aware"):
+            PlanInterval(dt.datetime(2026, 1, 1), 0, 0, 0, 0, 0)
+
+
+class TestDstAutumn:
+    """2026-10-25: local 02:00-02:59 happens twice, at +02:00 then +01:00.
+
+    `fold` cannot be inferred from a single row -- both passes look identical in isolation --
+    so it is resolved from the table's own chronological ordering. Applying fold=0
+    unconditionally collapsed the repeated hour onto the first pass AND left 01:00-01:45Z
+    with no intervals at all, which the dispatcher reads as a gap: an hour of unplanned
+    self-consumption in the middle of the night.
+    """
+
+    def test_the_repeated_hour_produces_25_unique_instants(self, dst):
+        starts = [iv.start for iv in dst]
+        assert len(starts) == len(set(starts)) == 20
+
+    def test_utc_is_strictly_monotonic(self, dst):
+        starts = [iv.start for iv in dst]
+        assert starts == sorted(starts)
+
+    def test_cadence_stays_15_minutes_across_the_transition(self, dst):
+        # The whole point of storing UTC instants: the local clock jumps, the instants do not.
+        assert interval_minutes(dst) == 15
+
+    def test_no_utc_hour_is_left_unplanned(self, dst):
+        """The regression this fixture exists for."""
+        covered = {iv.start for iv in dst}
+        t = dt.datetime(2026, 10, 25, 1, 0, tzinfo=UTC)
+        while t < dt.datetime(2026, 10, 25, 2, 0, tzinfo=UTC):
+            assert t in covered, f"{t.isoformat()} has no interval"
+            t += dt.timedelta(minutes=15)
+
+    def test_both_passes_map_to_the_right_offsets(self, dst):
+        first = [iv for iv in dst if iv.start == dt.datetime(2026, 10, 25, 0, 0, tzinfo=UTC)]
+        second = [iv for iv in dst if iv.start == dt.datetime(2026, 10, 25, 1, 0, tzinfo=UTC)]
+        assert len(first) == len(second) == 1
+        assert first[0].start.astimezone(PLANNER_TZ).hour == 2   # CEST, +02:00
+        assert second[0].start.astimezone(PLANNER_TZ).hour == 2  # CET, +01:00, same local hour
+
+    def test_a_genuinely_out_of_order_table_still_raises(self):
+        """fold=1 is tried once. It must not become a licence to accept any ordering."""
+        lines = (FIXTURES / "synthetic_self_heavy.txt").read_text().splitlines()
+        lines[1], lines[4] = lines[4], lines[1]
+        with pytest.raises(PlanFormatError, match="not after the previous row"):
+            from_table("\n".join(lines))
+
+
+class TestNegativePrices:
+    """Zero of these in the August archive; common in spring. They invert the logic -- the
+    cheapest action is to IMPORT, so the plan charges from the grid at midday."""
+
+    def test_negative_buy_prices_survive_parsing(self):
+        ivs = load("negative_prices")
+        assert min(i.price_buy for i in ivs) < 0
+
+    def test_the_plan_imports_while_prices_are_negative(self):
+        ivs = load("negative_prices")
+        negative = [i for i in ivs if i.price_buy < 0]
+        assert negative
+        assert all(i.charge_wh > 0 for i in negative)
+
+
+class TestIntervalMinutes:
+    def test_needs_two_intervals(self):
+        with pytest.raises(PlanFormatError, match="at least two"):
+            interval_minutes(load("self_heavy")[:1])
+
+    def test_inconsistent_spacing_lists_the_gaps(self):
+        ivs = load("self_heavy")
+        with pytest.raises(PlanFormatError, match="inconsistent interval spacing"):
+            interval_minutes([ivs[0], ivs[1], ivs[5]])
+
+    def test_implausible_cadence_rejected(self):
+        base = load("self_heavy")[0]
+        five = [base, PlanInterval(base.start + dt.timedelta(minutes=5), 0, 0, 0, 0, 0)]
+        with pytest.raises(PlanFormatError, match="implausible interval"):
+            interval_minutes(five)
+
+
+class TestNewestByInterval:
+    def _iv(self, minute: int, run: str, soc: float) -> PlanInterval:
+        return PlanInterval(
+            start=dt.datetime(2026, 8, 1, 12, minute, tzinfo=UTC),
+            soc_wh=soc, charge_wh=0, discharge_wh=0, import_wh=0, export_wh=0, plan_run=run)
+
+    def test_newest_run_wins_for_a_shared_instant(self):
+        out = newest_by_interval([
+            self._iv(0, "2026-08-01T09:00:00Z", 1000),
+            self._iv(0, "2026-08-01T12:00:00Z", 2000),
+        ])
+        assert [i.soc_wh for i in out] == [2000]
+
+    def test_an_older_run_still_covers_the_tail(self):
+        """A newer run with a SHORTER horizon must not leave the tail unplanned."""
+        out = newest_by_interval([
+            self._iv(0, "2026-08-01T09:00:00Z", 1000),
+            self._iv(15, "2026-08-01T09:00:00Z", 1100),
+            self._iv(0, "2026-08-01T12:00:00Z", 2000),
+        ])
+        assert [i.soc_wh for i in out] == [2000, 1100]
+
+    def test_plan_run_is_compared_as_a_timestamp_not_a_string(self):
+        """The archive's oldest runs tag themselves `+02:00` and newer ones `Z`.
+
+        As strings, "2026-07-30T17:26:14+02:00" sorts AFTER "2026-08-01T09:00:00Z" on the
+        offset character -- picking a run two days stale. Parsed, 15:26Z loses correctly.
+        """
+        out = newest_by_interval([
+            self._iv(0, "2026-07-30T17:26:14+02:00", 1000),
+            self._iv(0, "2026-08-01T09:00:00Z", 2000),
+        ])
+        assert [i.soc_wh for i in out] == [2000]
+
+    def test_unparseable_run_tag_raises(self):
+        with pytest.raises(PlanFormatError, match="unparseable plan_run"):
+            newest_by_interval([self._iv(0, "not-a-timestamp", 1)])
+
+    def test_output_is_sorted_by_start(self):
+        out = newest_by_interval([self._iv(30, "2026-08-01T09:00:00Z", 3), self._iv(0, "2026-08-01T09:00:00Z", 1)])
+        assert [i.start.minute for i in out] == [0, 30]
