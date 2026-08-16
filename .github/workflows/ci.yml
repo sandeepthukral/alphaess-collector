@@ -22,7 +22,7 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Lint
-        run: ruff check collector awtrix-pusher dispatch tests
+        run: ruff check collector awtrix-pusher dispatch scripts tests
 
       - name: Test
         run: pytest
