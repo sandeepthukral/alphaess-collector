@@ -35,6 +35,17 @@ TWO PROBES, BECAUSE ONE QUESTION TURNED INTO TWO
   the exact opposite of the overcommand probe's "do not be timid" advice below. Both are
   right for their own probe.
 
+  It was run live on 2026-08-16 and returned HONOURED, decisively. 402 W commanded into
+  a ~1220 W surplus: the battery charged 331-361 W for the whole four-minute window while
+  PV swung between 1657 and 2780 W. Surplus moved 1172 W across that window (sd 403 W) and
+  the charge moved 30 W (sd 15 W), with export up ~1014 W. A battery merely self-consuming
+  would have tracked the surplus; this one tracked the setpoint and ignored the surplus.
+
+  So Mode 1 is a real, honoured, PV-only charge setpoint -- and NOT self-consumption: it
+  exported over a kilowatt while the house was drawing 500 W. The `self` action of the
+  dispatch design therefore still stays a RELEASE, contrary to the note in the CAP branch
+  of the original design. What Mode 1 is good for is a charge that provably cannot import.
+
 WHY THE COMMANDED POWER IS DERIVED, NOT PASSED
   Either probe is only decisive relative to the surplus that happens to be available, so
   the script measures surplus first and derives the setpoint from it -- above surplus for
