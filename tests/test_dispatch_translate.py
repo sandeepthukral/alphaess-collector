@@ -110,6 +110,21 @@ class TestTranslate:
         with pytest.raises(PlanFormatError, match="planner has not run since"):
             T.translate(FakeQueryApi(stale), "planning", NOW, 27900.0)
 
+    def test_a_lone_trailing_interval_blames_the_planner_not_the_cadence(self):
+        """`upcoming()` infers the cadence, and `interval_minutes()` needs two intervals to
+        see a gap at all. So a window down to its last interval used to reach monitor #2 as
+        "need at least two intervals to infer the cadence" -- which reads as a malformed plan
+        and sends the operator to the other repo, for what is really a planner that stopped.
+
+        The neighbouring empty case is not a duplicate of this one: `from_influx` catches zero
+        points first, with a message naming the bucket and the range."""
+        with pytest.raises(PlanFormatError, match="planner has not run since"):
+            T.translate(FakeQueryApi(records(NOW, 1)), "planning", NOW, 27900.0)
+
+    def test_an_empty_window_names_the_bucket_and_the_range(self):
+        with pytest.raises(PlanFormatError, match="no plan points in bucket 'planning'"):
+            T.translate(FakeQueryApi([]), "planning", NOW, 27900.0)
+
     def test_a_renamed_field_names_itself(self):
         broken = records(NOW, 4)
         for rec in broken:

@@ -87,8 +87,18 @@ def translate(query_api, bucket: str, now: dt.datetime, capacity_wh: float) -> t
     Split out from `run()` so the whole read-and-translate path can be tested with a fake
     query API and no filesystem.
     """
-    raw = from_influx(query_api, bucket, now - LOOKBACK, now + LOOKAHEAD)
-    intervals = upcoming(newest_by_interval(raw), now)
+    raw = newest_by_interval(from_influx(query_api, bucket, now - LOOKBACK, now + LOOKAHEAD))
+    # Thinness is decided BEFORE the cadence is inferred. `upcoming()` has to call
+    # `interval_minutes()`, which needs two intervals to see a gap at all -- so a window
+    # holding a single trailing interval used to fail as "need at least two intervals to infer
+    # the cadence", reporting a malformed plan for what is really a planner that stopped.
+    # Monitor #2's whole job is telling those two apart. (Zero intervals never reaches here:
+    # `from_influx` reports the empty window itself, naming the bucket and the range.)
+    if len(raw) < 2:
+        raise PlanFormatError(
+            f"a lone plan interval at {raw[0].start.isoformat()} in the window ending "
+            f"{(now + LOOKAHEAD).isoformat()} -- the planner has not run since")
+    intervals = upcoming(raw, now)
     if not intervals:
         raise PlanFormatError(
             f"the newest plan ends before {now.isoformat()} -- the planner has not run since")

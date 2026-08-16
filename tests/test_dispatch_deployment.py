@@ -72,7 +72,7 @@ def test_the_image_excludes_what_must_not_run_in_it(module):
 
 
 @pytest.mark.parametrize("module", [
-    "registers.py", "plan.py", "translator.py", "translate.py",
+    "registers.py", "heartbeat.py", "plan.py", "translator.py", "translate.py",
     "slots.py", "state.py", "scheduler.py"])
 def test_the_image_carries_every_module_it_imports(module):
     assert f"COPY {module}" in DOCKERFILE
