@@ -288,6 +288,35 @@ class TestClamp:
         out, _ = S.clamp(Command(DispatchMode.SOC_TARGET, -9000, 20.0, 300), 5000, 5000)
         assert (out.mode, out.target_soc_pct, out.duration_s) == (2, 20.0, 300)
 
+    def test_a_zero_charge_limit_refuses_the_charge_instead_of_ignoring_it(self):
+        """0 is not None. A limit register reading 0 is the inverter saying it will accept
+        nothing in that direction -- a derate, a fault, a pack at its own limit. Read as
+        "unknown" it silently became the 5 kW fallback, so the one reading that means STOP
+        produced the largest command the clamp allows."""
+        out, warn = S.clamp(Command(DispatchMode.SOC_TARGET, 4848, 90.0, 300), 0, 5000)
+        assert out.power_w == 0
+        assert out.mode == DispatchMode.FOLLOW, "a Mode 2 command at 0 W is undefined"
+        assert out.target_soc_pct is None
+        assert "0 W max charge" in warn
+
+    def test_a_zero_discharge_limit_refuses_the_discharge(self):
+        out, warn = S.clamp(Command(DispatchMode.SOC_TARGET, -4700, 20.0, 300), 5000, 0)
+        assert out.power_w == 0
+        assert out.mode == DispatchMode.FOLLOW
+        assert "0 W max discharge" in warn
+
+    def test_a_zero_limit_in_the_other_direction_is_not_this_command_s_business(self):
+        """A pack that will not charge can still discharge. Only the matching ceiling stops
+        a command."""
+        cmd = Command(DispatchMode.SOC_TARGET, -4700, 20.0, 300)
+        assert S.clamp(cmd, 0, 5000)[0] is cmd
+
+    def test_a_hold_survives_a_zero_limit(self):
+        """0 W in either direction is what a hold already asks for, and it is the fail-safe
+        this function falls back to -- it must not trip its own refusal."""
+        cmd = Command(DispatchMode.FOLLOW, 0, None, 300)
+        assert S.clamp(cmd, 0, 0)[0] is cmd
+
 
 class TestIsHijacked:
     """Section 5 step 5. The AlphaESS app writes these same registers -- caught on

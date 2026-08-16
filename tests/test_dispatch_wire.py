@@ -345,6 +345,29 @@ class TestTickEndToEnd:
         assert fields["slot_action"] == "discharge"
         assert fields["plan_run"] == "2026-08-01T09:00:00Z"
 
+    def test_the_release_on_the_way_into_idle_is_published(self, tmp_path):
+        """The idle path writes too -- it releases once on the way in. Skipping the second
+        readback there published the block as it stood BEFORE that release, so the dashboard
+        showed a live command on the one tick where the loop had just given up."""
+        now = dt.datetime.now(UTC)
+        stale = self._slots_file(tmp_path, now - dt.timedelta(hours=9))
+        published: list[dict] = []
+
+        class Recorder:
+            def publish(self, fields, now=None):
+                published.append(fields)
+                return True
+
+        async def body(inv, _trace):
+            # A command is live when the plan goes stale -- exactly the real sequence.
+            await inv.apply(R.Command(R.DispatchMode.SOC_TARGET, -4500, 20.0, 300))
+            return await scheduler.tick(inv, stale, {"publisher": Recorder()}, now)
+
+        decision = on_simulator(body, seed={R.REG_BATTERY_SOC: [800]})
+        assert decision.kind == "idle"
+        assert published[0]["dispatch_active"] == 0, "published the pre-release readback"
+        assert published[0]["raw_0880"] == 0
+
     def test_a_verified_write_is_recorded_as_verified(self, tmp_path):
         now = dt.datetime.now(UTC)
         path = self._slots_file(tmp_path, now)

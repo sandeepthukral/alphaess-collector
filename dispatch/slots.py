@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +45,16 @@ SOC_DEADBAND_PCT = 1.0
 # bind. Sized a little above the planner's tuning so a legitimate plan is never trimmed
 # silently, and far below what the registers claim.
 HARD_MAX_POWER_W = 5000
+
+# The safety backstop behind monitor #8 (`soc-floor`, section 6.1). Not a control input --
+# nothing here refuses a command because of it, because the direction rule and the plan's own
+# reserve already do that. It exists to answer "did the battery end up somewhere it should
+# never be", which is a different question from "is any single decision wrong", and it is the
+# only monitor that can catch a plan that is internally consistent and still wrong.
+#
+# Matches the planner's `minBatterySOCPct`. Overridable so the two can be aligned from `.env`
+# rather than by editing code in two repos on the same day.
+SOC_FLOOR_PCT = float(os.environ.get("SOC_FLOOR_PCT") or 10.0)
 
 
 class SlotsError(ValueError):
@@ -222,14 +233,30 @@ def clamp(cmd: Command, max_charge_w: int | None, max_discharge_w: int | None,
     A clamp firing never means "the inverter is the limit". It means the plan asked for
     something it should never have asked for, which is worth saying loudly rather than
     silently satisfying.
-    """
-    charge_ceiling = min(max_charge_w or hard_max_w, hard_max_w)
-    discharge_ceiling = min(max_discharge_w or hard_max_w, hard_max_w)
 
-    if cmd.power_w > charge_ceiling > 0:
+    `None` means the limit registers could not be read this run, and falls back to
+    `hard_max_w`. **Zero does not mean None.** A limit register reading 0 is the inverter
+    refusing that direction outright -- a derate, a fault, a pack at its own limit -- and the
+    only safe response is to stop asking. Treating the two the same is how a "clamp" ends up
+    commanding 5 kW into a battery that just said it would accept nothing.
+    """
+    charge_ceiling = hard_max_w if max_charge_w is None else min(max_charge_w, hard_max_w)
+    discharge_ceiling = (
+        hard_max_w if max_discharge_w is None else min(max_discharge_w, hard_max_w))
+
+    if cmd.power_w > 0 and charge_ceiling == 0:
+        return (Command(DispatchMode.FOLLOW, 0, None, cmd.duration_s),
+                f"the inverter reports 0 W max charge -- refusing the {cmd.power_w} W charge "
+                f"and holding instead")
+    if cmd.power_w < 0 and discharge_ceiling == 0:
+        return (Command(DispatchMode.FOLLOW, 0, None, cmd.duration_s),
+                f"the inverter reports 0 W max discharge -- refusing the {-cmd.power_w} W "
+                f"discharge and holding instead")
+
+    if cmd.power_w > charge_ceiling:
         return (Command(cmd.mode, charge_ceiling, cmd.target_soc_pct, cmd.duration_s),
                 f"charge {cmd.power_w} W exceeds the {charge_ceiling} W ceiling -- clamped")
-    if -cmd.power_w > discharge_ceiling > 0:
+    if -cmd.power_w > discharge_ceiling:
         return (Command(cmd.mode, -discharge_ceiling, cmd.target_soc_pct, cmd.duration_s),
                 f"discharge {-cmd.power_w} W exceeds the {discharge_ceiling} W ceiling "
                 f"-- clamped")

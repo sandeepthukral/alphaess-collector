@@ -37,6 +37,7 @@ from pathlib import Path
 import registers as R
 import slots as S
 import state as state_mod
+from heartbeat import send_heartbeat
 
 try:
     from pymodbus.client import AsyncModbusTcpClient
@@ -46,6 +47,29 @@ except ImportError:  # --alive must work without pymodbus installed
 log = logging.getLogger("dispatch")
 
 HEARTBEAT_PATH = Path(os.environ.get("DISPATCH_HEARTBEAT", "dispatch_heartbeat.json"))
+
+# The five Kuma monitors this loop is responsible for -- section 6.1's #4-#8. #1-#3 are pinged
+# elsewhere (#1 in `battery-planning`, #2 and #3 by the translator) and #9 is a daily job.
+#
+# Read once at import and keyed by monitor name so the mapping between "the table in section
+# 6.1" and "the env var in docker-compose.yml" is one dict rather than five scattered lookups.
+# Unset is the documented "not monitored yet" state: monitors get created during go-live, and
+# the loop has to run before that. An unset URL makes `send_heartbeat` a no-op.
+MONITOR_URLS = {
+    "slots-fresh": os.environ.get("SLOTS_FRESH_HEARTBEAT_URL", ""),
+    "dispatcher-alive": os.environ.get("DISPATCHER_ALIVE_HEARTBEAT_URL", ""),
+    "dispatch-confirmed": os.environ.get("DISPATCH_CONFIRMED_HEARTBEAT_URL", ""),
+    "inverter-not-hijacked": os.environ.get("INVERTER_NOT_HIJACKED_HEARTBEAT_URL", ""),
+    "soc-floor": os.environ.get("SOC_FLOOR_HEARTBEAT_URL", ""),
+}
+
+# The inverter's own limit registers are re-read on this cadence, not just at startup.
+#
+# They are not constants: 0x012C/0x012D were measured at 15,015/13,728 W on 2026-08-16 and
+# 15,592/15,645 W later the same day. A value read at container start and held for weeks is a
+# clamp against a number the hardware has since moved away from -- and the case the clamp is
+# there for, a derate, is exactly the case where the number changes mid-run.
+LIMITS_REFRESH_S = 3600
 
 
 def _id_kwarg() -> str:
@@ -149,6 +173,75 @@ def write_heartbeat(decision: S.Decision, state: dict | None, live_soc: float | 
     tmp.replace(HEARTBEAT_PATH)
 
 
+def monitor_pings(decision: S.Decision, cache: dict, live_soc: float | None,
+                  dry_run: bool) -> list[tuple[str, str, str]]:
+    """(monitor, status, message) for section 6.1's #4-#8. Pure -- the I/O is the caller's.
+
+    All five are answered from one tick's worth of facts, so they are decided in one place;
+    scattering five `send_heartbeat` calls through `tick()` is how a monitor ends up silently
+    never pinged, which is the state this function exists to end.
+
+    Three of the five have a deliberate NON-obvious rule:
+
+      #6 `dispatch-confirmed` is UP when there was nothing to confirm. A release or an idle
+         tick writes no command, so a readback proving nothing is not evidence of a rejected
+         write -- and this monitor is "the inverter is rejecting writes", not "a command is
+         live". In dry run it is up unconditionally: nothing is written, so nothing can land.
+
+      #8 `soc-floor` is not pinged at all when the SoC register could not be read. A `down`
+         there would say "the battery is below its floor", which is not what was observed.
+         Silence is the honest answer, and the 15-minute window turns a persistent read
+         failure into a `down` on its own without turning a single dropped read into one.
+
+      #4 `slots-fresh` carries `decision.reason` verbatim on the way down, because the two
+         ways to be stale have different fixes -- a dead translator vs a plan that ran out --
+         and that string is the only thing that distinguishes them on a phone.
+    """
+    pings = [("dispatcher-alive", "up", f"{decision.kind}: {decision.reason}")]
+
+    if decision.fresh:
+        pings.append(("slots-fresh", "up", f"{decision.kind}: {decision.reason}"))
+    else:
+        pings.append(("slots-fresh", "down", decision.reason))
+
+    verified = cache.get("write_verified")
+    if dry_run:
+        pings.append(("dispatch-confirmed", "up", "dry run -- nothing written"))
+    elif verified is False:
+        pings.append(("dispatch-confirmed", "down", "write did not verify: the block does "
+                                                    "not hold what was just written"))
+    else:
+        pings.append(("dispatch-confirmed", "up",
+                      "verified" if verified else "nothing commanded this tick"))
+
+    if cache.get("hijacked"):
+        block = cache.get("hijack_state") or {}
+        pings.append(("inverter-not-hijacked", "down",
+                      f"block active with mode={block.get('mode')} "
+                      f"power={block.get('power_w')}W soc={block.get('target_soc_pct')}% "
+                      f"that this process did not write"))
+    else:
+        pings.append(("inverter-not-hijacked", "up", "OK"))
+
+    if live_soc is not None:
+        status = "up" if live_soc >= S.SOC_FLOOR_PCT else "down"
+        pings.append(("soc-floor", status, f"SoC {live_soc:.1f}% (floor {S.SOC_FLOOR_PCT}%)"))
+
+    return [(name, status, msg[:200]) for name, status, msg in pings]
+
+
+async def report(pings: list[tuple[str, str, str]]) -> None:
+    """Send the pings without blocking the control loop.
+
+    `send_heartbeat` is `urllib`, which is synchronous, and five of them at a 5 s timeout is up
+    to 25 s -- inside a 60 s loop that also has to talk to an inverter. Off the event loop and
+    concurrently, so a Kuma outage costs the loop nothing at all.
+    """
+    await asyncio.gather(*(
+        asyncio.to_thread(send_heartbeat, MONITOR_URLS.get(name, ""), status, msg)
+        for name, status, msg in pings))
+
+
 def check_alive() -> int:
     """Pure local file check -- deliberately no Modbus.
 
@@ -213,10 +306,14 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
                     "write -- the app is dispatching", state["mode"], state["power_w"],
                     state["target_soc_pct"])
         cache["hijacked"] = True
+        cache["hijack_state"] = state
     else:
         cache["hijacked"] = False
+        cache["hijack_state"] = None
 
-    # 6-7. Act.
+    # 6-7. Act. `wrote` records whether this tick touched a register at all, which decides
+    # below whether the published state needs a fresh readback.
+    wrote = False
     if decision.kind == "command":
         cmd, warn = S.clamp(decision.command, *cache.get("limits", (None, None)))
         if warn:
@@ -224,10 +321,12 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         await inv.apply(cmd)
         cache["last_written"] = cmd
         cache["released"] = False
+        wrote = True
     elif decision.kind == "release":
         await inv.release()
         cache["last_written"] = None
         cache["released"] = True
+        wrote = True
     else:
         # "idle" -- silence is the fail-safe. But release ONCE on the way in rather than
         # leaving a stale command running for its full 300 s: a plan that just went stale
@@ -238,6 +337,7 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
             await inv.release()
             cache["last_written"] = None
             cache["released"] = True
+            wrote = True
 
     # 8. Verify, then publish. A SECOND read of the same block, after acting.
     #
@@ -245,8 +345,13 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # write. Publishing that would lag the dashboard by a tick and, worse, would show a
     # command as live before it had actually landed. So the state that reaches Influx is
     # always a post-write readback.
+    #
+    # Keyed on `wrote` rather than on the decision kind, because the idle path writes too: it
+    # releases ONCE on the way in. Skipping the readback there published a block still showing
+    # `dispatch_active=1` from before that release, so the dashboard said a command was live
+    # on the very tick the loop gave up -- the one tick where that reading is most misleading.
     verified, raw_words = state, cache.get("raw_words")
-    if not inv.dry_run and decision.kind != "idle":
+    if not inv.dry_run and wrote:
         try:
             raw_words = await inv.read_raw_block()
             verified = R.decode_block(raw_words)
@@ -279,8 +384,16 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
             now=now)
 
     write_heartbeat(decision, verified, live_soc)
-    log.info("%s | %s | soc=%s", decision.kind, decision.reason,
-             f"{live_soc:.1f}%" if live_soc is not None else "?")
+
+    # 10. Report to Kuma. Last, so every ping describes a completed tick rather than one in
+    # progress -- and after the heartbeat file, which is the check that must never depend on
+    # the network.
+    await report(monitor_pings(decision, cache, live_soc, inv.dry_run))
+
+    log.info("%s | %s | soc=%s | verified=%s | %s", decision.kind, decision.reason,
+             f"{live_soc:.1f}%" if live_soc is not None else "?",
+             cache.get("write_verified"),
+             "HIJACKED" if cache.get("hijacked") else "ours")
     return decision
 
 
@@ -326,12 +439,23 @@ async def run(ip, port, slave_id, slots_path, dry_run, once, interval, retention
         pass
 
     cache["limits"] = await inv.limits()
+    cache["limits_read_at"] = dt.datetime.now(dt.UTC)
     log.info("inverter limits: charge=%s W discharge=%s W", *cache["limits"])
 
     try:
         while not stop.is_set():
             try:
-                await tick(inv, Path(slots_path), cache, dt.datetime.now(dt.UTC))
+                now = dt.datetime.now(dt.UTC)
+                # Re-read the limits hourly. They are not constants -- see LIMITS_REFRESH_S.
+                if (now - cache["limits_read_at"]).total_seconds() >= LIMITS_REFRESH_S:
+                    fresh_limits = await inv.limits()
+                    cache["limits_read_at"] = now
+                    if fresh_limits != cache["limits"]:
+                        log.info("inverter limits changed: charge=%s->%s W "
+                                 "discharge=%s->%s W", cache["limits"][0], fresh_limits[0],
+                                 cache["limits"][1], fresh_limits[1])
+                    cache["limits"] = fresh_limits
+                await tick(inv, Path(slots_path), cache, now)
             except Exception as e:
                 # 9. Never exit on a tick failure. The next tick may succeed, and if it does
                 # not, the dead man's switch reverts the inverter without our help.
