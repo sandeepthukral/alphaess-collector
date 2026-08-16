@@ -19,7 +19,7 @@ filterwarnings = ["error"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-src = ["collector", "awtrix-pusher", "dispatch", "tests"]
+src = ["collector", "awtrix-pusher", "dispatch", "scripts", "tests"]
 
 [tool.ruff.lint]
 select = [
