@@ -453,17 +453,37 @@ panels.append(stat(
 # Counting down from the dispatcher's own `expires_at` rather than from the inverter's
 # duration register, which section 5.1 records counting down erratically - observed reading
 # 300 s three times across two minutes, then straight to expiry.
+#
+# GATED ON dispatch_active, AND ON BOTH BEING WRITTEN AT THE SAME INSTANT. `expires_at` is a
+# conditional field: state.py writes it only while a command is live, so after a normal
+# release the last one sits in the window for another five minutes and `last()` happily
+# returns it. Counting that down turns this panel red and accuses a perfectly healthy
+# dispatcher of having stopped, every single time it releases.
+#
+# `exists` on both columns is what tells the two cases apart, and it has to be a same-instant
+# test rather than a plain `dispatch_active != 0`: every field in a point shares one
+# timestamp, so an inner match means "this tick wrote both" - a live command. A release wrote
+# dispatch_active without expires_at, so the pivot puts them on different rows and neither has
+# both. Crucially this KEEPS the case the panel exists for: a loop that stops mid-command
+# leaves both fields stale at the same instant, they still pivot onto one row, and the
+# countdown drains to zero and goes red exactly as it should.
 panels.append(stat(
     23, "Command expires in",
     "Time left on the dead man's switch. The loop rewrites it every 60 s, so this should sit "
     "near 5 minutes and never fall far; dropping toward zero means the loop has stopped "
-    "refreshing and the inverter is about to revert to self-consumption on its own.",
+    "refreshing and the inverter is about to revert to self-consumption on its own. Blank "
+    "means no command is live, which is a normal resting state, not a fault.",
     '''from(bucket: "alphaess")
   |> range(start: -5m)
-  |> filter(fn: (r) => r._measurement == "dispatch_state" and r._field == "expires_at")
+  |> filter(fn: (r) => r._measurement == "dispatch_state"
+                   and (r._field == "expires_at" or r._field == "dispatch_active"))
   |> last()
-  |> map(fn: (r) => ({ r with _value:
-       float(v: r._value) - float(v: int(v: now())) / 1000000000.0 }))
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> group()
+  |> filter(fn: (r) => exists r.expires_at and exists r.dispatch_active
+                   and r.dispatch_active != 0)
+  |> map(fn: (r) => ({ _time: r._time, _value:
+       float(v: r.expires_at) - float(v: int(v: now())) / 1000000000.0 }))
   |> yield(name: "expires in")
 ''', "s", 0, 18, 6,
     [{"color": "red", "value": None}, {"color": "green", "value": 60}],
@@ -480,16 +500,28 @@ panels.append(stat(
 # Built as a union of one-row streams rather than with findRecord, so that a stale window
 # yields an empty table and Grafana's own "No data" rather than a Flux error. The 32-bit
 # values are recombined here because the point stores the words verbatim, one field each.
+# THE FIELD LIST IS EXPLICIT, and every name on it is one state.py writes on EVERY tick.
+# That is a correctness requirement, not tidiness. `last()` returns the newest point per
+# field, each carrying its own timestamp, and `pivot` keys rows by that timestamp -- so the
+# moment one conditional field (`expires_at`, `slot_start`, `slot_action`, `plan_run`) goes
+# stale while the rest keep being written, the pivot emits TWO rows at two different instants
+# and the union below renders the whole table twice: one populated copy and one blank, for
+# the five minutes until the stale field falls out of the window. Adding a conditional field
+# to this list brings that straight back. tests/test_dispatch_dashboard.py pins it.
 DECODE_TABLE = '''base = from(bucket: "alphaess")
   |> range(start: -5m)
   |> filter(fn: (r) => r._measurement == "dispatch_state")
+  |> filter(fn: (r) => r._field == "dispatch_active" or r._field == "setpoint_w"
+                    or r._field == "action" or r._field == "mode_name"
+                    or r._field == "target_soc_pct" or r._field == "duration_s"
+                    or r._field =~ /^raw_08[0-9a-f][0-9a-f]$/)
   |> last()
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
 
 union(tables: [
   base |> map(fn: (r) => ({
     register: "0x0880", name: "Dispatch start", raw: r.raw_0880,
-    means: if r.dispatch_active == 1 then "Active" else "Released"
+    means: if r.dispatch_active != 0 then "Active" else "Released"
   })),
   base |> map(fn: (r) => ({
     register: "0x0881", name: "Active power", raw: r.raw_0881 * 65536 + r.raw_0882,
@@ -599,18 +631,28 @@ from(bucket: "planning")
      # different problems with different fixes, and without this line the chart cannot tell
      # them apart.
      #
-     # Filtered to live Mode 2 commands only. 0x0886 keeps its last value through a hold and
+     # Restricted to live Mode 2 commands. 0x0886 keeps its last value through a hold and
      # through a release -- a Mode 3 hold writes no target at all -- so plotting the register
      # unconditionally would draw a confident flat line at a target nothing is driving
      # toward. Requires dispatch_active and mode alongside it, hence the pivot.
-     target('''from(bucket: "alphaess")
+     #
+     # NULLED, NOT FILTERED, and that is the whole difference between this working and it
+     # doing the exact thing the paragraph above says it prevents. Dropping the rows leaves
+     # the series with no datapoints across an idle stretch, and a stepAfter line with no
+     # datapoints simply joins the two ends -- redrawing the confident flat line, now with a
+     # comment claiming it cannot happen. An explicit null is a datapoint that says "nothing
+     # commanded here", which is what Grafana needs to break the line.
+     target('''import "internal/debug"
+
+from(bucket: "alphaess")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
   |> filter(fn: (r) => r._measurement == "dispatch_state")
   |> filter(fn: (r) => r._field == "target_soc_pct" or r._field == "mode"
                     or r._field == "dispatch_active")
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-  |> filter(fn: (r) => r.dispatch_active == 1 and r.mode == 2)
-  |> map(fn: (r) => ({ _time: r._time, "commanded": r.target_soc_pct }))
+  |> map(fn: (r) => ({ _time: r._time, "commanded":
+       if r.dispatch_active != 0 and r.mode == 2 then float(v: r.target_soc_pct)
+       else debug.null(type: "float") }))
   |> yield(name: "commanded")
 ''', "D")],
     14, 9, "percent",

@@ -700,7 +700,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Time left on the dead man's switch. The loop rewrites it every 60 s, so this should sit near 5 minutes and never fall far; dropping toward zero means the loop has stopped refreshing and the inverter is about to revert to self-consumption on its own.",
+      "description": "Time left on the dead man's switch. The loop rewrites it every 60 s, so this should sit near 5 minutes and never fall far; dropping toward zero means the loop has stopped refreshing and the inverter is about to revert to self-consumption on its own. Blank means no command is live, which is a normal resting state, not a fault.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -756,7 +756,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"expires_at\")\n  |> last()\n  |> map(fn: (r) => ({ r with _value:\n       float(v: r._value) - float(v: int(v: now())) / 1000000000.0 }))\n  |> yield(name: \"expires in\")\n",
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"expires_at\" or r._field == \"dispatch_active\"))\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> filter(fn: (r) => exists r.expires_at and exists r.dispatch_active\n                   and r.dispatch_active != 0)\n  |> map(fn: (r) => ({ _time: r._time, _value:\n       float(v: r.expires_at) - float(v: int(v: now())) / 1000000000.0 }))\n  |> yield(name: \"expires in\")\n",
           "refId": "A"
         }
       ],
@@ -871,7 +871,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "base = from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\")\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n\nunion(tables: [\n  base |> map(fn: (r) => ({\n    register: \"0x0880\", name: \"Dispatch start\", raw: r.raw_0880,\n    means: if r.dispatch_active == 1 then \"Active\" else \"Released\"\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0881\", name: \"Active power\", raw: r.raw_0881 * 65536 + r.raw_0882,\n    means: string(v: r.setpoint_w) + \" W - \" + r.action\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0885\", name: \"Mode\", raw: r.raw_0885,\n    means: r.mode_name\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0886\", name: \"SoC target\", raw: r.raw_0886,\n    means: string(v: r.target_soc_pct) + \" %\"\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0887\", name: \"Duration\", raw: r.raw_0887 * 65536 + r.raw_0888,\n    means: string(v: r.duration_s / 60) + \" min \" + string(v: r.duration_s % 60) + \" s\"\n  })),\n])\n  |> group()\n  |> sort(columns: [\"register\"])\n  |> yield(name: \"decode\")\n",
+          "query": "base = from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\")\n  |> filter(fn: (r) => r._field == \"dispatch_active\" or r._field == \"setpoint_w\"\n                    or r._field == \"action\" or r._field == \"mode_name\"\n                    or r._field == \"target_soc_pct\" or r._field == \"duration_s\"\n                    or r._field =~ /^raw_08[0-9a-f][0-9a-f]$/)\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n\nunion(tables: [\n  base |> map(fn: (r) => ({\n    register: \"0x0880\", name: \"Dispatch start\", raw: r.raw_0880,\n    means: if r.dispatch_active != 0 then \"Active\" else \"Released\"\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0881\", name: \"Active power\", raw: r.raw_0881 * 65536 + r.raw_0882,\n    means: string(v: r.setpoint_w) + \" W - \" + r.action\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0885\", name: \"Mode\", raw: r.raw_0885,\n    means: r.mode_name\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0886\", name: \"SoC target\", raw: r.raw_0886,\n    means: string(v: r.target_soc_pct) + \" %\"\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0887\", name: \"Duration\", raw: r.raw_0887 * 65536 + r.raw_0888,\n    means: string(v: r.duration_s / 60) + \" min \" + string(v: r.duration_s % 60) + \" s\"\n  })),\n])\n  |> group()\n  |> sort(columns: [\"register\"])\n  |> yield(name: \"decode\")\n",
           "refId": "A"
         }
       ],
@@ -1096,7 +1096,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\")\n  |> filter(fn: (r) => r._field == \"target_soc_pct\" or r._field == \"mode\"\n                    or r._field == \"dispatch_active\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => r.dispatch_active == 1 and r.mode == 2)\n  |> map(fn: (r) => ({ _time: r._time, \"commanded\": r.target_soc_pct }))\n  |> yield(name: \"commanded\")\n",
+          "query": "import \"internal/debug\"\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\")\n  |> filter(fn: (r) => r._field == \"target_soc_pct\" or r._field == \"mode\"\n                    or r._field == \"dispatch_active\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ _time: r._time, \"commanded\":\n       if r.dispatch_active != 0 and r.mode == 2 then float(v: r.target_soc_pct)\n       else debug.null(type: \"float\") }))\n  |> yield(name: \"commanded\")\n",
           "refId": "D"
         }
       ],

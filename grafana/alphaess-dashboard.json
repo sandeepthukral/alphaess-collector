@@ -597,7 +597,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\")\n  |> filter(fn: (r) => r._field == \"target_soc_pct\" or r._field == \"mode\"\n                    or r._field == \"dispatch_active\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => r.dispatch_active == 1 and r.mode == 2)\n  |> map(fn: (r) => ({ _time: r._time, \"commanded\": r.target_soc_pct }))\n  |> yield(name: \"commanded\")\n",
+          "query": "import \"internal/debug\"\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\")\n  |> filter(fn: (r) => r._field == \"target_soc_pct\" or r._field == \"mode\"\n                    or r._field == \"dispatch_active\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ _time: r._time, \"commanded\":\n       if r.dispatch_active != 0 and r.mode == 2 then float(v: r.target_soc_pct)\n       else debug.null(type: \"float\") }))\n  |> yield(name: \"commanded\")\n",
           "refId": "D"
         }
       ],

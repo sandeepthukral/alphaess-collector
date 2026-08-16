@@ -36,6 +36,18 @@ def published_fields() -> set[str]:
         plan_run="2026-08-15T15:00:00Z"))
 
 
+def conditional_fields() -> set[str]:
+    """Fields `build_fields` writes for a live command but NOT for a released one.
+
+    Derived rather than listed, so adding another conditional field to `state.py` puts it
+    under these guards automatically instead of waiting to be noticed on the dashboard.
+    """
+    words = [0, *R.encode_power(0), 0, 0, 3, 0, *R.encode_int32(0)]
+    released = set(build_fields(
+        R.decode_block(words), words, dt.datetime.now(dt.UTC), decision_kind="release"))
+    return published_fields() - released
+
+
 def dispatch_queries() -> list[tuple[str, str, str]]:
     """(dashboard, panel title, query) for every query touching `dispatch_state`."""
     out = []
@@ -83,7 +95,47 @@ class TestFieldContract:
         """The decode table's whole purpose is checking a decode against the spec, which is
         indexed in hex. `raw_2181` would be the same register and the wrong label."""
         for _dash, _title, query in dispatch_queries():
-            assert not re.search(r"\braw_\d{4}\b(?<!raw_08\d\d)", query.replace("raw_08", "raw_08"))
+            assert not re.search(r"\braw_\d{4}\b(?<!raw_08\d\d)", query)
+
+
+class TestConditionalFields:
+    """The root cause behind three separate panel bugs, and the reason it is worth a class.
+
+    `state.py` writes `expires_at`, `slot_start`, `slot_action` and `plan_run` only when they
+    mean something. Every panel here was written as if all fields arrive on every tick. They
+    do not, and the gap is invisible in test and in a fresh deployment -- it opens the first
+    time the dispatcher releases a command in production, which is a normal thing that
+    happens several times a day.
+    """
+
+    def test_there_are_conditional_fields_to_guard(self):
+        """Guards the guard: if `state.py` ever writes everything unconditionally these
+        tests would pass by being vacuous."""
+        assert conditional_fields() == {"expires_at", "slot_start", "slot_action", "plan_run"}
+
+    def test_the_decode_table_reads_only_unconditionally_written_fields(self):
+        """`last()` returns each field's newest point WITH ITS OWN TIMESTAMP, and `pivot`
+        keys rows by that timestamp. Mixing a stale conditional field with fields still being
+        written yields two rows at two instants, and the table's union renders every register
+        twice -- one populated copy, one blank -- until the stale field ages out of the
+        window. Five minutes of that after every single release."""
+        table = next(q for dash, title, q in dispatch_queries() if "pivot" in q and "union" in q)
+        for field in conditional_fields():
+            assert f'"{field}"' not in table, (
+                f"the decode table pulls {field!r} into its pivot; that field stops being "
+                f"written on release and will split the table into two rows")
+
+    def test_the_expiry_countdown_cannot_run_off_a_stale_expires_at(self):
+        """`expires_at` outlives the command that set it by up to the query window, so a
+        `last()` on it alone counts down through a normal release -- turning the panel red
+        and reporting a healthy dispatcher as stopped, every time it releases.
+
+        The gate has to be a same-instant test rather than a plain `dispatch_active` check,
+        because the case the panel EXISTS for -- a loop that dies mid-command -- leaves both
+        fields stale together and must still show the drain."""
+        q = next(q for dash, title, q in dispatch_queries() if "expires_at" in q)
+        assert "exists" in q, "the countdown does not check whether expires_at is still live"
+        assert "dispatch_active" in q, "the countdown is not gated on a command being live"
 
 
 class TestStalenessGuards:
@@ -154,8 +206,20 @@ class TestPanelFive:
         flat line at a target nothing is driving toward."""
         q = next(t["query"] for t in self._panel()["targets"]
                  if MEASUREMENT in t.get("query", ""))
-        assert "dispatch_active == 1" in q
+        assert "dispatch_active != 0" in q
         assert "mode == 2" in q
+
+    def test_the_idle_stretches_are_nulled_rather_than_filtered_away(self):
+        """The restriction above has to leave a datapoint behind saying "nothing commanded
+        here". Dropping the rows instead gives a stepAfter line no points to step through,
+        and Grafana joins the two ends -- redrawing the exact flat line the restriction
+        exists to prevent, which is a worse failure than not having the series at all."""
+        q = next(t["query"] for t in self._panel()["targets"]
+                 if MEASUREMENT in t.get("query", ""))
+        assert "debug.null" in q
+        assert 'import "internal/debug"' in q, "debug.null needs its import to be in the query"
+        assert "filter(fn: (r) => r.dispatch_active" not in q, (
+            "the live-command test must null the value, not filter the row away")
 
     def test_the_series_has_its_own_override(self):
         """Without a byName override the series falls back to panel defaults -- filled area
