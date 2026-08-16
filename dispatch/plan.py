@@ -273,6 +273,17 @@ def from_influx(
     return out
 
 
+def iso_z(t: dt.datetime) -> str:
+    """An instant as `...Z`, the format every artefact in this feature writes.
+
+    One definition, because the alternative is what the archive already demonstrates: the
+    planner's own tags mix `...Z` and `...+02:00`, and every reader of those has to parse
+    rather than compare. Nothing this repo writes should add to that -- so the format lives
+    beside `run_time`, which is the function that has to cope when it does not.
+    """
+    return t.astimezone(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def run_time(tag: str) -> dt.datetime:
     """A `plan_run` tag as an instant.
 
