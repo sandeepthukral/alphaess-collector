@@ -1,0 +1,30 @@
+{
+ "warnings": [],
+ "document": {
+  "generated_at": "2026-08-16T12:00:00Z",
+  "plan_run": "synthetic_dst_autumn",
+  "plan_runs": [
+   "synthetic_dst_autumn"
+  ],
+  "horizon_end": "2026-10-25T03:00:00Z",
+  "interval_minutes": 15,
+  "capacity_wh": 27900.0,
+  "slots": [
+   {
+    "start": "2026-10-24T22:00:00Z",
+    "end": "2026-10-25T00:00:00Z",
+    "action": "hold"
+   },
+   {
+    "start": "2026-10-25T00:00:00Z",
+    "end": "2026-10-25T02:00:00Z",
+    "action": "self"
+   },
+   {
+    "start": "2026-10-25T02:00:00Z",
+    "end": "2026-10-25T03:00:00Z",
+    "action": "hold"
+   }
+  ]
+ }
+}
