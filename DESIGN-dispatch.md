@@ -776,11 +776,39 @@ translator.
 
 ## 9. Open questions
 
-1. **Mode 1 with negative power.** The official table qualifies Mode 1 with
-   `Pdispatch < 32000`, and the 2026-08-15 test sent exactly `32000`. Re-run under genuine
-   surplus with `power = −5000 W`. If it charges at the available surplus rather than pulling
-   5 kW from the grid, it becomes the right command for daytime surplus intervals and §4.1's
-   `self` row changes. If it force-imports, abandon Mode 1 entirely.
+1. **Mode 1 with negative power — measured 2026-08-16 13:51, and only half answered.**
+   `dispatch/test_mode1_negative.py --live`, 90 s at `mode=1 power=−4786 W target=76.4 %`
+   against a ~2,790 W surplus, SoC 66.4 %.
+
+   **DEMAND is ruled out, decisively.** A demand reading predicts ~2,000 W of grid import
+   for the 90 s. Median grid was **+8 W** and no sample imported. Mode 1 with negative power
+   does not force-charge from the grid, so the failure this question was really asking about
+   cannot happen.
+
+   **CAP is NOT established, and this run could not establish it.** The script's own caveat
+   is the whole story here: the battery tracked available surplus in all three phases —
+   charge/surplus **1.00 baseline, 0.92 during, 1.00 after** — so plain self-consumption was
+   already doing everything Mode 1 could have done. It never approached the commanded
+   4,786 W even when surplus allowed it, and at 13:52:34 it exported 983 W while charging
+   only 2,075 W into a 3,058 W surplus. Every sample is consistent with "Mode 1 was accepted
+   and ignored".
+
+   What the run DID confirm at the register level: `0x0885 = 1` was accepted and held, the
+   power and SoC target read back exactly as written (`−4786 W`, `76.4 %`), and the dead
+   man's switch released cleanly.
+
+   **The `self` row therefore does not change on this evidence.** The argument for flipping
+   it was "Mode 1 caps at surplus, which is better than releasing dispatch"; if Mode 1 is a
+   no-op, a real command is strictly worse than a release — same behaviour, one more thing
+   that can be mistaken for a hijack, and an SoC-target path that has never been exercised.
+
+   **The discriminator this run lacked, for whoever picks it up:** command Mode 1 while
+   **house load exceeds PV**. There, release and Mode 1 predict different things — released
+   self-consumption discharges to cover the load, while Mode 1 claims discharge is
+   forbidden. Every sample above had surplus, so the two hypotheses predicted the same
+   battery. That test needs no midday sun and is the one worth running. Whether Mode 1
+   honours its SoC target is still separately untested and needs tens of minutes.
+2. **SoC drift across the 3-hour window.** `initialCharge` anchors the plan to real SoC at
 2. **SoC drift across the 3-hour window.** `initialCharge` anchors the plan to real SoC at
    plan time, but by minute 170 the battery may have diverged (forecast error, the ≈300 W
    delivery mismatch). When live SoC and planned `soc_wh` disagree materially, does the

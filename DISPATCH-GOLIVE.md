@@ -144,9 +144,14 @@ problem and a real one.
 
 ## 6. Deferred, and fine to stay deferred
 
-- [ ] `dispatch/test_mode1_negative.py --live` — needs a midday run with SoC under 85 %. If
-      Mode 1 with negative power returns CAP, §4.1's `self` row becomes a real command and the
-      goldens regenerate once
+- [x] `dispatch/test_mode1_negative.py --live` — **run 2026-08-16 13:51.** Grid import ruled
+      out (median +8 W against a command 2 kW above surplus), so DEMAND is dead and Mode 1 is
+      harmless. But CAP is unproven: the battery tracked surplus identically before, during
+      and after the command, so "accepted and ignored" fits every sample. **§4.1's `self` row
+      stays as a release, and the goldens do not regenerate.** See §9 open question 1
+- [ ] The follow-up that would actually settle it: Mode 1 while **house load exceeds PV**,
+      where a release discharges and Mode 1 claims it cannot. Needs no sun, so it is not
+      weather-blocked the way the first run was
 - [ ] Delete Grafana panel 8 when the app's price bands stop mattering (a go-live change)
 - [ ] Plan-vs-actual reconciliation, monitor #9 (§5.4) — the daily job that catches "every
       monitor green, battery not following the plan"
