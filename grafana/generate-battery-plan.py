@@ -188,21 +188,32 @@ def target(query, ref="A"):
     return {"datasource": DS, "query": query, "refId": ref}
 
 
-def stat(id_, title, desc, query, unit, decimals, x, w, steps, color_mode="value"):
+def stat(id_, title, desc, query, unit, decimals, x, w, steps, color_mode="value",
+         y=0, mappings=None, no_value=None):
+    """A stat panel.
+
+    `mappings` and `no_value` exist for the dispatch row (section 7.3). A stat whose value is
+    a STRING cannot be coloured by thresholds, so the colour comes from value mappings
+    instead -- and the base threshold step then becomes the colour of "no data", which is
+    what makes `NO DISPATCHER` render red without a mapping for it.
+    """
+    defaults = {
+        "color": {"mode": "thresholds"},
+        "decimals": decimals,
+        "mappings": mappings or [],
+        "thresholds": {"mode": "absolute", "steps": steps},
+        "unit": unit,
+    }
+    if no_value is not None:
+        defaults["noValue"] = no_value
     return {
         "datasource": DS,
         "description": desc,
         "fieldConfig": {
-            "defaults": {
-                "color": {"mode": "thresholds"},
-                "decimals": decimals,
-                "mappings": [],
-                "thresholds": {"mode": "absolute", "steps": steps},
-                "unit": unit,
-            },
+            "defaults": defaults,
             "overrides": [],
         },
-        "gridPos": {"h": 4, "w": w, "x": x, "y": 0},
+        "gridPos": {"h": 4, "w": w, "x": x, "y": y},
         "id": id_,
         "options": {
             "colorMode": color_mode,
@@ -370,6 +381,191 @@ from(bucket: "planning")
 ''', "percent", 0, 20, 4,
     [{"color": "text", "value": None}]))
 
+# --- Row 2: what the dispatcher is commanding -------------------------------------------
+#
+# Section 7. Kuma answers "is it broken"; it cannot answer "what is the battery being told to
+# do right now, and why" -- a question asked from a phone, in the kitchen, watching the meter.
+# The row above shows the PLAN and the row below shows the ACTUAL; this is the missing middle
+# term, the command that is supposed to turn one into the other.
+#
+# STALENESS IS THE FAILURE MODE THESE ARE DESIGNED AGAINST. A dead dispatcher does not clear
+# `dispatch_state` -- it leaves the last point sitting there forever, and a panel querying a
+# wide range with `last()` would cheerfully render a command that expired fifty minutes ago
+# as the current state of the battery. That is worse than a blank panel: it is a confident
+# wrong answer in the one place you go to check. Hence `range(start: -5m)` on every query
+# here, five loop iterations, past which the panels go to No data on purpose.
+DISPATCH_LAST = '''from(bucket: "alphaess")
+  |> range(start: -5m)
+  |> filter(fn: (r) => r._measurement == "dispatch_state" and r._field == "%s")
+  |> last()
+'''
+
+# `Released - following house` and `NO DISPATCHER` describe the SAME register contents:
+# start=0. Only the freshness of the point separates them, which is why the short window
+# above is not optional. The base threshold step is red because it is also the colour Grafana
+# uses for `noValue` -- so a missing point renders as a loud red NO DISPATCHER rather than an
+# empty cell, while the mappings below colour the states that were actually commanded.
+panels.append(stat(
+    20, "Dispatch state",
+    "What the dispatcher last told the inverter to do, decoded. NO DISPATCHER in red means "
+    "no point has arrived for five minutes: the loop is down, and whatever the registers "
+    "still hold is not being refreshed. Note that a released dispatch and a dead dispatcher "
+    "look identical at the register level - only the freshness of this point tells them "
+    "apart.",
+    DISPATCH_LAST % "action", "none", None, 0, 6,
+    [{"color": "red", "value": None}],
+    y=4, no_value="NO DISPATCHER",
+    mappings=[{"type": "value", "options": {
+        "charging from grid": {"color": "green", "index": 0},
+        "charging from PV": {"color": "green", "index": 1},
+        "discharging to grid": {"color": "orange", "index": 2},
+        "hold (battery frozen)": {"color": "blue", "index": 3},
+        "self-consumption (released)": {"color": "text", "index": 4},
+        "no dispatch": {"color": "text", "index": 5},
+        # Not something this dispatcher commands -- it holds with Mode 3. Seeing it means
+        # the app is driving the block, so it gets the warning colour rather than a
+        # neutral one.
+        "active at 0 W": {"color": "yellow", "index": 6},
+    }}]))
+
+# Charging positive, discharging negative - the same convention as "Battery Power now" four
+# panels up, and the same green/red. The dispatcher flips the register's sign once, at the
+# encoder, so nothing has to be negated here. `decimals` stays unset for the reason the
+# comment on that panel gives: `watt` self-scales, and pinning decimals gives either
+# "850.00 W" or "2 kW".
+panels.append(stat(
+    21, "Commanded power",
+    "The setpoint written to 0x0881, in the same sign convention as Battery Power now: "
+    "positive charging, negative discharging. Compare the two - a large gap between "
+    "commanded and actual means the inverter accepted the command and did not honour it.",
+    DISPATCH_LAST % "setpoint_w", "watt", None, 6, 6,
+    [{"color": "red", "value": None}, {"color": "green", "value": 0}],
+    y=4))
+
+panels.append(stat(
+    22, "Commanded target SoC",
+    "Where the current command is driving the battery (0x0886). Only meaningful while a "
+    "Mode 2 command is live - a hold writes no target, so this holds whatever was last set.",
+    DISPATCH_LAST % "target_soc_pct", "percent", 0, 12, 6,
+    [{"color": "text", "value": None}],
+    y=4))
+
+# Counting down from the dispatcher's own `expires_at` rather than from the inverter's
+# duration register, which section 5.1 records counting down erratically - observed reading
+# 300 s three times across two minutes, then straight to expiry.
+panels.append(stat(
+    23, "Command expires in",
+    "Time left on the dead man's switch. The loop rewrites it every 60 s, so this should sit "
+    "near 5 minutes and never fall far; dropping toward zero means the loop has stopped "
+    "refreshing and the inverter is about to revert to self-consumption on its own.",
+    '''from(bucket: "alphaess")
+  |> range(start: -5m)
+  |> filter(fn: (r) => r._measurement == "dispatch_state" and r._field == "expires_at")
+  |> last()
+  |> map(fn: (r) => ({ r with _value:
+       float(v: r._value) - float(v: int(v: now())) / 1000000000.0 }))
+  |> yield(name: "expires in")
+''', "s", 0, 18, 6,
+    [{"color": "red", "value": None}, {"color": "green", "value": 60}],
+    y=4))
+
+# --- Panel: the register decode table ---------------------------------------------------
+#
+# The literal answer to "human-readable instead of register values" -- but the raw column
+# stays. Half the value of this table is being able to check a decode against the spec
+# without leaving the dashboard, and every encoding in section 5.2 was got wrong by somebody
+# first: the community's 0.392 %/bit claim is in the wild precisely because nobody could see
+# both columns at once.
+#
+# Built as a union of one-row streams rather than with findRecord, so that a stale window
+# yields an empty table and Grafana's own "No data" rather than a Flux error. The 32-bit
+# values are recombined here because the point stores the words verbatim, one field each.
+DECODE_TABLE = '''base = from(bucket: "alphaess")
+  |> range(start: -5m)
+  |> filter(fn: (r) => r._measurement == "dispatch_state")
+  |> last()
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+
+union(tables: [
+  base |> map(fn: (r) => ({
+    register: "0x0880", name: "Dispatch start", raw: r.raw_0880,
+    means: if r.dispatch_active == 1 then "Active" else "Released"
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0881", name: "Active power", raw: r.raw_0881 * 65536 + r.raw_0882,
+    means: string(v: r.setpoint_w) + " W - " + r.action
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0885", name: "Mode", raw: r.raw_0885,
+    means: r.mode_name
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0886", name: "SoC target", raw: r.raw_0886,
+    means: string(v: r.target_soc_pct) + " %"
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0887", name: "Duration", raw: r.raw_0887 * 65536 + r.raw_0888,
+    means: string(v: r.duration_s / 60) + " min " + string(v: r.duration_s % 60) + " s"
+  })),
+])
+  |> group()
+  |> sort(columns: ["register"])
+  |> yield(name: "decode")
+'''
+
+panels.append({
+    "datasource": DS,
+    "description": "The dispatch block as it reads right now, decoded. The raw column is "
+                   "kept deliberately: it is what lets a decode be checked against the "
+                   "AlphaESS register spec without leaving this page, and every encoding "
+                   "here was got wrong by somebody first. 0x0881 and 0x0887 are 32-bit and "
+                   "are shown recombined from their two words. 0x0883 is reactive power and "
+                   "is never written - it is not in this table because the dispatcher does "
+                   "not touch it. Empty means no point in five minutes: see Dispatch state.",
+    "fieldConfig": {
+        "defaults": {
+            "custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": False},
+            "mappings": [],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
+        },
+        "overrides": [
+            {"matcher": {"id": "byName", "options": "register"},
+             "properties": [{"id": "displayName", "value": "Register"}]},
+            {"matcher": {"id": "byName", "options": "name"},
+             "properties": [{"id": "displayName", "value": "Name"}]},
+            {"matcher": {"id": "byName", "options": "raw"},
+             "properties": [{"id": "displayName", "value": "Raw"},
+                            {"id": "decimals", "value": 0}]},
+            {"matcher": {"id": "byName", "options": "means"},
+             "properties": [{"id": "displayName", "value": "Means"}]},
+        ],
+    },
+    "gridPos": {"h": 6, "w": 24, "x": 0, "y": 8},
+    "id": 24,
+    "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": False, "fields": "", "reducer": ["sum"], "show": False},
+        "showHeader": True,
+        "sortBy": [],
+    },
+    "pluginVersion": "11.6.0",
+    # Column order fixed here rather than by the order of fields in the Flux `map`: Flux does
+    # not promise an output column order, so a map that happens to come out right today would
+    # reorder itself on an unrelated change and nobody would notice.
+    "transformations": [{
+        "id": "organize",
+        "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "renameByName": {},
+            "indexByName": {"register": 0, "name": 1, "raw": 2, "means": 3},
+        },
+    }],
+    "targets": [target(DECODE_TABLE)],
+    "title": "Dispatch registers, decoded",
+    "type": "table",
+})
+
 # --- Panel: planned vs actual SoC -------------------------------------------------------
 panels.append(timeseries(
     5, "Planned SoC vs actual SoC",
@@ -396,11 +592,35 @@ from(bucket: "planning")
   |> filter(fn: (r) => r._measurement == "plan" and r.plan_run == newest and r._field == "reserve_wh")
   |> map(fn: (r) => ({ _time: r._time, "reserve": r._value / float(v: ${capacity_wh}) * 100.0 }))
   |> yield(name: "reserve")
-''', "C")],
-    4, 9, "percent",
+''', "C"),
+     # The third series is what closes the loop visually. Plan says 78 %, dispatcher
+     # commanded 78 %, battery reached 71 %: the gap between the second and third lines is
+     # DELIVERY error, the gap between the first and second is a DISPATCHER bug. Those are
+     # different problems with different fixes, and without this line the chart cannot tell
+     # them apart.
+     #
+     # Filtered to live Mode 2 commands only. 0x0886 keeps its last value through a hold and
+     # through a release -- a Mode 3 hold writes no target at all -- so plotting the register
+     # unconditionally would draw a confident flat line at a target nothing is driving
+     # toward. Requires dispatch_active and mode alongside it, hence the pivot.
+     target('''from(bucket: "alphaess")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "dispatch_state")
+  |> filter(fn: (r) => r._field == "target_soc_pct" or r._field == "mode"
+                    or r._field == "dispatch_active")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> filter(fn: (r) => r.dispatch_active == 1 and r.mode == 2)
+  |> map(fn: (r) => ({ _time: r._time, "commanded": r.target_soc_pct }))
+  |> yield(name: "commanded")
+''', "D")],
+    14, 9, "percent",
     [series_override("planned", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}}]),
      series_override("actual", [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}},
                                 {"id": "custom.fillOpacity", "value": 0}]),
+     series_override("commanded", [{"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}},
+                                   {"id": "custom.fillOpacity", "value": 0},
+                                   {"id": "custom.lineStyle",
+                                    "value": {"dash": [6, 4], "fill": "dash"}}]),
      series_override("reserve", [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}},
                                  {"id": "custom.fillOpacity", "value": 0},
                                  {"id": "custom.lineStyle",
@@ -435,7 +655,7 @@ from(bucket: "planning")
      target(PRICE_LINE, "B"),
      target(threshold_line("sell", "sell above"), "C"),
      target(threshold_line("buy", "buy below"), "D")],
-    13, 9, "kwatth",
+    23, 9, "kwatth",
     [series_override("charge", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
                                 {"id": "custom.drawStyle", "value": "bars"}]),
      series_override("discharge", [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
@@ -524,7 +744,7 @@ panels.append({
              "properties": [{"id": "displayName", "value": "Exact"}]},
         ],
     },
-    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 22},
+    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
     "id": 8,
     "options": {
         "cellHeight": "sm",
@@ -584,7 +804,7 @@ panels.append({
                             {"id": "displayName", "value": "ct/kWh"}]},
         ],
     },
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 30},
+    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 40},
     "id": 7,
     "options": {
         "cellHeight": "sm",
@@ -666,8 +886,11 @@ dashboard = {
         "enable": True, "hide": True, "iconColor": "rgba(0, 211, 255, 1)",
         "name": "Annotations & Alerts", "type": "dashboard",
     }]},
-    "description": "What the planner intended, from the planning bucket, against what the "
-                   "battery actually did. Advisory only - nothing here is executed.",
+    "description": "What the planner intended, from the planning bucket; what the "
+                   "dispatcher commanded, from dispatch_state; and what the battery "
+                   "actually did. Reads top to bottom as plan, command, actual - the gap "
+                   "between plan and command is a dispatcher bug, the gap between command "
+                   "and actual is delivery error.",
     "editable": True,
     "fiscalYearStartMonth": 0,
     "graphTooltip": 1,
@@ -715,7 +938,9 @@ dashboard = {
     # 8: price line reads the plan's own price_market ahead of now, so tomorrow's half of the
     #    horizon is no longer blank until refresh-prices.sh next runs.
     # 9: From/Until in the settings table drop the year and the seconds.
-    "version": 9,
+    # 10: dispatch row (section 7) - four command stats, the register decode table, and the
+    #     commanded-SoC series on panel 5. Everything below panel 5 moves down 10 rows.
+    "version": 10,
     "weekStart": "",
 }
 
