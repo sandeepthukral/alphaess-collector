@@ -58,7 +58,7 @@
       }
     ]
   },
-  "description": "What the planner intended, from the planning bucket, against what the battery actually did. Advisory only - nothing here is executed.",
+  "description": "What the planner intended, from the planning bucket; what the dispatcher commanded, from dispatch_state; and what the battery actually did. Reads top to bottom as plan, command, actual - the gap between plan and command is a dispatcher bug, the gap between command and actual is delivery error.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -469,6 +469,436 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "What the dispatcher last told the inverter to do, decoded. NO DISPATCHER in red means no point has arrived for five minutes: the loop is down, and whatever the registers still hold is not being refreshed. Note that a released dispatch and a dead dispatcher look identical at the register level - only the freshness of this point tells them apart.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [
+            {
+              "options": {
+                "active at 0 W": {
+                  "color": "yellow",
+                  "index": 6
+                },
+                "charging from PV": {
+                  "color": "green",
+                  "index": 1
+                },
+                "charging from grid": {
+                  "color": "green",
+                  "index": 0
+                },
+                "discharging to grid": {
+                  "color": "orange",
+                  "index": 2
+                },
+                "hold (battery frozen)": {
+                  "color": "blue",
+                  "index": 3
+                },
+                "no dispatch": {
+                  "color": "text",
+                  "index": 5
+                },
+                "self-consumption (released)": {
+                  "color": "text",
+                  "index": 4
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "noValue": "NO DISPATCHER",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 4
+      },
+      "id": 20,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"action\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Dispatch state",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The setpoint written to 0x0881, in the same sign convention as Battery Power now: positive charging, negative discharging. Compare the two - a large gap between commanded and actual means the inverter accepted the command and did not honour it.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0
+              }
+            ]
+          },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 4
+      },
+      "id": 21,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"setpoint_w\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Commanded power",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Where the current command is driving the battery (0x0886). Only meaningful while a Mode 2 command is live - a hold writes no target, so this holds whatever was last set.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 4
+      },
+      "id": 22,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"target_soc_pct\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Commanded target SoC",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Time left on the dead man's switch. The loop rewrites it every 60 s, so this should sit near 5 minutes and never fall far; dropping toward zero means the loop has stopped refreshing and the inverter is about to revert to self-consumption on its own. Blank means no command is live, which is a normal resting state, not a fault.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 60
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 4
+      },
+      "id": 23,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"expires_at\" or r._field == \"dispatch_active\"))\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> filter(fn: (r) => exists r.expires_at and exists r.dispatch_active\n                   and r.dispatch_active != 0)\n  |> map(fn: (r) => ({ _time: r._time, _value:\n       float(v: r.expires_at) - float(v: int(v: now())) / 1000000000.0 }))\n  |> yield(name: \"expires in\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Command expires in",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The dispatch block as it reads right now, decoded. The raw column is kept deliberately: it is what lets a decode be checked against the AlphaESS register spec without leaving this page, and every encoding here was got wrong by somebody first. 0x0881 and 0x0887 are 32-bit and are shown recombined from their two words. 0x0883 is reactive power and is never written - it is not in this table because the dispatcher does not touch it. Empty means no point in five minutes: see Dispatch state.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "register"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Register"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "name"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Name"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "raw"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Raw"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "means"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Means"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "id": 24,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "base = from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\")\n  |> filter(fn: (r) => r._field == \"dispatch_active\" or r._field == \"setpoint_w\"\n                    or r._field == \"action\" or r._field == \"mode_name\"\n                    or r._field == \"target_soc_pct\" or r._field == \"duration_s\"\n                    or r._field =~ /^raw_08[0-9a-f][0-9a-f]$/)\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n\nunion(tables: [\n  base |> map(fn: (r) => ({\n    register: \"0x0880\", name: \"Dispatch start\", raw: r.raw_0880,\n    means: if r.dispatch_active != 0 then \"Active\" else \"Released\"\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0881\", name: \"Active power\", raw: r.raw_0881 * 65536 + r.raw_0882,\n    means: string(v: r.setpoint_w) + \" W - \" + r.action\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0885\", name: \"Mode\", raw: r.raw_0885,\n    means: r.mode_name\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0886\", name: \"SoC target\", raw: r.raw_0886,\n    means: string(v: r.target_soc_pct) + \" %\"\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0887\", name: \"Duration\", raw: r.raw_0887 * 65536 + r.raw_0888,\n    means: string(v: r.duration_s / 60) + \" min \" + string(v: r.duration_s % 60) + \" s\"\n  })),\n])\n  |> group()\n  |> sort(columns: [\"register\"])\n  |> yield(name: \"decode\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Dispatch registers, decoded",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "indexByName": {
+              "means": 3,
+              "name": 1,
+              "raw": 2,
+              "register": 0
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
       "description": "The plan running ahead of the measured line. Nothing executes the plan - the battery follows its own self-consumption logic - so the gap between the two lines is the question this whole project exists to answer, not a fault to be corrected.",
       "fieldConfig": {
         "defaults": {
@@ -558,6 +988,35 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "commanded"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "purple",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.fillOpacity",
+                "value": 0
+              },
+              {
+                "id": "custom.lineStyle",
+                "value": {
+                  "dash": [
+                    6,
+                    4
+                  ],
+                  "fill": "dash"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "reserve"
             },
             "properties": [
@@ -590,7 +1049,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 4
+        "y": 14
       },
       "id": 5,
       "options": {
@@ -631,6 +1090,14 @@
           },
           "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nfrom(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest and r._field == \"reserve_wh\")\n  |> map(fn: (r) => ({ _time: r._time, \"reserve\": r._value / float(v: ${capacity_wh}) * 100.0 }))\n  |> yield(name: \"reserve\")\n",
           "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"internal/debug\"\n\nfrom(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\")\n  |> filter(fn: (r) => r._field == \"target_soc_pct\" or r._field == \"mode\"\n                    or r._field == \"dispatch_active\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ _time: r._time, \"commanded\":\n       if r.dispatch_active != 0 and r.mode == 2 then float(v: r.target_soc_pct)\n       else debug.null(type: \"float\") }))\n  |> yield(name: \"commanded\")\n",
+          "refId": "D"
         }
       ],
       "title": "Planned SoC vs actual SoC",
@@ -858,7 +1325,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 23
       },
       "id": 6,
       "options": {
@@ -1037,7 +1504,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 32
       },
       "id": 8,
       "options": {
@@ -1175,7 +1642,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 30
+        "y": 40
       },
       "id": 7,
       "options": {
@@ -1268,6 +1735,6 @@
   "timezone": "browser",
   "title": "AlphaESS Battery Plan",
   "uid": "alphaess-battery-plan",
-  "version": 9,
+  "version": 10,
   "weekStart": ""
 }
