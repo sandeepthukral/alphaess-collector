@@ -26,14 +26,24 @@ MEASUREMENT = "dispatch_state"
 FLUX_COLUMNS = {"_time", "_value", "_field", "_measurement", "_start", "_stop", "sys_sn"}
 
 
-def published_fields() -> set[str]:
-    """Every field name `state.build_fields` can emit, for a fully populated command."""
+def published_field_values() -> dict:
+    """A fully populated `dispatch_state` point, values kept.
+
+    Separate from `published_fields` because the value TYPES matter too: Grafana treats
+    string and numeric fields differently, and a panel reading one as the other fails
+    silently -- see `test_the_state_stat_can_reach_its_mappings`.
+    """
     words = [1, *R.encode_power(-4500), 0, 0, 2, 50, *R.encode_int32(300)]
-    return set(build_fields(
+    return build_fields(
         R.decode_block(words), words, dt.datetime.now(dt.UTC),
         decision_kind="command",
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
-        plan_run="2026-08-15T15:00:00Z"))
+        plan_run="2026-08-15T15:00:00Z")
+
+
+def published_fields() -> set[str]:
+    """Every field name `state.build_fields` can emit, for a fully populated command."""
+    return set(published_field_values())
 
 
 def conditional_fields() -> set[str]:
@@ -185,6 +195,43 @@ class TestStalenessGuards:
             emitted.add(describe_action(R.decode_block(words), kind))
 
         assert emitted <= mapped, f"unmapped dispatch states: {sorted(emitted - mapped)}"
+
+    def test_the_state_stat_can_reach_its_mappings(self):
+        """Mapping every action is not enough if the panel never sees the value.
+
+        Grafana's field picker treats an empty `reduceOptions.fields` as AUTO, and auto means
+        NUMERIC FIELDS ONLY. `action` is a string, so it was dropped before any mapping was
+        consulted, the panel reduced to no value, and it rendered `noValue`. Panel 20 shipped
+        that way: `NO DISPATCHER` was the only string it could display, on a healthy
+        dispatcher as readily as on a dead one -- the single distinction that panel exists to
+        draw. Found on the first dry run, 2026-08-17.
+
+        The test above could not catch it, and that is the point of having both: the mappings
+        were correct the whole time, and unreachable.
+
+        Written over every stat rather than panel 20 alone, and over the string fields
+        `state.py` actually emits rather than a hardcoded name, so a future string stat is
+        covered without anyone remembering this.
+        """
+        plan = json.loads((DASHBOARDS / "alphaess-battery-plan.json").read_text())
+        strings = {k for k, v in published_field_values().items() if isinstance(v, str)}
+        assert strings, "no string fields found -- this guard would pass vacuously"
+
+        checked = 0
+        for panel in plan["panels"]:
+            if panel.get("type") not in ("stat", "gauge"):
+                continue
+            query = " ".join(t.get("query", "") for t in panel.get("targets", []))
+            reads = {s for s in strings if f'_field == "{s}"' in query}
+            if not reads:
+                continue
+            checked += 1
+            picked = panel["options"]["reduceOptions"]["fields"]
+            assert picked == "/.*/", (
+                f"{panel.get('title')!r} reduces string field(s) {sorted(reads)} with "
+                f"fields={picked!r}. Auto selects numeric fields only, so this panel renders "
+                f"its noValue text in every state, including a healthy one")
+        assert checked, "no stat panel reads a string field -- the guard found nothing"
 
 
 class TestPanelFive:

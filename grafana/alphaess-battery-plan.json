@@ -542,7 +542,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "/.*/",
           "values": false
         },
         "showPercentChange": false,
@@ -2020,6 +2020,6 @@
   "timezone": "browser",
   "title": "Battery Plan",
   "uid": "alphaess-battery-plan",
-  "version": 15,
+  "version": 16,
   "weekStart": ""
 }

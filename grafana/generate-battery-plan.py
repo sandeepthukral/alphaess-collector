@@ -258,13 +258,21 @@ def target(query, ref="A"):
 
 
 def stat(id_, title, desc, query, unit, decimals, x, w, steps, color_mode="value",
-         y=0, mappings=None, no_value=None):
+         y=0, mappings=None, no_value=None, string_value=False):
     """A stat panel.
 
     `mappings` and `no_value` exist for the dispatch row (section 7.3). A stat whose value is
     a STRING cannot be coloured by thresholds, so the colour comes from value mappings
     instead -- and the base threshold step then becomes the colour of "no data", which is
     what makes `NO DISPATCHER` render red without a mapping for it.
+
+    `string_value` is not cosmetic and not optional for those panels. Grafana's field picker
+    treats an empty `reduceOptions.fields` as AUTO, and auto means NUMERIC FIELDS ONLY -- a
+    string field is discarded before any mapping is consulted, the panel reduces to no value,
+    and it renders `noValue`. Panel 20 shipped that way: every mapping below was unreachable
+    and `NO DISPATCHER` was the only string it could ever display, on a live dispatcher as
+    readily as on a dead one, which is precisely the distinction that panel exists to draw.
+    `/.*/` selects all fields, which is what a string stat needs.
     """
     defaults = {
         "color": {"mode": "thresholds"},
@@ -290,7 +298,11 @@ def stat(id_, title, desc, query, unit, decimals, x, w, steps, color_mode="value
             "justifyMode": "auto",
             "orientation": "auto",
             "percentChangeColorMode": "standard",
-            "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": False},
+            "reduceOptions": {
+                "calcs": ["lastNotNull"],
+                "fields": "/.*/" if string_value else "",
+                "values": False,
+            },
             "showPercentChange": False,
             "textMode": "auto",
             "wideLayout": True,
@@ -483,7 +495,7 @@ panels.append(stat(
     "apart.",
     DISPATCH_LAST % "action", "none", None, 0, 6,
     [{"color": "red", "value": None}],
-    y=4, no_value="NO DISPATCHER",
+    y=4, no_value="NO DISPATCHER", string_value=True,
     mappings=[{"type": "value", "options": {
         "charging from grid": {"color": "green", "index": 0},
         "charging from PV": {"color": "green", "index": 1},
@@ -1199,7 +1211,7 @@ dashboard = {
     #     unchanged, so /d/alphaess-battery-plan and every link to it still resolve.
     # 15: both tables get explicit column widths and a short time format, for reading on a
     #     phone; "Planned actions" renamed to "Planned Actions in app".
-    "version": 15,
+    "version": 16,
     "weekStart": "",
 }
 
