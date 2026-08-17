@@ -38,7 +38,14 @@ import sys
 from pathlib import Path
 
 from heartbeat import send_heartbeat
-from plan import PlanFormatError, from_influx, interval_minutes, iso_z, newest_by_interval
+from plan import (
+    PlanFormatError,
+    from_influx,
+    interval_minutes,
+    iso_z,
+    newest_by_interval,
+    run_sort_key,
+)
 from translator import build_document
 
 log = logging.getLogger("dispatch")
@@ -141,9 +148,15 @@ def translate(query_api, bucket: str, now: dt.datetime, capacity_wh: float) -> t
 
 def newest_run(intervals: list) -> str:
     """The plan run monitor #2's "up" message names. Same rule `build_document` uses for
-    `plan_run`, so the two artefacts never disagree about which run is in force."""
-    runs = sorted(iv.plan_run for iv in intervals if iv.plan_run)
-    return runs[-1] if runs else ""
+    `plan_run`, so the two artefacts never disagree about which run is in force.
+
+    Ordered by PARSED INSTANT, not by string. The planner writes UTC now, but tags written
+    before 2026-07-30 carry a `+02:00` offset, and `"...17:26:14+02:00" > "...16:00:00Z"`
+    lexicographically while the instant it names is half an hour EARLIER. This is the same
+    trap `newest_by_interval` documents and `run_time` exists for.
+    """
+    runs = [iv.plan_run for iv in intervals if iv.plan_run]
+    return max(runs, key=run_sort_key, default="")
 
 
 def capacity_wh(raw: str) -> float:

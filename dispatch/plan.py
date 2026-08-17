@@ -300,6 +300,26 @@ def run_time(tag: str) -> dt.datetime:
         raise PlanFormatError(f"unparseable plan_run {tag!r}: {e}") from e
 
 
+def run_sort_key(tag: str):
+    """Order `plan_run` tags by the INSTANT they name, not by their spelling.
+
+    The one place this rule lives, because it has three callers and getting it wrong is
+    silent. The planner writes UTC now, but tags written before 2026-07-30 carry a `+02:00`
+    offset, and `"...17:26:14+02:00"` sorts after `"...16:00:00Z"` as a string while naming an
+    instant half an hour earlier.
+
+    Unparseable tags sort BEFORE every real one, ordered among themselves by string. That is
+    not defensive padding: `from_table()` is documented as the fixture path and labels a plan
+    with its filename -- `synthetic_dst_autumn` -- so the golden corpus legitimately carries
+    tags that are not timestamps at all. They must not raise here, and they must not win
+    "newest" over a real run either.
+    """
+    try:
+        return (1, run_time(tag), "")
+    except PlanFormatError:
+        return (0, dt.datetime.min.replace(tzinfo=dt.UTC), tag)
+
+
 def newest_by_interval(intervals: list[PlanInterval]) -> list[PlanInterval]:
     """Collapse overlapping plan runs: for each instant, keep the newest run covering it.
 

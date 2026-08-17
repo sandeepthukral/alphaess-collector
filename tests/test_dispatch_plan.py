@@ -19,6 +19,8 @@ from plan import (
     from_table,
     interval_minutes,
     newest_by_interval,
+    run_sort_key,
+    run_time,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "plans"
@@ -191,3 +193,36 @@ class TestNewestByInterval:
     def test_output_is_sorted_by_start(self):
         out = newest_by_interval([self._iv(30, "2026-08-01T09:00:00Z", 3), self._iv(0, "2026-08-01T09:00:00Z", 1)])
         assert [i.start.minute for i in out] == [0, 30]
+
+
+class TestRunSortKey:
+    """Ordering `plan_run` tags. The archive genuinely mixes two spellings of an instant:
+    everything written before 2026-07-30 carries a `+02:00` offset, everything after ends in
+    `Z`, and the corpus still holds both."""
+
+    # 17:26:14+02:00 IS 15:26:14Z -- half an hour EARLIER than 16:00Z, and it sorts after it
+    # as a string. This is the pair the whole rule exists for.
+    OFFSET = "2026-07-30T17:26:14+02:00"
+    LATER_Z = "2026-07-30T16:00:00Z"
+
+    def test_a_string_sort_gets_this_pair_backwards(self):
+        """Pins the trap itself, so the fix cannot be reverted as unnecessary. If this ever
+        fails, the two spellings stopped disagreeing and the rest of the class is moot."""
+        assert sorted([self.OFFSET, self.LATER_Z])[-1] == self.OFFSET
+        assert run_time(self.OFFSET) < run_time(self.LATER_Z), (
+            "the string sort and the instant must genuinely disagree for this pair")
+
+    def test_the_newest_is_the_later_instant_not_the_later_string(self):
+        assert max([self.OFFSET, self.LATER_Z], key=run_sort_key) == self.LATER_Z
+
+    def test_an_unparseable_tag_never_wins_newest(self):
+        """`from_table()` is the documented fixture path and labels a plan with its filename,
+        so the golden corpus carries tags that are not timestamps at all. They must neither
+        raise nor outrank a real run -- a synthetic label winning `plan_run` would put a
+        fixture name on the dashboard as the plan in force."""
+        assert max([self.LATER_Z, "synthetic_dst_autumn"], key=run_sort_key) == self.LATER_Z
+
+    def test_unparseable_tags_still_order_deterministically(self):
+        """Two of them must not compare equal, or the sort is unstable across runs."""
+        assert sorted(["synthetic_b", "synthetic_a"], key=run_sort_key) == [
+            "synthetic_a", "synthetic_b"]
