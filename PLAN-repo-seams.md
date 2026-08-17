@@ -1,7 +1,8 @@
 # Repo boundary and cross-repo seams — decision and deferred work
 
-Status: **decided 2026-08-15, mostly not started.** Part 1 is a prerequisite for the
-dispatcher work now in progress. Parts 2–3 are deferred.
+Status: **decided 2026-08-15.** Part 1 is done. Part 2a is done — the planner publishes
+`capacity_wh` (battery-planning PR #25) and all three dashboards read it (PR #88, 2026-08-17).
+Parts 2b and 3 are still deferred.
 
 Prompted by the question of whether `alphaess-collector` and `battery-planning` should be
 merged. They should not. This records why, and the work that follows from that answer.
@@ -60,9 +61,9 @@ Prerequisite for the dispatcher build, not deferred.
   the network.
 - Record the merge decision and the licence reasoning so it is not re-litigated.
 
-### Part 2 — Fix the two seam defects (deferred)
+### Part 2 — Fix the two seam defects
 
-#### 2a. Publish battery capacity into InfluxDB
+#### 2a. Publish battery capacity into InfluxDB — **done 2026-08-17**
 
 `27900` is written in six places across both repos. Two tests guard it —
 `battery-planning/tests/test_hardware.py` and `tests/test_grafana_provisioning.py:290` — and
@@ -85,6 +86,22 @@ Make the number travel with the data that depends on it:
   which it currently misses despite that file carrying `27900` at line 1644.
 
 `.env`'s `BATTERY_CAPACITY_KWH` stays — `pricing.py` needs it independently of any plan.
+
+**As shipped**, three things the plan above did not anticipate. All three are written up at
+length above `CAPACITY_QUERY` in `generate-battery-plan.py`, which is the canonical copy:
+
+- `alphaess-dashboard.json` carried a fourth copy of the literal and has **no generator**, so
+  it is hand-maintained. It is also the dashboard the dispatcher will be watched on.
+- "The newest plan" is not the last row: `plan` is tagged with `plan_run`, and runs share a
+  horizon end, so neither a bare `last()` nor a sort on `_time` picks a run. The query selects
+  on parsed `plan_run`, the same way `NEWEST` does and for the same reasons.
+- The test extension went further than "cover the score dashboard" — it pins every dashboard
+  to one query string, and asserts `current == {}` and `refresh == 1`, which are the two ways
+  a query variable silently goes back to serving a constant.
+
+Left as future work: the score dashboard's `plan_score` measurement still carries no capacity
+of its own, so a capacity change re-renders past days at the new number. Visible and all at
+once, which is the improvement; still not history.
 
 #### 2b. Make the `planning` schema break loudly
 

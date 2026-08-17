@@ -36,7 +36,7 @@ DS = {"type": "influxdb", "uid": "${DS_ALPHAESS}"}
 # the new number -- the same thing the literal did, only visibly and all at once instead of
 # whenever someone remembered to edit three files.
 CAPACITY_QUERY = '''from(bucket: "planning")
-  |> range(start: -7d, stop: 72h)
+  |> range(start: -14d, stop: 72h)
   |> filter(fn: (r) => r._measurement == "plan" and r._field == "capacity_wh")
   |> group()
   |> map(fn: (r) => ({_value: r._value, _run: time(v: r.plan_run)}))

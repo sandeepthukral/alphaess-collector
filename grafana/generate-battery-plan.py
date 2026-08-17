@@ -48,9 +48,12 @@ DS = {"type": "influxdb", "uid": "${DS_ALPHAESS}"}
 #
 # stop: 72h because plan points are timestamped into the future; the default stop of now()
 # hides the part of a run that has not elapsed yet, and a run written minutes ago may be
-# entirely in the future. -7d survives a planning outage over a weekend.
+# entirely in the future. -14d to match NEWEST below, deliberately: the two have to fail at the
+# same moment. If this window were shorter, an outage between the two lengths would leave NEWEST
+# still finding a plan to draw while the capacity variable resolved to nothing -- every panel
+# rendering, and all twelve `float(v: ${capacity_wh})` sites erroring at once.
 CAPACITY_QUERY = '''from(bucket: "planning")
-  |> range(start: -7d, stop: 72h)
+  |> range(start: -14d, stop: 72h)
   |> filter(fn: (r) => r._measurement == "plan" and r._field == "capacity_wh")
   |> group()
   |> map(fn: (r) => ({_value: r._value, _run: time(v: r.plan_run)}))
@@ -1033,6 +1036,9 @@ dashboard = {
     # 9: From/Until in the settings table drop the year and the seconds.
     # 10: dispatch row (section 7) - four command stats, the register decode table, and the
     #     commanded-SoC series on panel 5. Everything below panel 5 moves down 10 rows.
+    # 11: capacity_wh becomes a query variable reading the plan, replacing the 27900 textbox.
+    # 12: that query picks by parsed plan_run over a -14d/72h window, not by the last row of
+    #     every run - runs share a horizon end, so sorting on _time tied across all of them.
     "version": 12,
     "weekStart": "",
 }
