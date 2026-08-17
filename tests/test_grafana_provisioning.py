@@ -198,7 +198,7 @@ def test_price_line_reads_the_plan_ahead_of_now():
 COPIED_PLAN_PANELS = [
     "Planned SoC vs actual SoC",
     "What to set in the app",
-    "Planned actions",
+    "Planned Actions in app",
 ]
 
 
