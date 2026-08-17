@@ -32,6 +32,7 @@ import json
 import os
 from collections import Counter
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -158,6 +159,141 @@ class TestReviewedRuns:
             assert len(entry["digest"]) == 64
 
 
+def _rebuild_runs(reasons: dict, by_run: dict, entries: dict,
+                  prev_header: dict | None = None) -> tuple[list[dict], list[str]]:
+    """One reviewed-runs list, rebuilt from whatever corpus is on disk.
+
+    Split out of the regeneration test so the carry-through rule is reachable without
+    REGENERATE=1 and without rewriting the committed file. The rule is the whole reason this
+    function is worth having: a run that cannot be re-derived keeps its reviewed entry.
+
+    Returns the runs AND the orphans -- manifest names it, corpus lacks it, nobody reviewed
+    it. The orphans are returned rather than printed because a `print` inside a passing test
+    is swallowed by pytest's capture: the operator running the documented regeneration
+    command would never see it, which is the opposite of loud.
+    """
+    runs, orphans = [], []
+    for plan_run in reasons:
+        intervals = by_run.get(plan_run)
+        if intervals is None:
+            # NOT `continue`. A reviewed run missing from the local corpus is the ordinary
+            # case after re-fetching -- the corpus is gitignored and selection is by shape, so
+            # any refetch can return a different set -- and dropping it here would delete a
+            # human's review from the only file that records it. The entry still carries its
+            # reason, digest and counts from the last regeneration, so it is carried through
+            # verbatim. This is what the docstring below promises; it used to `continue`.
+            if plan_run in entries:
+                # Stamped with the header its digest was actually derived under, because the
+                # file's own header is re-written from TODAY's constants on every
+                # regeneration. After a CAPACITY_WH change the header would otherwise claim a
+                # capacity that is true for the re-derived entries and false for these, and
+                # the mismatch would surface much later as an unexplained digest failure.
+                carried = dict(entries[plan_run])
+                if prev_header:
+                    carried.setdefault("carried_from", {
+                        "capacity_wh": prev_header.get("capacity_wh"),
+                        "generated_at": prev_header.get("generated_at"),
+                    })
+                runs.append(carried)
+            else:
+                # Named by the manifest, absent from the corpus, never reviewed. Nothing to
+                # preserve and nothing to derive, but it must not pass silently: it means the
+                # manifest and the corpus disagree about what was fetched.
+                orphans.append(plan_run)
+            continue
+        doc, warnings = _translate(intervals)
+        runs.append({
+            "plan_run": plan_run,
+            "reason": reasons[plan_run],
+            "slots": len(doc["slots"]),
+            "actions": _actions(doc),
+            "warnings": warnings,
+            "digest": _digest(doc),
+        })
+    return runs, orphans
+
+
+class TestReviewHistorySurvivesRegeneration:
+    """`reviewed_runs.json` is the only record that a human looked at a run and accepted its
+    output. `dispatch/testdata/` is gitignored, so the corpus it was derived from may simply
+    not be on the next machine -- which makes "regenerate against a partial corpus" the normal
+    case rather than the exotic one."""
+
+    ENTRY: ClassVar[dict] = {
+        "plan_run": "2026-08-01T09:00:00Z",
+        "reason": "deepest discharge cycle in the window",
+        "slots": 42, "actions": {"discharge": 8}, "warnings": [], "digest": "a" * 64,
+    }
+
+    def test_a_reviewed_run_absent_from_the_corpus_is_carried_through(self):
+        """The regression. `continue` here deleted the reason, the digest and the fact that
+        anybody had ever reviewed it -- from the only file that knows."""
+        out, orphans = _rebuild_runs(
+            {self.ENTRY["plan_run"]: self.ENTRY["reason"]}, {}, {self.ENTRY["plan_run"]: self.ENTRY})
+        assert out == [self.ENTRY], "the reviewed entry was dropped, not carried through"
+        assert orphans == []
+
+    def test_it_is_carried_through_verbatim(self):
+        """Not rebuilt from the reason alone: the digest is the reviewed artefact, and
+        inventing a fresh one would silently re-bless output nobody looked at."""
+        out, _ = _rebuild_runs(
+            {self.ENTRY["plan_run"]: "a different reason now"}, {},
+            {self.ENTRY["plan_run"]: self.ENTRY})
+        assert out[0]["digest"] == self.ENTRY["digest"]
+        assert out[0]["reason"] == self.ENTRY["reason"]
+
+    def test_a_carried_entry_records_the_header_its_digest_came_from(self):
+        """The file's header is re-stamped from today's constants on every regeneration, but
+        a carried digest was computed under the old ones. Without this, a CAPACITY_WH change
+        leaves the header asserting a capacity that is false for exactly these entries."""
+        out, _ = _rebuild_runs(
+            {self.ENTRY["plan_run"]: self.ENTRY["reason"]}, {},
+            {self.ENTRY["plan_run"]: self.ENTRY},
+            {"capacity_wh": 27900.0, "generated_at": "2026-08-16T12:00:00Z"})
+        assert out[0]["carried_from"] == {
+            "capacity_wh": 27900.0, "generated_at": "2026-08-16T12:00:00Z"}
+
+    def test_an_unreviewable_unknown_run_is_returned_as_an_orphan(self):
+        """Manifest names it, corpus lacks it, nobody reviewed it. Nothing to carry, so it is
+        dropped -- but reported, because it means the two disagree about what was fetched.
+
+        Returned rather than printed: pytest captures and discards stdout for a PASSING test,
+        so the `print` this replaced was invisible in the one command that triggers it.
+        """
+        out, orphans = _rebuild_runs({"2026-08-09T12:00:00Z": "some reason"}, {}, {})
+        assert out == []
+        assert orphans == ["2026-08-09T12:00:00Z"]
+
+    def test_a_run_that_can_be_rebuilt_is_rebuilt_rather_than_carried(self):
+        """The carry-through must not shadow real regeneration, or the file would freeze.
+
+        Deliberately corpus-FREE. This is the guard against the failure mode the carry-through
+        fix could itself introduce, so it has to be green on every PR -- and the gitignored
+        corpus is absent in CI. A committed synthetic plan exercises the same branch.
+        """
+        ivs = from_table((PLANS_DIR / "synthetic_dst_autumn.txt").read_text(), plan_run="run-a")
+        stale = dict(self.ENTRY, plan_run="run-a", digest="b" * 64, slots=42)
+        out, orphans = _rebuild_runs({"run-a": "why"}, {"run-a": ivs}, {"run-a": stale})
+        assert orphans == []
+        # Pins that the re-derivation is the REAL one, not merely different from the stale
+        # placeholder -- which any non-"bbbb..." string would have satisfied.
+        assert out[0]["digest"] == _digest(_translate(ivs)[0])
+        assert out[0]["reason"] == "why"
+        assert out[0]["slots"] != stale["slots"]
+        assert "carried_from" not in out[0], "a re-derived entry is not a carried one"
+
+    @pytest.mark.skipif(not CORPUS, reason="no plan corpus on this machine")
+    def test_the_same_holds_for_a_real_corpus_run(self):
+        """The synthetic above is the one that must stay green in CI; this repeats it against
+        real archive data when that is available locally."""
+        ivs, meta = CORPUS[0]
+        stale = dict(self.ENTRY, plan_run=meta["plan_run"], digest="b" * 64)
+        out, _ = _rebuild_runs({meta["plan_run"]: "why"}, {meta["plan_run"]: ivs},
+                               {meta["plan_run"]: stale})
+        assert out[0]["digest"] == _digest(_translate(ivs)[0])
+        assert out[0]["reason"] == "why"
+
+
 @pytest.mark.skipif(not REGENERATE, reason="regeneration only")
 def test_regenerate_reviewed_runs():
     """Rewrites `reviewed_runs.json` from the local corpus. Never runs in a normal pytest.
@@ -165,6 +301,12 @@ def test_regenerate_reviewed_runs():
     Reasons come from the corpus manifest, which is what recorded why each run was selected in
     the first place; a run already in the golden file keeps its existing reason if the manifest
     no longer names it, so re-fetching a newer archive cannot erase the review history.
+
+    That promise covers the run being absent from the CORPUS too, not just from the manifest.
+    `dispatch/testdata/` is gitignored and selection is by shape rather than recency, so a
+    refetch legitimately returns a different set of runs -- and `reviewed_runs.json` is the
+    only place a human's review of a run is recorded. A reviewed run that cannot be
+    re-derived is therefore carried through unchanged rather than dropped.
     """
     if not CORPUS:
         pytest.skip("no corpus to regenerate from")
@@ -177,20 +319,8 @@ def test_regenerate_reviewed_runs():
         for sel in json.loads(manifest_path.read_text()).get("selected", []):
             reasons.setdefault(sel["plan_run"], sel["reason"])
 
-    runs = []
-    for plan_run in reasons:
-        intervals = by_run.get(plan_run)
-        if intervals is None:
-            continue
-        doc, warnings = _translate(intervals)
-        runs.append({
-            "plan_run": plan_run,
-            "reason": reasons[plan_run],
-            "slots": len(doc["slots"]),
-            "actions": _actions(doc),
-            "warnings": warnings,
-            "digest": _digest(doc),
-        })
+    runs, orphans = _rebuild_runs(
+        reasons, by_run, {e["plan_run"]: e for e in existing["runs"]}, existing)
 
     REVIEWED.parent.mkdir(parents=True, exist_ok=True)
     REVIEWED.write_text(json.dumps({
@@ -199,3 +329,10 @@ def test_regenerate_reviewed_runs():
         "generated_at": GENERATED_AT.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "runs": sorted(runs, key=lambda r: r["plan_run"]),
     }, indent=1) + "\n")
+
+    # AFTER the write, so a disagreement never costs the regeneration itself -- but as a
+    # failed assertion rather than a print, which pytest would swallow on a passing test.
+    assert not orphans, (
+        f"the manifest names run(s) absent from the corpus, with no reviewed entry to carry "
+        f"forward: {', '.join(orphans)}. The file was still written; re-fetch the corpus if "
+        f"these were meant to be included.")
