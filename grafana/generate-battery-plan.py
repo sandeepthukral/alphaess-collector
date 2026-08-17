@@ -494,6 +494,52 @@ DISPATCH_LAST = '''from(bucket: "alphaess")
 DISPATCH_LAST_VALUE = DISPATCH_LAST + '''  |> keep(columns: ["_value"])
 '''
 
+# THE DECIDED ACTION, WHICH IS NOT THE COMMANDED ONE, AND IN DRY RUN IS THE ONLY ONE THERE IS.
+#
+# Every other panel in this row reads back the INVERTER: `scheduler.py:342` publishes the
+# block it read before deciding. That is the right thing to show once commands are being
+# written -- it is the inverter's own account of itself, and the gap between it and the
+# decision is how you catch a command accepted and not honoured. But in dry run nothing is
+# ever written, so the whole row reads `no dispatch` / 0 W / `Released` on every tick of the
+# day, whatever the dispatcher decided. A dry-run day watched through this row shows one flat
+# unchanging line, which is precisely the state the dry run exists to let you inspect.
+#
+# `slot_action` is the missing term: `state.py:113` publishes it from the SLOT rather than
+# from the registers, for exactly this reason. `review-dry-run.py` is built on the same field
+# and answers the same question over a whole day; this answers it at a glance.
+#
+# NO SLOT IS NOT A FAULT. `slot_action` is a conditional field -- written only while a slot is
+# active -- so a healthy dispatcher outside the plan's horizon, or in a gap between slots,
+# writes a point without it. That is the trap panel 23 fell into with `expires_at`, and the
+# base threshold step is neutral here for the same reason: Grafana colours `noValue` with the
+# base step, and a panel that cries wolf on a normal resting state is a panel you stop
+# reading. The dead-dispatcher case is already covered, loudly, by `Dispatch state` next
+# door -- `action` is written unconditionally, so its absence really does mean the loop
+# stopped. Two panels, two absences, two different meanings.
+panels.append(stat(
+    25, "Decision",
+    "What the dispatcher DECIDED, from slot_action -- not what it commanded. In dry run "
+    "nothing is written to the inverter, so every other panel in this row reads 'no dispatch' "
+    "all day and this is the only one that moves. 'no slot' is normal: it means the plan has "
+    "nothing scheduled for right now, not that the dispatcher is down - Dispatch state is "
+    "the panel that tells you that.",
+    DISPATCH_LAST_VALUE % "slot_action", "none", None, 0, 6,
+    [{"color": "text", "value": None}],
+    y=4, no_value="no slot", string_value=True,
+    # The same four actions `translator.py:classify` emits, coloured to agree with
+    # `Dispatch state` beside it rather than with review_page.py's band palette: these two
+    # tiles are read side by side, and a reader comparing decided against actual must not
+    # have to translate between two colour vocabularies to do it.
+    mappings=[{"type": "value", "options": {
+        "charge": {"color": "green", "index": 0},
+        "discharge": {"color": "orange", "index": 1},
+        "hold": {"color": "blue", "index": 2},
+        # Neutral on purpose, and matching `self-consumption (released)` next door: section
+        # 4.1 makes `self` the deliberate RELEASE of dispatch. The battery running itself
+        # under it is the decision being honoured, not the absence of one.
+        "self": {"color": "text", "index": 3},
+    }}]))
+
 # `Released - following house` and `NO DISPATCHER` describe the SAME register contents:
 # start=0. Only the freshness of the point separates them, which is why the short window
 # above is not optional. The base threshold step is red because it is also the colour Grafana
@@ -506,7 +552,7 @@ panels.append(stat(
     "still hold is not being refreshed. Note that a released dispatch and a dead dispatcher "
     "look identical at the register level - only the freshness of this point tells them "
     "apart.",
-    DISPATCH_LAST_VALUE % "action", "none", None, 0, 6,
+    DISPATCH_LAST_VALUE % "action", "none", None, 6, 6,
     [{"color": "red", "value": None}],
     y=4, no_value="NO DISPATCHER", string_value=True,
     mappings=[{"type": "value", "options": {
@@ -532,7 +578,7 @@ panels.append(stat(
     "The setpoint written to 0x0881, in the same sign convention as Battery Power now: "
     "positive charging, negative discharging. Compare the two - a large gap between "
     "commanded and actual means the inverter accepted the command and did not honour it.",
-    DISPATCH_LAST % "setpoint_w", "watt", None, 6, 6,
+    DISPATCH_LAST % "setpoint_w", "watt", None, 12, 4,
     [{"color": "red", "value": None}, {"color": "green", "value": 0}],
     y=4))
 
@@ -540,7 +586,7 @@ panels.append(stat(
     22, "Commanded target SoC",
     "Where the current command is driving the battery (0x0886). Only meaningful while a "
     "Mode 2 command is live - a hold writes no target, so this holds whatever was last set.",
-    DISPATCH_LAST % "target_soc_pct", "percent", 0, 12, 6,
+    DISPATCH_LAST % "target_soc_pct", "percent", 0, 16, 4,
     [{"color": "text", "value": None}],
     y=4))
 
@@ -594,7 +640,7 @@ panels.append(stat(
        float(v: r.expires_at) - float(v: int(v: now())) / 1000000000.0 }))
   |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then 0.0 else r._value }))
   |> yield(name: "expires in")
-''', "s", 0, 18, 6,
+''', "s", 0, 20, 4,
     [{"color": "text", "value": None}, {"color": "red", "value": 0},
      {"color": "green", "value": 60}],
     y=4, no_value="no command"))

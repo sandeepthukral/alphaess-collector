@@ -469,6 +469,93 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "What the dispatcher DECIDED, from slot_action -- not what it commanded. In dry run nothing is written to the inverter, so every other panel in this row reads 'no dispatch' all day and this is the only one that moves. 'no slot' is normal: it means the plan has nothing scheduled for right now, not that the dispatcher is down - Dispatch state is the panel that tells you that.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [
+            {
+              "options": {
+                "charge": {
+                  "color": "green",
+                  "index": 0
+                },
+                "discharge": {
+                  "color": "orange",
+                  "index": 1
+                },
+                "hold": {
+                  "color": "blue",
+                  "index": 2
+                },
+                "self": {
+                  "color": "text",
+                  "index": 3
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "noValue": "no slot",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 4
+      },
+      "id": 25,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"slot_action\")\n  |> last()\n  |> keep(columns: [\"_value\"])\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Decision",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
       "description": "What the dispatcher last told the inverter to do, decoded. NO DISPATCHER in red means no point has arrived for five minutes: the loop is down, and whatever the registers still hold is not being refreshed. Note that a released dispatch and a dead dispatcher look identical at the register level - only the freshness of this point tells them apart.",
       "fieldConfig": {
         "defaults": {
@@ -528,7 +615,7 @@
       "gridPos": {
         "h": 4,
         "w": 6,
-        "x": 0,
+        "x": 6,
         "y": 4
       },
       "id": 20,
@@ -595,8 +682,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
+        "w": 4,
+        "x": 12,
         "y": 4
       },
       "id": 21,
@@ -659,8 +746,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 12,
+        "w": 4,
+        "x": 16,
         "y": 4
       },
       "id": 22,
@@ -732,8 +819,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 18,
+        "w": 4,
+        "x": 20,
         "y": 4
       },
       "id": 23,
