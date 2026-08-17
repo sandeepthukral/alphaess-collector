@@ -26,6 +26,20 @@ deleted, and `delete_branch_on_merge` is on in both repos. Section 5's Part 2 is
 both seams closed, capacity now travelling with the plan and the `planning` schema written
 down and tested. 3,124 tests pass, ruff clean on the CI paths.
 
+**Update, 2026-08-17 (later):** the capacity work is deployed and confirmed on the NAS.
+`alphaess-dashboard.json` reads `Capacity (Wh) 27900` from the plan, and both SoC traces
+render as percentages against it. Getting there needed one unplanned fix (#89): the dispatch
+service has been in `docker-compose.yml` since section 1, its `INFLUX_TOKEN_DISPATCH` guard
+is stack-wide, and so a `.env` without that key blocked `docker compose restart grafana` — a
+command touching neither dispatch nor Influx. The variable is now in `DEPLOY.md`'s token
+table with the `influx auth create` that mints it, and `tests/test_compose_env_guards.py`
+fails if a future `:?` guard is added without both. Note what CI cannot do here: `ci.yml`
+copies `.env.example`, which carries a placeholder for every key, so any new guard is green
+in CI and blocking on the NAS. The check that generalises is not "does it boot".
+
+The dispatch panels read `NO DISPATCHER` / `No data`, which is correct — the service has
+never been started, and section 3 is what starts it.
+
 Next action: **section 2**, which is the part that needs you at a keyboard on the NAS —
 nothing in section 3 can start until it is done, and turning off the AlphaESS app's price
 control gates all of it. The only code work left in section 5 is Part 3's heartbeat, which
@@ -69,7 +83,9 @@ lands in `battery-planning`, not here.
       was only gitignored from the *third* commit in the stack, so a `git add -A` from either
       of the first two would have staged the real plan archive into a public repo. Moved to
       the first commit
-- [ ] Re-confirm `dispatch/testdata/` is still ignored after the merges
+- [x] Re-confirm `dispatch/testdata/` is still ignored after the merges — **2026-08-17**,
+      `.gitignore:234` still matches and `git ls-files dispatch/testdata/` is empty, so
+      nothing slipped in while the six branches were being merged and deleted
 
 ## 2. Prerequisites for going live
 
