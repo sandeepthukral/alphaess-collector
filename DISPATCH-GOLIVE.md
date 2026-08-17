@@ -21,8 +21,15 @@ order, and the PR 75 review fixes are folded into the branches they belong to ra
 carried as a follow-up. 3,018 tests pass, ruff clean, `docker compose config` passes with
 `.env.example`.
 
+**Update, 2026-08-17:** every PR from section 1 is merged (#75–#87), the stale branches are
+deleted, and `delete_branch_on_merge` is on in both repos. Section 5's Part 2 is finished —
+both seams closed, capacity now travelling with the plan and the `planning` schema written
+down and tested. 3,124 tests pass, ruff clean on the CI paths.
+
 Next action: **section 2**, which is the part that needs you at a keyboard on the NAS —
-nothing in section 3 can start until it is done. The PRs are waiting on review, not on work.
+nothing in section 3 can start until it is done, and turning off the AlphaESS app's price
+control gates all of it. The only code work left in section 5 is Part 3's heartbeat, which
+lands in `battery-planning`, not here.
 
 ---
 
@@ -117,27 +124,35 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
 Not blocking go-live. They make it safe to *change* things later, which is a different
 problem and a real one.
 
-- [ ] **Publish capacity into InfluxDB** (Part 2a). Verified still outstanding on 2026-08-16:
-      every dashboard carries `27900` as a plain text-box variable, and the number is written
-      by hand in nine places across two repos and two units (`27.9` kWh for the collector,
-      `27900` Wh for everything else). No change to it is scheduled — 27,900 is the
-      commandable capacity, and the ~30,500 Wh in `hardware.py` is headroom the pack only
-      reaches after a long hold at 100 %. The reason to do this anyway: the dashboards divide
-      one repo's `soc_wh` by the other's copy of the constant, so any half-done change renders
-      as a plausible, wrong percentage rather than an error — and `alphaess-dashboard.json`,
-      the one we will be watching the dispatcher on, has no generator and no test guarding its
-      copy.
+- [x] **Publish capacity into InfluxDB** (Part 2a). **Done 2026-08-17**, both halves. It was
+      written by hand in nine places across two repos and two units (`27.9` kWh for the
+      collector, `27900` Wh for everything else); the planner now publishes it on every
+      `plan` point and all three dashboards read it from there. What remains hardcoded is
+      `.env`'s `BATTERY_CAPACITY_KWH`, deliberately — `pricing.py` needs it with no plan in
+      hand — and `hardware.py`'s constant, which is the planner's own default. No change to
+      the number is scheduled — 27,900 is the commandable capacity, and the ~30,500 Wh in
+      `hardware.py` is headroom the pack only reaches after a long hold at 100 %. The reason
+      to do it anyway: the dashboards divided one repo's `soc_wh` by the other's copy of the
+      constant, so any half-done change rendered as a plausible, wrong percentage rather than
+      an error — and `alphaess-dashboard.json`, the one we will be watching the dispatcher
+      on, had no generator and no test guarding its copy. It now has the second of those.
   - [x] `battery-planning`: add `capacity_wh` as a field on each `plan` point — **PR #25
         over there, 2026-08-17.** It publishes `ratedBatteryCapacity`, **not**
         `hardware.CAPACITY_WH`: `BT_CAP` and the Domoticz user variable both override it, so
         the default is not necessarily what a given plan was optimised against, and on a
         backtest it is wrong every time. Publishing the default would have moved the same
         mismatch one layer down and hidden it better
-  - [ ] here: both dashboard generators read it from the plan instead of hardcoding it.
-        **Blocked** — and not merely on the PR above, but on it being *deployed and writing*.
-        Pointing the dashboards at a field the planner is not yet emitting blanks every SoC
-        panel. Order: merge #25, redeploy the planner, confirm `capacity_wh` is arriving,
-        then change the generators
+  - [x] here: the dashboards read it from the plan instead of hardcoding it — **2026-08-17.**
+        Unblocked by the deploy: `capacity_wh` confirmed arriving at `27900`, single distinct
+        value over the last day, with all thirteen pre-existing fields intact. All **three**
+        dashboards changed, not the two with generators — `alphaess-dashboard.json` has no
+        generator and is hand-edited, and leaving it on the literal would have been the exact
+        half-done state this item exists to prevent, on the dashboard we will be watching the
+        dispatcher on. The variable went `textbox` → `query`; `int()` in the query is load-
+        bearing, since every consumer interpolates it as `float(v: ${capacity_wh})` and the
+        field is a float. `tests/fixtures/planning_schema.json` had to declare `capacity_wh`
+        first: the schema test walks *any* `"query"` key, so a Flux template variable is
+        checked against the fixture exactly like a panel is
   - [x] extend `tests/test_grafana_provisioning.py` to cover `alphaess-battery-score.json`
         — **2026-08-17.** It now *discovers* every dashboard carrying a `capacity_wh`
         variable rather than naming two by hand, which is what let the score dashboard sit

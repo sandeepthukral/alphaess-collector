@@ -26,9 +26,10 @@
  "verified_against_live_bucket": "2026-08-17",
  "measurements": {
   "plan": {
-   "why": "The LP optimiser's output. Read by dispatch/plan.py:from_influx and by the plan and main dashboards.",
+   "why": "The LP optimiser's output. Read by dispatch/plan.py:from_influx and by the plan, main and score dashboards. capacity_wh is required rather than optional because all three dashboards divide by it to render a percentage: if it stops arriving the variable resolves to nothing, every SoC panel breaks, and the score dashboard reads this measurement for nothing else.",
    "tags": ["plan_run"],
    "required_fields": [
+    "capacity_wh",
     "charge_wh",
     "discharge_wh",
     "export_wh",
