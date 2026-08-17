@@ -903,6 +903,27 @@ translator.
    Confirmed at the register level across both runs: `0x0885 = 1` accepted and held, power
    and SoC target read back exactly as written, dead man's switch released cleanly.
 
+   **Re-derived 2026-08-17.** Run B's verdict was produced by a probe whose charge test was
+   one-sided: it checked only that the charge sat *below* the midpoint of (402 W, 1,220 W),
+   never that it sat *near* 402 W. A battery frozen at 0 W passes that — and a frozen battery
+   also exports the whole surplus, so the second channel "agreed" too. The probe would have
+   printed HONOURED for a battery that took nothing at all, which is the FLAT outcome the
+   overcommand branch has its own verdict for. The conclusion above nonetheless survives on
+   its own merits under the corrected two-sided test: |346 − 402| = 56 W, well inside
+   tolerance, and baseline grid was −1 W so the surplus-versus-baseline-charge distinction did
+   not bite either. It was luck that it did. The corrected logic and the tests that pin this
+   run's numbers are in `dispatch/test_mode1_negative.py` and
+   `tests/test_mode1_probe_verdict.py`.
+
+   The probe was also retuned in the same pass, so **a re-run is not a repeat of Run B.** It
+   now commands *half* the baseline charge rather than a third, and gives each of the three
+   predictions — 0, commanded, baseline — an equal band. Under the earlier geometry the
+   honoured verdict ran from 0.51× to 1.68× the commanded setpoint with no gap at all on the
+   low side, so a battery that honoured the *sign* while clamping the *magnitude* would have
+   read as a real setpoint — the exact claim §4.1 and §5 then build on. It is now 0.67×–1.33×
+   with a dead zone either side. Against the same ~1,220 W baseline the probe would ask for
+   ~609 W rather than 402 W.
+
    **Still untested:** whether Mode 1 honours its SoC target — reaching 83.2 % from 73.2 % is
    ~2.8 kWh and tens of minutes, far past either window, and it now matters because the power
    setpoint turned out to be real. Also unexplained: a single **~4.8 kW charge with 3,555 W of
