@@ -104,7 +104,9 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
 
 ## 4. Go live
 
-- [ ] Add `--live` to the `dispatch` service's `command:` in `docker-compose.yml`
+- [ ] Add `DISPATCH_LIVE=1` to `.env` — **not** to `docker-compose.yml`, which is tracked and
+      guarded by `tests/test_dispatch_deployment.py`; editing it to go live would red the
+      suite on every branch afterwards
 - [ ] `sudo docker compose up -d dispatch`, and **watch the first command land** — verify the
       readback matches what was written, not just that the log says "commanded"
 - [ ] Confirm release-on-exit works: `docker compose stop dispatch`, then check the block is

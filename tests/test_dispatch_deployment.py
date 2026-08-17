@@ -26,6 +26,45 @@ def test_the_service_starts_in_dry_run():
     assert "--live" not in DISPATCH["command"], (
         "dispatch would start writing to the inverter on deploy -- see the plan's "
         "verification steps 6 and 7")
+    # Every service, not just this one: the flag would do the same damage smuggled in
+    # anywhere that can reach the inverter. Checked against the parsed commands rather than
+    # the file text, because the comments around them discuss `--live` on purpose.
+    for name, svc in COMPOSE["services"].items():
+        assert "--live" not in str(svc.get("command", "")), (
+            f"service {name} would start writing to the inverter on deploy -- going live "
+            f"has to be a setting, or this very test fails on every branch from the moment "
+            f"the operator performs it")
+
+
+def test_going_live_is_a_setting_rather_than_an_edit_to_a_tracked_file():
+    """The guard above is only honest if there is another way to go live.
+
+    Without one it is not a safety property, it is an instruction to delete a test -- the go-live
+    checklist said to edit `command:` in tracked compose, which would have made `pytest` fail
+    permanently the day the battery went live. So the flag comes from an environment variable
+    that is unset by default, and `entrypoint.sh` is what appends it.
+
+    It cannot come through compose's `command:`: scheduler.py's parser takes only optional
+    flags, so an empty `${DISPATCH_LIVE_ARG:-}` arrives as a positional and argparse exits 2
+    before the loop starts. That is why the gate lives in the shell.
+    """
+    assert "DISPATCH_LIVE" in DISPATCH["environment"], (
+        "the dispatch service cannot see the go-live switch")
+    assert DISPATCH["environment"]["DISPATCH_LIVE"].startswith("${DISPATCH_LIVE:-"), (
+        "the switch must default to dry run when the variable is absent from .env")
+    assert "DISPATCH_LIVE" in ENTRYPOINT and "--live" in ENTRYPOINT, (
+        "nothing appends --live, so the service can never be taken live")
+    assert "$LIVE" in ENTRYPOINT and '"$LIVE"' not in ENTRYPOINT, (
+        "the appended flag must be unquoted -- quoting it passes an empty string as a "
+        "positional argument, which is the failure this mechanism exists to avoid")
+
+
+def test_the_env_example_does_not_ship_the_live_switch_preloaded():
+    """`cp .env.example .env` is how a deployment starts. A `DISPATCH_LIVE=0` sitting there
+    pre-filled is one keystroke from a battery nobody is watching; commented out, going live
+    stays a deliberate act."""
+    live = [ln for ln in ENV_EXAMPLE.splitlines() if ln.startswith("DISPATCH_LIVE")]
+    assert not live, f"the live switch shipped uncommented in .env.example: {live}"
 
 
 def test_there_is_exactly_one_dispatch_service_and_it_does_not_scale():

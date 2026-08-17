@@ -59,4 +59,19 @@ python -u /app/translate.py --slots "$SLOTS" || \
     done
 ) &
 
-exec python -u /app/scheduler.py --slots "$SLOTS" "$@"
+# Going live is a SETTING, not an edit to a tracked file. The obvious mechanism -- putting
+# `${DISPATCH_LIVE_ARG:-}` in the compose `command:` -- does not work: scheduler.py's parser
+# takes only optional flags, so the empty string arrives as a positional and argparse exits 2
+# with "unrecognized arguments" before the loop ever starts. Verified, not assumed.
+#
+# So the flag is appended here instead, and $LIVE is deliberately UNQUOTED: an empty value has
+# to contribute no argv element at all, which is exactly what quoting would prevent.
+LIVE=""
+case "${DISPATCH_LIVE:-0}" in
+    1|true|yes|on)
+        LIVE="--live"
+        echo "DISPATCH_LIVE=${DISPATCH_LIVE} -- the dispatcher will WRITE to the inverter" >&2
+        ;;
+esac
+
+exec python -u /app/scheduler.py --slots "$SLOTS" $LIVE "$@"
