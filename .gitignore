@@ -232,3 +232,14 @@ __marimo__/
 # Committed fixtures live in tests/fixtures/plans/ and are SYNTHETIC only (synthetic_*.txt).
 # See PLAN-repo-seams.md and DESIGN-dispatch.md.
 dispatch/testdata/
+
+# Editor swap and backup files. Not hypothetical: `scripts/.backup-influxdb.sh.swp`
+# was committed to the `backup-folder-cloud-sync` branch in August 2026, because
+# nothing here excluded it. A swapfile carries whatever was in the buffer at the
+# time, which in this repo can mean tokens or plan data, and it is dotfile-hidden
+# so `git status` is the only place it shows up.
+*.swp
+*.swo
+*.swn
+*~
+.*.sw[a-p]
