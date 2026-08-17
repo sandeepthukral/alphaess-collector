@@ -127,11 +127,23 @@ problem and a real one.
       as a plausible, wrong percentage rather than an error — and `alphaess-dashboard.json`,
       the one we will be watching the dispatcher on, has no generator and no test guarding its
       copy.
-  - [ ] `battery-planning`: add `capacity_wh` as a field on each `plan` point
-  - [ ] here: both dashboard generators read it from the plan instead of hardcoding it
-  - [ ] extend `tests/test_grafana_provisioning.py:290` to cover
-        `alphaess-battery-score.json`, which it currently misses despite that file carrying
-        `27900` at line 1644
+  - [x] `battery-planning`: add `capacity_wh` as a field on each `plan` point — **PR #25
+        over there, 2026-08-17.** It publishes `ratedBatteryCapacity`, **not**
+        `hardware.CAPACITY_WH`: `BT_CAP` and the Domoticz user variable both override it, so
+        the default is not necessarily what a given plan was optimised against, and on a
+        backtest it is wrong every time. Publishing the default would have moved the same
+        mismatch one layer down and hidden it better
+  - [ ] here: both dashboard generators read it from the plan instead of hardcoding it.
+        **Blocked** — and not merely on the PR above, but on it being *deployed and writing*.
+        Pointing the dashboards at a field the planner is not yet emitting blanks every SoC
+        panel. Order: merge #25, redeploy the planner, confirm `capacity_wh` is arriving,
+        then change the generators
+  - [x] extend `tests/test_grafana_provisioning.py` to cover `alphaess-battery-score.json`
+        — **2026-08-17.** It now *discovers* every dashboard carrying a `capacity_wh`
+        variable rather than naming two by hand, which is what let the score dashboard sit
+        outside the check while dividing by `27900` on thirteen panels. Three are found
+        today, and a guard fails if fewer are, so the loop cannot go vacuous. A second test
+        pins each generator against the dashboard it generates
   - [ ] also review `slots.HARD_MAX_POWER_W` when the battery changes — a bigger battery may
         arrive with a bigger inverter
 - [x] **Commit the schema fixture** (Part 2b). **2026-08-17.**
