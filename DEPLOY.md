@@ -35,7 +35,7 @@ and `GRAFANA_ADMIN_PASSWORD`.
 `GRAFANA_ADMIN_PASSWORD` has **no default** — Grafana is the only service
 published to the LAN, and its datasource proxy can query every bucket the Grafana
 token can read, so a missing key fails loudly instead of coming up on
-admin/admin. Same for the three `INFLUX_TOKEN_*` variables below. Compose
+admin/admin. Same for the four `INFLUX_TOKEN_*` variables below. Compose
 interpolates the whole file on *every* subcommand, so until those five keys
 exist even `docker compose ps` will refuse, naming the one it wants — that is the
 guard working, not a broken checkout.
@@ -882,10 +882,28 @@ Every service gets a token scoped to what it actually does:
 | `INFLUX_TOKEN_PUSHER` | read `alphaess` | Only ever reads the newest sample. |
 | `INFLUX_TOKEN_KUMA` | read `alphaess` | For the Uptime Kuma keyword monitor in ["Monitoring the nightly efficiency job"](#monitoring-the-nightly-efficiency-job). Deliberately not `INFLUX_TOKEN_GRAFANA`: that one also reads `planning`, and pasting it into a second system means revoking one breaks the other. Optional — mint it only if you set that monitor up. |
 | `INFLUX_TOKEN_GRAFANA` | read on every bucket it charts | Read-only. Anyone who reaches the Grafana UI can issue arbitrary Flux through the datasource proxy, so this is the one most worth keeping narrow. |
+| `INFLUX_TOKEN_DISPATCH` | read `planning`, read + write `alphaess` | Reads the plan the translator consumes and writes the `dispatch_state` readback behind the dashboard's dispatch panels. The only process in the stack that reads another project's bucket, which is why it is not the collector's token. **Needed before any compose subcommand works**, including ones that have nothing to do with dispatch — see below. |
 
 None of them have a fallback: compose fails to start and names the missing
 variable. A service that quietly reverted to the admin token would defeat the
 point.
+
+That guard is stack-wide, not per-service. Compose interpolates the whole file on
+every subcommand, so a missing `INFLUX_TOKEN_DISPATCH` stops `docker compose
+restart grafana` — a command that touches neither dispatch nor Influx. The error
+names the variable and points here, which is the guard working; it is not a
+broken checkout. Until you mint the real token, an inert placeholder in `.env` is
+enough to unblock the rest of the stack, because `dispatch` only ever starts on an
+explicit `up -d dispatch`:
+
+```
+INFLUX_TOKEN_DISPATCH=placeholder-not-yet-minted
+```
+
+CI cannot catch this: `.github/workflows/ci.yml` copies `.env.example`, which
+carries a placeholder for every key. A new `:?` guard is therefore green in CI and
+blocking on the NAS until the key is added to the real `.env` — add both in the
+same change.
 
 Mint them once, after the stack has started for the first time. `influx auth
 create` needs bucket **IDs**, not names:
@@ -916,6 +934,49 @@ sudo docker compose exec -T influxdb influx auth create \
 Copy each printed token into the matching `.env` variable, then `sudo docker
 compose up -d`. The Grafana token is created the same way but should list a
 `--read-bucket` for every bucket it charts — see below.
+
+### `INFLUX_TOKEN_DISPATCH`
+
+The dispatcher's token is minted separately because it is the only one spanning
+two buckets, so it cannot be created until the `planning` bucket exists — see
+["The `planning` bucket"](#the-planning-bucket) below. Run that section first.
+
+```sh
+cd /volume1/docker/alphaess-collector
+set -a; . ./.env; set +a
+
+ALPHAESS_ID=$(sudo docker compose exec -T influxdb influx bucket list \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" --name "$INFLUX_BUCKET" --hide-headers | awk '{print $1}')
+PLANNING_ID=$(sudo docker compose exec -T influxdb influx bucket list \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" --name planning --hide-headers | awk '{print $1}')
+echo "alphaess: $ALPHAESS_ID  planning: $PLANNING_ID"
+
+sudo docker compose exec -T influxdb influx auth create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "dispatch: r planning, rw alphaess" \
+  --read-bucket "$PLANNING_ID" \
+  --read-bucket "$ALPHAESS_ID" --write-bucket "$ALPHAESS_ID"
+```
+
+Both `echo`ed ids must be non-empty. `influx bucket list --name` on a bucket that
+does not exist prints nothing and exits 0, so a typo yields an empty `--read-bucket`
+argument and a token scoped to less than you asked for — which surfaces much later
+as the dispatcher reading no plan and holding at self-consumption.
+
+**Read on `planning`, never write.** The plan is the other project's output and
+this one only consumes it; a write scope here would let a dispatcher bug corrupt
+the input it is reading. Write is on `alphaess` alone, for the `dispatch_state`
+readback behind the dashboard's dispatch panels.
+
+Put it in `.env` as `INFLUX_TOKEN_DISPATCH`, replacing any placeholder, then start
+the service on its own:
+
+```sh
+sudo docker compose up -d dispatch
+```
+
+Not a bare `up -d`, which recreates the collector and cost 922 s of samples on
+2026-08-10. The service starts in **dry run** regardless (`DISPATCH_LIVE` defaults
+to 0); going live is a separate, deliberate step — see `DISPATCH-GOLIVE.md`.
 
 > Tokens are shown in full only when created. If you lose one, delete it
 > (`influx auth list` / `influx auth delete`) and mint a replacement; there is no
@@ -992,6 +1053,10 @@ sudo docker compose exec -T influxdb influx auth create \
 
 The second token goes in `INFLUX_TOKEN_GRAFANA` here; the first goes in the
 planning project's own `.env` and never appears in this repository.
+
+Once this bucket exists, mint `INFLUX_TOKEN_DISPATCH` too — see
+["`INFLUX_TOKEN_DISPATCH`"](#influx_token_dispatch) above. It is the third reader
+of `planning` and the reason that section could not be run before this one.
 
 > **The planning token cannot read `planning`.** That is deliberate, but it means
 > the project cannot query back what it has written — no idempotent "skip runs
