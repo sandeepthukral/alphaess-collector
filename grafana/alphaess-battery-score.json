@@ -1640,24 +1640,23 @@
   "templating": {
     "list": [
       {
-        "current": {
-          "text": "27900",
-          "value": "27900"
+        "current": {},
+        "datasource": {
+          "type": "influxdb",
+          "uid": "${DS_ALPHAESS}"
         },
-        "description": "Usable battery capacity in Wh. plan_score stores SoC in Wh on both sides; this is what the SoC panel divides by. Keep it equal to the same variable on the plan dashboard and to BT_CAP in the planner.",
+        "definition": "capacity_wh from the newest plan point",
+        "description": "Usable battery capacity in Wh, read from the newest `plan` point the planner wrote. plan_score stores SoC in Wh on both sides; this is what the SoC panel divides by. It no longer has to be kept equal to the plan dashboard and to BT_CAP by hand -- all three now read the planner.",
         "hide": 0,
         "label": "Capacity (Wh)",
         "name": "capacity_wh",
-        "options": [
-          {
-            "selected": true,
-            "text": "27900",
-            "value": "27900"
-          }
-        ],
-        "query": "27900",
+        "options": [],
+        "query": "from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"capacity_wh\")\n  |> group()\n  |> map(fn: (r) => ({_value: r._value, _run: time(v: r.plan_run)}))\n  |> sort(columns: [\"_run\"], desc: true)\n  |> limit(n: 1)\n  |> map(fn: (r) => ({_value: string(v: int(v: r._value))}))",
+        "refresh": 1,
+        "regex": "",
         "skipUrlSync": false,
-        "type": "textbox"
+        "sort": 0,
+        "type": "query"
       }
     ]
   },
@@ -1669,6 +1668,6 @@
   "timezone": "browser",
   "title": "AlphaESS Plan vs Actual",
   "uid": "alphaess-battery-score",
-  "version": 3,
+  "version": 5,
   "weekStart": ""
 }

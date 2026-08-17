@@ -1383,24 +1383,23 @@
   "templating": {
     "list": [
       {
-        "current": {
-          "text": "27900",
-          "value": "27900"
+        "current": {},
+        "datasource": {
+          "type": "influxdb",
+          "uid": "${DS_ALPHAESS}"
         },
-        "description": "Usable battery capacity in Wh. The plan stores SoC in Wh; every percentage on this dashboard divides by this. It is not in InfluxDB, so it lives here where it can be seen rather than buried in six queries.",
+        "definition": "capacity_wh from the newest plan point",
+        "description": "Usable battery capacity in Wh, read from the newest `plan` point the planner wrote. The plan stores SoC in Wh and every percentage here divides by this, so it is sourced from the same run rather than kept in step by hand.",
         "hide": 0,
         "label": "Capacity (Wh)",
         "name": "capacity_wh",
-        "options": [
-          {
-            "selected": true,
-            "text": "27900",
-            "value": "27900"
-          }
-        ],
-        "query": "27900",
+        "options": [],
+        "query": "from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"capacity_wh\")\n  |> group()\n  |> map(fn: (r) => ({_value: r._value, _run: time(v: r.plan_run)}))\n  |> sort(columns: [\"_run\"], desc: true)\n  |> limit(n: 1)\n  |> map(fn: (r) => ({_value: string(v: int(v: r._value))}))",
+        "refresh": 1,
+        "regex": "",
         "skipUrlSync": false,
-        "type": "textbox"
+        "sort": 0,
+        "type": "query"
       }
     ]
   },
@@ -1412,5 +1411,5 @@
   "timezone": "browser",
   "title": "AlphaESS Dashboard",
   "uid": "alphaess-main",
-  "version": 14
+  "version": 16
 }

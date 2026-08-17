@@ -26,6 +26,44 @@ import json, sys
 
 DS = {"type": "influxdb", "uid": "${DS_ALPHAESS}"}
 
+# Capacity, read from the plan rather than typed in here. See generate-battery-plan.py for
+# why the query is shaped the way it is; the string is duplicated because these two scripts
+# share no module, and tests/test_grafana_provisioning.py pins every dashboard to the same
+# query for exactly that reason.
+#
+# `plan` is the only thing this dashboard reads outside `plan_score`, which carries no
+# capacity of its own. Taking the newest run means a capacity change re-renders older days at
+# the new number -- the same thing the literal did, only visibly and all at once instead of
+# whenever someone remembered to edit three files.
+CAPACITY_QUERY = '''from(bucket: "planning")
+  |> range(start: -14d, stop: 72h)
+  |> filter(fn: (r) => r._measurement == "plan" and r._field == "capacity_wh")
+  |> group()
+  |> map(fn: (r) => ({_value: r._value, _run: time(v: r.plan_run)}))
+  |> sort(columns: ["_run"], desc: true)
+  |> limit(n: 1)
+  |> map(fn: (r) => ({_value: string(v: int(v: r._value))}))'''
+
+CAPACITY_VAR = {
+    "current": {},
+    "datasource": DS,
+    "definition": "capacity_wh from the newest plan point",
+    "description": "Usable battery capacity in Wh, read from the newest `plan` point the "
+                   "planner wrote. plan_score stores SoC in Wh on both sides; this is what "
+                   "the SoC panel divides by. It no longer has to be kept equal to the plan "
+                   "dashboard and to BT_CAP by hand -- all three now read the planner.",
+    "hide": 0,
+    "label": "Capacity (Wh)",
+    "name": "capacity_wh",
+    "options": [],
+    "query": CAPACITY_QUERY,
+    "refresh": 1,
+    "regex": "",
+    "skipUrlSync": False,
+    "sort": 0,
+    "type": "query",
+}
+
 # Every panel starts from the same three lines. Kept as one string so a change to the
 # bucket or measurement cannot be applied to eight queries and missed on the ninth.
 SCORE = '''from(bucket: "planning")
@@ -523,19 +561,7 @@ dashboard = {
     "refresh": "30m",
     "schemaVersion": 42,
     "tags": ["alphaess", "battery", "score"],
-    "templating": {"list": [{
-        "current": {"text": "27900", "value": "27900"},
-        "description": "Usable battery capacity in Wh. plan_score stores SoC in Wh on both "
-                       "sides; this is what the SoC panel divides by. Keep it equal to the "
-                       "same variable on the plan dashboard and to BT_CAP in the planner.",
-        "hide": 0,
-        "label": "Capacity (Wh)",
-        "name": "capacity_wh",
-        "options": [{"selected": True, "text": "27900", "value": "27900"}],
-        "query": "27900",
-        "skipUrlSync": False,
-        "type": "textbox",
-    }]},
+    "templating": {"list": [CAPACITY_VAR]},
     # Whole days back and nothing forward: there is no score for a day that has not ended.
     "time": {"from": "now-7d/d", "to": "now"},
     "timepicker": {},
@@ -546,7 +572,7 @@ dashboard = {
     # already stored unless the incoming version is higher - it reads the new file, compares,
     # and does nothing, with no error and no log line. The symptom is a fix that appears not
     # to have worked, which sends you back to re-debug a query that was already correct.
-    "version": 3,
+    "version": 5,
     "weekStart": "",
 }
 

@@ -19,6 +19,75 @@ import json, sys
 
 DS = {"type": "influxdb", "uid": "${DS_ALPHAESS}"}
 
+# The capacity every SoC percentage on this dashboard divides by, read from the plan that the
+# percentage describes rather than typed in here. Until 2026-08-17 this was a textbox holding
+# a literal 27900, one of nine hand-written copies across two repos and two units; the
+# planner now publishes capacity_wh on every `plan` point (battery-planning PR #25), so the
+# number travels with the data it explains. See PLAN-repo-seams.md Part 2a.
+#
+# int() is not cosmetic. The field is a float, every consumer interpolates it as
+# `float(v: ${capacity_wh})`, and a value Grafana chooses to render as 2.79e+04 is not
+# parseable there. Pinning it to an integer string removes the question.
+#
+# The shape below is NEWEST's, and for NEWEST's reason: "the newest plan" means the newest
+# `plan_run`, parsed, and nothing else works. Three separate traps, all confirmed against the
+# live bucket on 2026-08-17:
+#
+#   group() - `plan` is tagged with plan_run, so the filter yields one table per run and a
+#   bare last() returns the last row of EACH. keep() drops the column but does not merge the
+#   tables; only group() does. The query as first written returned 2 rows.
+#
+#   sort by plan_run, not by _time - runs share a horizon end. The 09:01:20Z and 09:05:03Z
+#   runs both stop at 2026-08-17T21:45:00Z, because the horizon is cut at the end of the
+#   priced window rather than a fixed span from the run. Picking the row with the greatest
+#   _time therefore picks arbitrarily between every run still in flight, which is fine while
+#   they all say 27900 and wrong on precisely the day this variable exists for.
+#
+#   time(v:) rather than a string sort - plan_run is UTC now, but points written before
+#   2026-07-30 carry a local offset, and a string sort mixes the two formats wrongly.
+#
+# stop: 72h because plan points are timestamped into the future; the default stop of now()
+# hides the part of a run that has not elapsed yet, and a run written minutes ago may be
+# entirely in the future. -14d to match NEWEST below, deliberately: the two have to fail at the
+# same moment. If this window were shorter, an outage between the two lengths would leave NEWEST
+# still finding a plan to draw while the capacity variable resolved to nothing -- every panel
+# rendering, and all twelve `float(v: ${capacity_wh})` sites erroring at once.
+CAPACITY_QUERY = '''from(bucket: "planning")
+  |> range(start: -14d, stop: 72h)
+  |> filter(fn: (r) => r._measurement == "plan" and r._field == "capacity_wh")
+  |> group()
+  |> map(fn: (r) => ({_value: r._value, _run: time(v: r.plan_run)}))
+  |> sort(columns: ["_run"], desc: true)
+  |> limit(n: 1)
+  |> map(fn: (r) => ({_value: string(v: int(v: r._value))}))'''
+
+CAPACITY_VAR = {
+    # No hardcoded `current`/`options`: a stale entry here is how a query variable keeps
+    # serving the old constant after the query starts returning something else.
+    "current": {},
+    "datasource": DS,
+    "definition": "capacity_wh from the newest plan point",
+    "description": "Usable battery capacity in Wh, read from the newest `plan` point the "
+                   "planner wrote. The plan stores SoC in Wh and every percentage here "
+                   "divides by this, so it is sourced from the same run rather than kept in "
+                   "step by hand.",
+    # hide: 0 - still visible, and still the honest place to look when a percentage seems
+    # wrong. It is no longer editable, which is the point: editing it never changed the
+    # battery, only the arithmetic.
+    "hide": 0,
+    "label": "Capacity (Wh)",
+    "name": "capacity_wh",
+    "options": [],
+    "query": CAPACITY_QUERY,
+    # On dashboard load. The alternative, on time-range change, re-runs it for a value that
+    # cannot depend on the time range.
+    "refresh": 1,
+    "regex": "",
+    "skipUrlSync": False,
+    "sort": 0,
+    "type": "query",
+}
+
 # Every panel that shows "the plan" has to agree on which plan that is. Picked by parsing
 # plan_run to a time rather than sorting the tag as a string: the planner writes UTC now, but
 # points written before 2026-07-30 carry a local offset, and a string sort mixes those two
@@ -942,22 +1011,7 @@ dashboard = {
     "refresh": "5m",
     "schemaVersion": 42,
     "tags": ["alphaess", "battery", "plan"],
-    "templating": {"list": [{
-        "current": {"text": "27900", "value": "27900"},
-        "description": "Usable battery capacity in Wh. The plan stores SoC in Wh; every "
-                       "percentage on this dashboard divides by this. It is not in InfluxDB, "
-                       "so it lives here where it can be seen rather than buried in six queries.",
-        # textbox, not constant: Grafana hides constant variables entirely, which is the
-        # opposite of the point - this number has to be visible and changeable if the
-        # battery ever does.
-        "hide": 0,
-        "label": "Capacity (Wh)",
-        "name": "capacity_wh",
-        "options": [{"selected": True, "text": "27900", "value": "27900"}],
-        "query": "27900",
-        "skipUrlSync": False,
-        "type": "textbox",
-    }]},
+    "templating": {"list": [CAPACITY_VAR]},
     # price_high_eur / price_low_eur used to live here, holding 0.16472 / 0.05733 - a
     # snapshot of the alphaess app taken on 2026-08-01 and never updated again. Nothing kept
     # them in step with the app, and the panel's own purpose was retuning the app, so using
@@ -982,7 +1036,10 @@ dashboard = {
     # 9: From/Until in the settings table drop the year and the seconds.
     # 10: dispatch row (section 7) - four command stats, the register decode table, and the
     #     commanded-SoC series on panel 5. Everything below panel 5 moves down 10 rows.
-    "version": 10,
+    # 11: capacity_wh becomes a query variable reading the plan, replacing the 27900 textbox.
+    # 12: that query picks by parsed plan_run over a -14d/72h window, not by the last row of
+    #     every run - runs share a horizon end, so sorting on _time tied across all of them.
+    "version": 12,
     "weekStart": "",
 }
 

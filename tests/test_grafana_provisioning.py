@@ -314,38 +314,96 @@ def test_the_capacity_variable_was_found_on_more_than_one_dashboard():
         f"renamed, or a dashboard that divides by capacity has stopped declaring it")
 
 
-def test_every_dashboard_agrees_on_battery_capacity():
-    """`capacity_wh` is not in InfluxDB yet, so each dashboard carries its own copy.
+def test_no_dashboard_still_holds_its_own_copy_of_the_capacity():
+    """The half-done state `PLAN-repo-seams.md` Part 2a exists to prevent.
 
-    Every SoC percentage on all of them divides by it. Change it on one when the battery
-    changes and the others keep reporting percentages that are merely plausible -- there is
-    no error, just a wrong number rendered confidently.
+    Until 2026-08-17 each dashboard carried `27900` as a textbox, and every SoC percentage
+    divided by its own copy. A capacity change applied to one and not the others renders a
+    plausible, wrong percentage -- no error, just a confident wrong number. The planner now
+    publishes `capacity_wh` on every `plan` point, so the number travels with the data it
+    explains and the dashboards read it.
 
-    Discovered rather than listed: naming the files by hand is what let the score dashboard
-    sit outside this check. `PLAN-repo-seams.md` Part 2a replaces the copies with a query
-    against the planner's own `capacity_wh` field, at which point this test changes shape --
-    but it does not disappear, because a dashboard left on a hardcoded value after that
-    migration is exactly the half-done state Part 2a exists to prevent.
+    This is the earlier agreement test in its new shape: it no longer compares the copies to
+    each other, it asserts there are none. A dashboard reverted to a textbox -- by an export
+    from the Grafana UI, most likely -- fails here rather than drifting quietly.
     """
-    values = {p.name: (v["query"], v["current"]["value"])
-              for p, v in _dashboards_with_capacity()}
-    assert len(set(values.values())) == 1, (
-        f"dashboards disagree about battery capacity: {values}")
+    literal = {p.name: v for p, v in _dashboards_with_capacity()
+               if v.get("type") != "query"}
+    assert not literal, (
+        f"these dashboards hold a hardcoded capacity instead of reading it from the plan: "
+        f"{ {n: v.get('query') for n, v in literal.items()} }")
 
 
-def test_the_generators_emit_the_same_capacity_as_their_dashboards():
+def test_every_dashboard_reads_the_capacity_from_the_same_place():
+    """Three dashboards, three copies of the query, and no shared module to put it in --
+    the generators are standalone scripts and one dashboard has no generator at all.
+
+    So the copies stay, but of a query rather than of a number, and this pins them equal.
+    The distinction that matters: a stale copy of the query is visible here, whereas a stale
+    copy of the number was only visible on the NAS, as a percentage nobody could check.
+    """
+    queries = {p.name: v["query"] for p, v in _dashboards_with_capacity()}
+    assert len(set(queries.values())) == 1, (
+        f"dashboards disagree about how to read the capacity: {queries}")
+
+    query = next(iter(queries.values()))
+    assert 'bucket: "planning"' in query, query
+    assert '_field == "capacity_wh"' in query, query
+    # int(), because every consumer interpolates this as `float(v: ${capacity_wh})` and the
+    # field is a float. A value Grafana renders as 2.79e+04 is not parseable there.
+    assert "int(v:" in query, query
+    # group(), because `plan` is tagged with plan_run: without it the filter yields one table
+    # per run and the variable is offered a list of values rather than one. Confirmed against
+    # the live bucket -- the first version of this query returned 2 rows.
+    assert "|> group()" in query, query
+    # Sorted by plan_run, not by _time. Runs share a horizon end (the window is cut at the end
+    # of the priced period, not a fixed span from the run), so "the row with the greatest
+    # _time" ties across every run in flight and breaks on the day the capacity changes.
+    assert 'sort(columns: ["_run"], desc: true)' in query, query
+    assert "time(v: r.plan_run)" in query, query
+
+
+def test_the_capacity_variable_is_configured_to_actually_re_read_the_query():
+    """`type: "query"` is not enough on its own, and both of the fields below are ways a
+    dashboard goes back to serving a constant while still looking correct in a diff.
+
+    `current` is written by an export from the Grafana UI, which bakes whatever the variable
+    resolved to at export time into the file. `refresh: 0` means never re-run -- the query is
+    still right there in the JSON, and never executes. Either one restores exactly the
+    failure this whole change removes: a confident wrong percentage, with a query above it
+    that reads correctly.
+
+    Matters most for alphaess-dashboard.json, which has no generator to regenerate it from
+    and is the dashboard the dispatcher will be watched on.
+    """
+    for path, var in _dashboards_with_capacity():
+        assert var.get("current") == {}, (
+            f"{path.name} has a baked-in `current` for capacity_wh ({var.get('current')!r}) "
+            f"-- almost certainly a Grafana UI export; it will serve that value forever")
+        # 1 = on dashboard load. 2 would be on time-range change, which is wrong for a value
+        # that cannot depend on the time range, but would at least still re-run.
+        assert var.get("refresh") == 1, (
+            f"{path.name} has refresh={var.get('refresh')!r} for capacity_wh -- 0 means the "
+            f"query never runs and the variable is frozen at whatever `current` holds")
+
+
+def test_the_generators_emit_the_same_capacity_query_as_their_dashboards():
     """The generated dashboards are committed, so a generator edited without re-running it
     leaves the two disagreeing -- and the dashboard, not the generator, is what deploys."""
-    committed = {v["current"]["value"] for _, v in _dashboards_with_capacity()}
+    committed = {v["query"] for _, v in _dashboards_with_capacity()}
     assert len(committed) == 1
-    value = committed.pop()
+    query = committed.pop()
+    found = 0
     for gen in GENERATORS:
         text = gen.read_text(encoding="utf-8")
         if "capacity_wh" not in text:
             continue
-        assert f'"{value}"' in text, (
-            f"{gen.name} mentions capacity_wh but not {value!r} -- it has drifted from the "
-            f"dashboards it generates")
+        found += 1
+        assert query in text, (
+            f"{gen.name} mentions capacity_wh but does not contain the query its dashboard "
+            f"carries -- it has drifted from the dashboard it generates")
+    assert found >= 2, (
+        f"only {found} generator(s) mention capacity_wh; this loop has gone vacuous")
 
 
 ALERT_FILES = sorted((PROVISIONING / "alerting").glob("*.yml"))
