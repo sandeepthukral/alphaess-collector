@@ -325,3 +325,32 @@ class TestRun:
         assert pings.by_url(SLOTS_URL) == []
 
 
+
+
+class TestNewestRun:
+    """The tag monitor #2's "up" message names. It is the one string an operator reads on a
+    phone to decide whether the battery is following a stale plan, so naming the wrong run is
+    a wrong answer in the place built for right ones."""
+
+    OFFSET = "2026-07-30T17:26:14+02:00"   # 15:26:14Z
+    LATER_Z = "2026-07-30T16:00:00Z"
+
+    def _ivs(self, *tags):
+        out = []
+        for i, tag in enumerate(tags):
+            out += records(NOW + dt.timedelta(minutes=15 * i), 1, plan_run=tag)
+        from plan import from_influx
+        return from_influx(FakeQueryApi(out), "planning", NOW, NOW + dt.timedelta(hours=2))
+
+    def test_the_later_instant_wins_over_the_later_string(self):
+        assert T.newest_run(self._ivs(self.OFFSET, self.LATER_Z)) == self.LATER_Z
+
+    def test_it_agrees_with_the_document_it_is_reported_beside(self):
+        """The docstring promises the same rule `build_document` uses. If the two ever drift,
+        the heartbeat names one run and slots.json records another."""
+        ivs = self._ivs(self.OFFSET, self.LATER_Z)
+        doc, _ = T.build_document(ivs, 27900.0, NOW)
+        assert T.newest_run(ivs) == doc["plan_run"]
+
+    def test_no_tags_at_all_is_empty_rather_than_an_error(self):
+        assert T.newest_run([]) == ""

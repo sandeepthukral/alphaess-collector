@@ -26,7 +26,7 @@ from __future__ import annotations
 import datetime as dt
 from dataclasses import dataclass
 
-from plan import PlanFormatError, PlanInterval, interval_minutes
+from plan import PlanFormatError, PlanInterval, interval_minutes, run_sort_key
 from plan import iso_z as _iso
 
 # Below this, an interval's energy is a rounding artefact rather than an intention.
@@ -311,13 +311,18 @@ def build_document(
     the whole module stays a pure function of its inputs.
     """
     slots, warnings = to_slots(intervals, capacity_wh, floor)
-    runs = {iv.plan_run for iv in intervals if iv.plan_run}
+    # Ordered by PARSED INSTANT, not lexicographically. The planner writes UTC now, but tags
+    # written before 2026-07-30 carry a `+02:00` offset, and `"...17:26:14+02:00"` sorts AFTER
+    # `"...16:00:00Z"` as a string while naming an instant half an hour earlier. `plan_run` is
+    # what the dashboard and monitor #2 name as the run in force, so getting it backwards
+    # points the operator at the wrong plan -- the same trap `newest_by_interval` documents.
+    runs = sorted({iv.plan_run for iv in intervals if iv.plan_run}, key=run_sort_key)
     doc = {
         "generated_at": _iso(generated_at),
         # Plural because section 3.3 allows a newer short-horizon run to sit in front of an
         # older one covering the tail. Usually one entry.
-        "plan_run": sorted(runs)[-1] if runs else "",
-        "plan_runs": sorted(runs),
+        "plan_run": runs[-1] if runs else "",
+        "plan_runs": runs,
         "horizon_end": _iso(slots[-1].end),
         "interval_minutes": interval_minutes(sorted(intervals, key=lambda i: i.start)),
         "capacity_wh": capacity_wh,
