@@ -287,18 +287,65 @@ def test_live_panels_keep_their_own_window():
         assert main[title].get("timeFrom") == "24h", title
 
 
-def test_both_dashboards_agree_on_battery_capacity():
-    """`capacity_wh` is not in InfluxDB, so each dashboard carries its own copy.
+def _capacity_var(path):
+    """The `capacity_wh` template variable of one dashboard, or None if it has none."""
+    dash = json.loads(path.read_text(encoding="utf-8"))
+    for var in dash.get("templating", {}).get("list", []):
+        if var["name"] == "capacity_wh":
+            return var
+    return None
 
-    Every SoC percentage on both divides by it. Change it on one dashboard when the battery
-    changes and the other keeps reporting percentages that are merely plausible.
+
+def _dashboards_with_capacity():
+    return [(p, v) for p in DASHBOARDS if (v := _capacity_var(p)) is not None]
+
+
+def test_the_capacity_variable_was_found_on_more_than_one_dashboard():
+    """Anti-vacuity. The agreement test below is a loop; if the variable were ever renamed,
+    the loop would find nothing and pass while every copy drifted freely.
+
+    Three today: the main dashboard, the plan dashboard and the score dashboard. The last
+    was missed by this test's earlier form, which named two files by hand -- despite
+    carrying `27900` itself and dividing by it on thirteen panels.
     """
-    def capacity(name):
-        dash, _ = _panels_by_title(name)
-        var = next(v for v in dash["templating"]["list"] if v["name"] == "capacity_wh")
-        return var["query"], var["current"]["value"]
+    found = _dashboards_with_capacity()
+    assert len(found) >= 3, (
+        f"only {[p.name for p, _ in found]} carry a capacity_wh variable -- either it was "
+        f"renamed, or a dashboard that divides by capacity has stopped declaring it")
 
-    assert capacity("alphaess-dashboard.json") == capacity("alphaess-battery-plan.json")
+
+def test_every_dashboard_agrees_on_battery_capacity():
+    """`capacity_wh` is not in InfluxDB yet, so each dashboard carries its own copy.
+
+    Every SoC percentage on all of them divides by it. Change it on one when the battery
+    changes and the others keep reporting percentages that are merely plausible -- there is
+    no error, just a wrong number rendered confidently.
+
+    Discovered rather than listed: naming the files by hand is what let the score dashboard
+    sit outside this check. `PLAN-repo-seams.md` Part 2a replaces the copies with a query
+    against the planner's own `capacity_wh` field, at which point this test changes shape --
+    but it does not disappear, because a dashboard left on a hardcoded value after that
+    migration is exactly the half-done state Part 2a exists to prevent.
+    """
+    values = {p.name: (v["query"], v["current"]["value"])
+              for p, v in _dashboards_with_capacity()}
+    assert len(set(values.values())) == 1, (
+        f"dashboards disagree about battery capacity: {values}")
+
+
+def test_the_generators_emit_the_same_capacity_as_their_dashboards():
+    """The generated dashboards are committed, so a generator edited without re-running it
+    leaves the two disagreeing -- and the dashboard, not the generator, is what deploys."""
+    committed = {v["current"]["value"] for _, v in _dashboards_with_capacity()}
+    assert len(committed) == 1
+    value = committed.pop()
+    for gen in GENERATORS:
+        text = gen.read_text(encoding="utf-8")
+        if "capacity_wh" not in text:
+            continue
+        assert f'"{value}"' in text, (
+            f"{gen.name} mentions capacity_wh but not {value!r} -- it has drifted from the "
+            f"dashboards it generates")
 
 
 ALERT_FILES = sorted((PROVISIONING / "alerting").glob("*.yml"))
