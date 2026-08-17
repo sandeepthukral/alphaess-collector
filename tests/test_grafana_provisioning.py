@@ -352,6 +352,39 @@ def test_every_dashboard_reads_the_capacity_from_the_same_place():
     # int(), because every consumer interpolates this as `float(v: ${capacity_wh})` and the
     # field is a float. A value Grafana renders as 2.79e+04 is not parseable there.
     assert "int(v:" in query, query
+    # group(), because `plan` is tagged with plan_run: without it the filter yields one table
+    # per run and the variable is offered a list of values rather than one. Confirmed against
+    # the live bucket -- the first version of this query returned 2 rows.
+    assert "|> group()" in query, query
+    # Sorted by plan_run, not by _time. Runs share a horizon end (the window is cut at the end
+    # of the priced period, not a fixed span from the run), so "the row with the greatest
+    # _time" ties across every run in flight and breaks on the day the capacity changes.
+    assert 'sort(columns: ["_run"], desc: true)' in query, query
+    assert "time(v: r.plan_run)" in query, query
+
+
+def test_the_capacity_variable_is_configured_to_actually_re_read_the_query():
+    """`type: "query"` is not enough on its own, and both of the fields below are ways a
+    dashboard goes back to serving a constant while still looking correct in a diff.
+
+    `current` is written by an export from the Grafana UI, which bakes whatever the variable
+    resolved to at export time into the file. `refresh: 0` means never re-run -- the query is
+    still right there in the JSON, and never executes. Either one restores exactly the
+    failure this whole change removes: a confident wrong percentage, with a query above it
+    that reads correctly.
+
+    Matters most for alphaess-dashboard.json, which has no generator to regenerate it from
+    and is the dashboard the dispatcher will be watched on.
+    """
+    for path, var in _dashboards_with_capacity():
+        assert var.get("current") == {}, (
+            f"{path.name} has a baked-in `current` for capacity_wh ({var.get('current')!r}) "
+            f"-- almost certainly a Grafana UI export; it will serve that value forever")
+        # 1 = on dashboard load. 2 would be on time-range change, which is wrong for a value
+        # that cannot depend on the time range, but would at least still re-run.
+        assert var.get("refresh") == 1, (
+            f"{path.name} has refresh={var.get('refresh')!r} for capacity_wh -- 0 means the "
+            f"query never runs and the variable is frozen at whatever `current` holds")
 
 
 def test_the_generators_emit_the_same_capacity_query_as_their_dashboards():

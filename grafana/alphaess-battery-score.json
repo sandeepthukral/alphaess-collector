@@ -1651,7 +1651,7 @@
         "label": "Capacity (Wh)",
         "name": "capacity_wh",
         "options": [],
-        "query": "from(bucket: \"planning\")\n  |> range(start: -7d)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"capacity_wh\")\n  |> last()\n  |> keep(columns: [\"_value\"])\n  |> map(fn: (r) => ({_value: string(v: int(v: r._value))}))",
+        "query": "from(bucket: \"planning\")\n  |> range(start: -7d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"capacity_wh\")\n  |> group()\n  |> map(fn: (r) => ({_value: r._value, _run: time(v: r.plan_run)}))\n  |> sort(columns: [\"_run\"], desc: true)\n  |> limit(n: 1)\n  |> map(fn: (r) => ({_value: string(v: int(v: r._value))}))",
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
@@ -1668,6 +1668,6 @@
   "timezone": "browser",
   "title": "AlphaESS Plan vs Actual",
   "uid": "alphaess-battery-score",
-  "version": 4,
+  "version": 5,
   "weekStart": ""
 }

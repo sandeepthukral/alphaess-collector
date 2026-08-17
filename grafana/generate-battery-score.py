@@ -32,14 +32,16 @@ DS = {"type": "influxdb", "uid": "${DS_ALPHAESS}"}
 # query for exactly that reason.
 #
 # `plan` is the only thing this dashboard reads outside `plan_score`, which carries no
-# capacity of its own. last() means a capacity change re-renders older days at the new
-# number -- the same thing the literal did, only visibly and all at once instead of whenever
-# someone remembered to edit three files.
+# capacity of its own. Taking the newest run means a capacity change re-renders older days at
+# the new number -- the same thing the literal did, only visibly and all at once instead of
+# whenever someone remembered to edit three files.
 CAPACITY_QUERY = '''from(bucket: "planning")
-  |> range(start: -7d)
+  |> range(start: -7d, stop: 72h)
   |> filter(fn: (r) => r._measurement == "plan" and r._field == "capacity_wh")
-  |> last()
-  |> keep(columns: ["_value"])
+  |> group()
+  |> map(fn: (r) => ({_value: r._value, _run: time(v: r.plan_run)}))
+  |> sort(columns: ["_run"], desc: true)
+  |> limit(n: 1)
   |> map(fn: (r) => ({_value: string(v: int(v: r._value))}))'''
 
 CAPACITY_VAR = {
@@ -570,7 +572,7 @@ dashboard = {
     # already stored unless the incoming version is higher - it reads the new file, compares,
     # and does nothing, with no error and no log line. The symptom is a fix that appears not
     # to have worked, which sends you back to re-debug a query that was already correct.
-    "version": 4,
+    "version": 5,
     "weekStart": "",
 }
 

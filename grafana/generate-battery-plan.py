@@ -29,13 +29,33 @@ DS = {"type": "influxdb", "uid": "${DS_ALPHAESS}"}
 # `float(v: ${capacity_wh})`, and a value Grafana chooses to render as 2.79e+04 is not
 # parseable there. Pinning it to an integer string removes the question.
 #
-# -7d is long enough to survive a planning outage over a weekend and short enough that a real
-# capacity change takes effect rather than last() reaching back past it.
+# The shape below is NEWEST's, and for NEWEST's reason: "the newest plan" means the newest
+# `plan_run`, parsed, and nothing else works. Three separate traps, all confirmed against the
+# live bucket on 2026-08-17:
+#
+#   group() - `plan` is tagged with plan_run, so the filter yields one table per run and a
+#   bare last() returns the last row of EACH. keep() drops the column but does not merge the
+#   tables; only group() does. The query as first written returned 2 rows.
+#
+#   sort by plan_run, not by _time - runs share a horizon end. The 09:01:20Z and 09:05:03Z
+#   runs both stop at 2026-08-17T21:45:00Z, because the horizon is cut at the end of the
+#   priced window rather than a fixed span from the run. Picking the row with the greatest
+#   _time therefore picks arbitrarily between every run still in flight, which is fine while
+#   they all say 27900 and wrong on precisely the day this variable exists for.
+#
+#   time(v:) rather than a string sort - plan_run is UTC now, but points written before
+#   2026-07-30 carry a local offset, and a string sort mixes the two formats wrongly.
+#
+# stop: 72h because plan points are timestamped into the future; the default stop of now()
+# hides the part of a run that has not elapsed yet, and a run written minutes ago may be
+# entirely in the future. -7d survives a planning outage over a weekend.
 CAPACITY_QUERY = '''from(bucket: "planning")
-  |> range(start: -7d)
+  |> range(start: -7d, stop: 72h)
   |> filter(fn: (r) => r._measurement == "plan" and r._field == "capacity_wh")
-  |> last()
-  |> keep(columns: ["_value"])
+  |> group()
+  |> map(fn: (r) => ({_value: r._value, _run: time(v: r.plan_run)}))
+  |> sort(columns: ["_run"], desc: true)
+  |> limit(n: 1)
   |> map(fn: (r) => ({_value: string(v: int(v: r._value))}))'''
 
 CAPACITY_VAR = {
@@ -1013,7 +1033,7 @@ dashboard = {
     # 9: From/Until in the settings table drop the year and the seconds.
     # 10: dispatch row (section 7) - four command stats, the register decode table, and the
     #     commanded-SoC series on panel 5. Everything below panel 5 moves down 10 rows.
-    "version": 11,
+    "version": 12,
     "weekStart": "",
 }
 
