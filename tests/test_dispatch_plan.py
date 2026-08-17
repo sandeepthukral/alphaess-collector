@@ -226,3 +226,55 @@ class TestRunSortKey:
         """Two of them must not compare equal, or the sort is unstable across runs."""
         assert sorted(["synthetic_b", "synthetic_a"], key=run_sort_key) == [
             "synthetic_a", "synthetic_b"]
+
+    # The same instant, spelled both ways the archive spells it. Around the 2026-07-30
+    # rollover this pair is not hypothetical.
+    SAME_A = "2026-07-30T18:00:00+02:00"
+    SAME_Z = "2026-07-30T16:00:00Z"
+
+    def test_two_spellings_of_one_instant_order_deterministically(self):
+        """The twin of the test above, for the PARSEABLE branch.
+
+        A key that compares these equal is not a total order, and the two consumers then
+        break the tie differently -- `build_document` sorts a set (iteration order varies
+        with `PYTHONHASHSEED`), `newest_run` takes the first max of a list. The heartbeat
+        would name one run while `slots.json` recorded the other, in some processes only.
+        """
+        assert run_time(self.SAME_A) == run_time(self.SAME_Z), "this pair must tie on instant"
+        assert run_sort_key(self.SAME_A) != run_sort_key(self.SAME_Z), (
+            "a tie on the key is the bug: it lets the caller's own iteration order decide")
+        forwards = sorted([self.SAME_A, self.SAME_Z], key=run_sort_key)
+        backwards = sorted([self.SAME_Z, self.SAME_A], key=run_sort_key)
+        assert forwards == backwards, "the order must not depend on the order they arrived in"
+        assert max([self.SAME_A, self.SAME_Z], key=run_sort_key) == forwards[-1], (
+            "`max()` over a list and `sorted()` over a set must pick the SAME tag -- "
+            "`newest_run` uses one and `build_document` the other")
+
+
+class TestTagsWithNoOffset:
+    """A `plan_run` with no UTC offset is malformed, not a tag to guess the zone of.
+
+    Both spellings the archive contains carry an offset. Guessing costs two hours -- eight
+    intervals -- and `datetime.fromisoformat` accepts the naive form happily, so without
+    this the value flows on and detonates as a `TypeError` inside some later `sorted()`.
+    """
+
+    NAIVE = "2026-08-01T10:00:00"
+
+    def test_run_time_rejects_it_rather_than_assuming_a_zone(self):
+        with pytest.raises(PlanFormatError, match="no UTC offset"):
+            run_time(self.NAIVE)
+
+    def test_it_sorts_as_malformed_instead_of_raising_typeerror(self):
+        """It must lose to a real run, the same way any other bad tag does."""
+        assert max(["2026-08-01T09:00:00Z", self.NAIVE], key=run_sort_key) == \
+            "2026-08-01T09:00:00Z"
+
+    def test_newest_by_interval_raises_on_it(self):
+        """Consistent with `test_unparseable_run_tag_raises`: that path does not swallow
+        bad tags, and a naive one is no more usable than `not-a-timestamp`."""
+        iv = PlanInterval(
+            start=dt.datetime(2026, 8, 1, 9, tzinfo=UTC), soc_wh=1000.0,
+            charge_wh=0, discharge_wh=0, import_wh=0, export_wh=0, plan_run=self.NAIVE)
+        with pytest.raises(PlanFormatError, match="no UTC offset"):
+            newest_by_interval([iv])

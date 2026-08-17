@@ -291,20 +291,34 @@ def run_time(tag: str) -> dt.datetime:
     this and getting it wrong is silent: the planner writes UTC now, but points written
     before 2026-07-30 carry a local offset, and a string sort puts `...+02:00` before a `Z`
     tag from the same instant. `scripts/fetch-plan-corpus.py` picks the newest run with it.
+
+    A tag with no offset is a FORMAT ERROR, not a tag to be guessed at. Both spellings the
+    archive actually contains carry one, so a naive tag means something upstream is wrong --
+    and the two ways of guessing (assume UTC, assume Europe/Amsterdam) differ by two hours,
+    which is eight intervals of plan. Raising also keeps the return type uniformly aware:
+    a naive datetime compared against an aware one raises `TypeError` deep inside whatever
+    `sorted()` call it reached, which no caller guards.
     """
     if not tag:
         return dt.datetime.min.replace(tzinfo=dt.UTC)
     try:
-        return dt.datetime.fromisoformat(tag.replace("Z", "+00:00"))
+        parsed = dt.datetime.fromisoformat(tag.replace("Z", "+00:00"))
     except ValueError as e:
         raise PlanFormatError(f"unparseable plan_run {tag!r}: {e}") from e
+    if parsed.tzinfo is None:
+        raise PlanFormatError(
+            f"unparseable plan_run {tag!r}: no UTC offset, so the instant is ambiguous")
+    return parsed
 
 
-def run_sort_key(tag: str):
+def run_sort_key(tag: str) -> tuple[int, dt.datetime, str]:
     """Order `plan_run` tags by the INSTANT they name, not by their spelling.
 
-    The one place this rule lives, because it has three callers and getting it wrong is
-    silent. The planner writes UTC now, but tags written before 2026-07-30 carry a `+02:00`
+    The one place this rule lives, because both `translate.newest_run` and
+    `translator.build_document` need it and getting it wrong is silent -- they name the run
+    in force in two different artefacts, and a disagreement between them is exactly what
+    `newest_by_interval` keeps calling `run_time` directly to stay out of.
+    The planner writes UTC now, but tags written before 2026-07-30 carry a `+02:00`
     offset, and `"...17:26:14+02:00"` sorts after `"...16:00:00Z"` as a string while naming an
     instant half an hour earlier.
 
@@ -313,9 +327,15 @@ def run_sort_key(tag: str):
     with its filename -- `synthetic_dst_autumn` -- so the golden corpus legitimately carries
     tags that are not timestamps at all. They must not raise here, and they must not win
     "newest" over a real run either.
+
+    The tag itself is the final tiebreaker on BOTH branches, so the key is a total order.
+    Without it the archive's two spellings of one instant compare equal, and the callers
+    break that tie differently -- `sorted()` over a set follows set iteration order, which
+    varies with `PYTHONHASHSEED`, while `max()` over a list keeps the first. That put a
+    different run in `slots.json` than in the heartbeat, in different processes, silently.
     """
     try:
-        return (1, run_time(tag), "")
+        return (1, run_time(tag), tag)
     except PlanFormatError:
         return (0, dt.datetime.min.replace(tzinfo=dt.UTC), tag)
 
