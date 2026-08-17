@@ -88,8 +88,8 @@ the host's zone: left unset, containers run UTC while Grafana and Uptime Kuma
 show local time, and the same failure appears at two different clock times.
 
 Then open Grafana at `http://<nas-host>:3000` (or your `GRAFANA_PORT`). The
-InfluxDB datasource and all three dashboards — **AlphaESS**, **AlphaESS Energy
-Flow** (Sankey), and **Battery Savings** — are provisioned automatically, and
+InfluxDB datasource and all three dashboards — **Overview**, **Energy Flow**
+(Sankey), and **Battery Savings** — are provisioned automatically, and
 the bundled Grafana installs the `volkovlabs-echarts-panel` plugin the Sankey
 needs. Nothing to configure by hand. (The Battery Savings dashboard shows "No
 data" until the pricing jobs have run — see
@@ -221,7 +221,7 @@ the dashboard was built until 2026-08-02.
 ### Nightly conversion-loss update
 
 Back-fills AlphaESS's own metered house load and daily energy totals into
-`metered_power` and `daily_energy`, feeding the **AlphaESS Energy Losses**
+`metered_power` and `daily_energy`, feeding the **Energy Losses**
 dashboard. This is what makes the inverter's conversion and standby losses
 measurable at all: `power_readings.load_power_w` is the exact identity
 `pv + grid + battery`, so its energy balance closes by construction and no loss
@@ -1278,7 +1278,7 @@ poll and every recovery is written to a `collector_health` measurement in the
 same bucket, tagged `event` (`failure`/`recovered`) and `error_class`. InfluxDB
 is local, so it keeps accepting writes precisely when the AlphaESS API is
 unreachable — it records the outage while it is happening. The
-**AlphaESS Collector Health** dashboard
+**Collector Health** dashboard
 ([`grafana/alphaess-collector-health.json`](grafana/alphaess-collector-health.json))
 reads it: failed polls, outage count and duration, failures split by error
 class, and a table of the actual error messages. It is provisioned
@@ -1296,7 +1296,7 @@ on no data at all. The bundled Grafana mounts `./grafana/provisioning`, so the
 rule is picked up automatically — nothing to install.
 
 The same 5-minute staleness rule is rendered on screen as the **Collector
-status** stat, first in the top row of the *AlphaESS Collector Health*
+status** stat, first in the top row of the *Collector Health*
 dashboard: a green `ALL OK` or a red `OUTAGE` box answering "is an outage
 happening right now", independent of the time picker. It exists because a
 Kuma "down" notification says only that pings stopped; this says whether they

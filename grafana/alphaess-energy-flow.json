@@ -274,8 +274,8 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "AlphaESS Energy Flow",
+  "title": "Energy Flow",
   "uid": "alphaess-energy-flow",
-  "version": 9,
+  "version": 10,
   "weekStart": ""
 }

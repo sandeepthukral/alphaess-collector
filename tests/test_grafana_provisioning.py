@@ -539,3 +539,56 @@ def test_the_staleness_checks_read_when_the_job_ran_not_which_day_it_wrote():
     )
     panel = next(p for p in dashboard["panels"] if p["title"] == "Job age")
     assert 'computed_at_unix' in panel["targets"][0]["query"]
+
+
+def test_the_dispatch_action_table_uses_the_translator_s_own_floors():
+    """The action table re-implements dispatch/translator.py:classify in Flux.
+
+    It has to. slots.json lives on a volume inside the dispatch container, not in InfluxDB,
+    so Grafana cannot read the translator's real output -- and when that container is down
+    is exactly when the question "what would it do?" is worth asking.
+
+    The cost of a second implementation is drift, and drift here is silent: the panel keeps
+    rendering plausible labels while disagreeing with the dispatcher about which intervals
+    hold. This pins the numbers, which is the half that can drift without anyone touching
+    the panel -- lowering ENERGY_FLOOR_WH in translator.py and leaving 50.0 in the query
+    would relabel intervals on the chart but not in the commands.
+
+    The classifier's SHAPE is not pinned; keep the two in step by hand when the branches
+    change, and read translator.py:classify beside the query.
+    """
+    from translator import ENERGY_FLOOR_WH, FULL_TOLERANCE_WH, SURPLUS_FLOOR_WH
+
+    _, plan = _panels_by_title("alphaess-battery-plan.json")
+    query = plan["What dispatch would do, interval by interval"]["targets"][0]["query"]
+
+    for expected in (
+        # classify(): charging / discharging, then the grid legs that separate a trade
+        # from plain self-consumption.
+        f"r.charge_wh > {ENERGY_FLOOR_WH}",
+        f"r.discharge_wh > {ENERGY_FLOOR_WH}",
+        f"r.export_wh > {ENERGY_FLOOR_WH}",
+        f"r.import_wh > {ENERGY_FLOOR_WH}",
+        # _can_harvest(): full to within a tolerance, not importing, and something to
+        # harvest. Without this leg a full battery reads as a hold and the panel would
+        # advertise an export that does not happen.
+        f"- {FULL_TOLERANCE_WH}",
+        f"r.import_wh <= {SURPLUS_FLOOR_WH}",
+        f"r.export_wh > {SURPLUS_FLOOR_WH}",
+        f"r.pv_forecast_wh > {SURPLUS_FLOOR_WH}",
+    ):
+        assert expected in query, f"{expected!r} missing -- the panel has drifted from classify()"
+
+
+def test_the_dispatch_action_table_says_it_is_not_the_command():
+    """slots.py:decide re-checks every target against LIVE SoC and turns a charge the
+    battery has already overshot into a hold. This table cannot see that -- it reads the
+    plan, which is the whole reason it works with dispatch down.
+
+    So the panel is intent, not prediction, and the gap between them is the drift the
+    dashboard exists to show. A description that omits this reads as a forecast of the
+    commands, which is exactly wrong in the case that matters.
+    """
+    _, plan = _panels_by_title("alphaess-battery-plan.json")
+    description = plan["What dispatch would do, interval by interval"]["description"]
+    assert "actual SoC" in description

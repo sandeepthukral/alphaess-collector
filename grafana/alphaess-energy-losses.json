@@ -1199,8 +1199,8 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "AlphaESS Energy Losses",
+  "title": "Energy Losses",
   "uid": "alphaess-energy-losses",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

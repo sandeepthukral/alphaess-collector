@@ -808,6 +808,138 @@ from(bucket: "planning")
                                    {"id": "custom.lineWidth", "value": 1}])],
     fill=60))
 
+# --- Panel: dispatch action table ---------------------------------------------------------
+# The SoC line on panel 5 cannot answer "will this interval export?". It is a step chart, so
+# every 15-minute segment is flat by construction and a single flat step means nothing; only a
+# RUN of steps at one level is a hold. Worse, a rising step is `charge` or `self` and the line
+# cannot tell them apart, because the difference is `import_wh`, which is not plotted anywhere.
+# This table runs the classifier instead of asking the eye to infer it.
+#
+# It is a second implementation of dispatch/translator.py:classify, which is a real cost: the
+# two can drift. The alternative was worse. slots.json lives on a volume inside the dispatch
+# container and is not in InfluxDB, so Grafana cannot read the translator's own output, and
+# when the container is down -- which is exactly when you want to know what it WOULD do --
+# there is nothing to read at all. The floors below are ENERGY_FLOOR_WH, SURPLUS_FLOOR_WH and
+# FULL_TOLERANCE_WH; test_grafana_provisioning.py pins them against the translator's copies.
+#
+# What this deliberately does NOT model is slots.py:decide, which re-checks each target
+# against LIVE SoC and downgrades a charge whose target already sits below it to a hold. So
+# this is the plan's intent, not a prediction of the command. The gap between the two is the
+# drift this whole dashboard exists to show.
+DISPATCH_ACTIONS = NEWEST + '''
+from(bucket: "planning")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "plan" and r.plan_run == newest)
+  |> filter(fn: (r) => r._field == "charge_wh" or r._field == "discharge_wh"
+                    or r._field == "soc_wh" or r._field == "import_wh"
+                    or r._field == "export_wh" or r._field == "pv_forecast_wh")
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> group()
+  |> map(fn: (r) => ({
+      _time: r._time,
+      action:
+        if r.charge_wh > 50.0 and r.discharge_wh > 50.0 then
+          "plan error -- charge and discharge in one interval"
+        else if r.discharge_wh > 50.0 then
+          (if r.export_wh > 50.0 then "discharge -- sells to grid"
+           else "self -- battery covers load")
+        else if r.charge_wh > 50.0 then
+          (if r.import_wh > 50.0 then "charge -- buys from grid"
+           else "self -- soaks up solar")
+        else if r.soc_wh >= float(v: ${capacity_wh}) - 50.0 and r.import_wh <= 10.0
+             and (r.export_wh > 10.0 or r.pv_forecast_wh > 10.0) then
+          "self -- full, still harvesting"
+        else
+          "hold -- surplus goes to grid",
+      soc_pct: r.soc_wh / float(v: ${capacity_wh}) * 100.0,
+      charge_wh: r.charge_wh,
+      import_wh: r.import_wh,
+      export_wh: r.export_wh
+    }))
+  |> sort(columns: ["_time"])
+  |> yield(name: "dispatch actions")
+'''
+
+panels.append({
+    "datasource": DS,
+    "description": "What the dispatcher would do in each interval, worked out from the plan "
+                   "the same way dispatch/translator.py works it out. Read it when the SoC "
+                   "graph above is ambiguous, which is most of the time: that graph steps, so "
+                   "a flat segment is just one interval and tells you nothing, and a rising "
+                   "one could be either 'charge' or 'self'. "
+                   "'hold' is the row to look for - the battery is frozen at 0 W and any "
+                   "solar beyond the house load is exported, whatever the price. A run of "
+                   "'hold' rows through the afternoon is surplus being given away. "
+                   "'self' means the battery is simply released to self-consumption, either "
+                   "because the plan moves energy without touching the grid or because it is "
+                   "full and would otherwise spill. "
+                   "This is the plan's intent only. The live dispatcher checks each target "
+                   "against the battery's actual SoC and quietly turns a charge it has "
+                   "already overshot into a hold, so when actual SoC has drifted above plan "
+                   "you will get more holds than are listed here.",
+    "fieldConfig": {
+        "defaults": {
+            "custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": False},
+            "mappings": [],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
+        },
+        # Explicit widths on every column. Without them Grafana divides the panel evenly and
+        # a four-character number gets an eighth of a 24-cell dashboard, which pushes the
+        # only column worth reading -- the action -- into a narrow, wrapping strip.
+        "overrides": [
+            # Same reasoning as the settings table: the year repeats on every row of a
+            # 36-hour horizon and the seconds are always :00.
+            {"matcher": {"id": "byName", "options": "_time"},
+             "properties": [{"id": "displayName", "value": "Time"},
+                            {"id": "unit", "value": "time:MM-DD HH:mm"},
+                            {"id": "custom.width", "value": 110}]},
+            {"matcher": {"id": "byName", "options": "action"},
+             "properties": [{"id": "displayName", "value": "What dispatch does"},
+                            {"id": "custom.width", "value": 300}]},
+            {"matcher": {"id": "byName", "options": "soc_pct"},
+             "properties": [{"id": "decimals", "value": 1}, {"id": "unit", "value": "percent"},
+                            {"id": "displayName", "value": "SoC after"},
+                            {"id": "custom.width", "value": 100}]},
+            {"matcher": {"id": "byName", "options": "charge_wh"},
+             "properties": [{"id": "decimals", "value": 0}, {"id": "unit", "value": "watth"},
+                            {"id": "displayName", "value": "Charge"},
+                            {"id": "custom.width", "value": 90}]},
+            {"matcher": {"id": "byName", "options": "import_wh"},
+             "properties": [{"id": "decimals", "value": 0}, {"id": "unit", "value": "watth"},
+                            {"id": "displayName", "value": "Import"},
+                            {"id": "custom.width", "value": 90}]},
+            {"matcher": {"id": "byName", "options": "export_wh"},
+             "properties": [{"id": "decimals", "value": 0}, {"id": "unit", "value": "watth"},
+                            {"id": "displayName", "value": "Export"},
+                            {"id": "custom.width", "value": 90}]},
+        ],
+    },
+    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 32},
+    "id": 11,
+    "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": False, "fields": "", "reducer": ["sum"], "show": False},
+        "showHeader": True,
+        "sortBy": [{"desc": False, "displayName": "Time"}],
+    },
+    "pluginVersion": "11.6.0",
+    # Flux does not promise an output column order, so the order is pinned here rather than
+    # left to the order of the fields in the `map` above. Same reason as panel 7.
+    "transformations": [{
+        "id": "organize",
+        "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "renameByName": {},
+            "indexByName": {"_time": 0, "action": 1, "soc_pct": 2, "charge_wh": 3,
+                            "import_wh": 4, "export_wh": 5},
+        },
+    }],
+    "targets": [target(DISPATCH_ACTIONS)],
+    "title": "What dispatch would do, interval by interval",
+    "type": "table",
+})
+
 # --- Panel: app settings table ----------------------------------------------------------
 # Two targets rather than one union, merged by transformation: the sell and buy queries
 # differ in four places and reading them side by side is how the asymmetry stays visible.
@@ -855,7 +987,7 @@ panels.append({
              "properties": [{"id": "displayName", "value": "Exact"}]},
         ],
     },
-    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 32},
+    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 42},
     "id": 8,
     "options": {
         "cellHeight": "sm",
@@ -915,7 +1047,7 @@ panels.append({
                             {"id": "displayName", "value": "ct/kWh"}]},
         ],
     },
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 40},
+    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 50},
     "id": 7,
     "options": {
         "cellHeight": "sm",
@@ -1022,7 +1154,7 @@ dashboard = {
     "time": {"from": "now-6h", "to": "now+36h"},
     "timepicker": {},
     "timezone": "browser",
-    "title": "AlphaESS Battery Plan",
+    "title": "Battery Plan",
     "uid": "alphaess-battery-plan",
     # BUMP THIS on every change below. Grafana's file provisioner keeps the dashboard it
     # already stored unless the incoming version is higher - it reads the new file, compares,
@@ -1039,7 +1171,11 @@ dashboard = {
     # 11: capacity_wh becomes a query variable reading the plan, replacing the 27900 textbox.
     # 12: that query picks by parsed plan_run over a -14d/72h window, not by the last row of
     #     every run - runs share a horizon end, so sorting on _time tied across all of them.
-    "version": 12,
+    # 13: "What dispatch would do" table (panel 11), below the price panel. The two tables
+    #     under it move down 10 rows.
+    # 14: title drops the "AlphaESS" prefix, as every dashboard here did. The uid is
+    #     unchanged, so /d/alphaess-battery-plan and every link to it still resolve.
+    "version": 14,
     "weekStart": "",
 }
 

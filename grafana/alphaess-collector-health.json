@@ -826,8 +826,8 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "AlphaESS Collector Health",
+  "title": "Collector Health",
   "uid": "alphaess-collector-health",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

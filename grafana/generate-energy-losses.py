@@ -509,13 +509,15 @@ dashboard = {
     "time": {"from": "now-14d/d", "to": "now"},
     "timepicker": {},
     "timezone": "browser",
-    "title": "AlphaESS Energy Losses",
+    "title": "Energy Losses",
     "uid": "alphaess-energy-losses",
     # BUMP THIS on every change below. Grafana's file provisioner keeps the
     # dashboard it already stored unless the incoming version is higher -- it
     # reads the new file, compares, and does nothing, with no error and no log
     # line. The symptom is a fix that appears not to have worked.
-    "version": 1,
+    # 2: title drops the "AlphaESS" prefix, as every dashboard here did. The uid is
+    #    unchanged, so /d/alphaess-energy-losses and every link to it still resolve.
+    "version": 2,
     "weekStart": "",
 }
 
