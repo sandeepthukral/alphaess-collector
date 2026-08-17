@@ -964,27 +964,36 @@ panels.append({
             "mappings": [],
             "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
         },
+        # Every column carries an explicit width. Grafana's default is to divide the panel
+        # evenly, which on a 24-cell row gives a three-character "Exact" the same space as a
+        # timestamp -- and the columns are the first thing to get squeezed on a phone, which
+        # is where this table is actually read.
         "overrides": [
             # Month-day and hour-minute only. The year is the same on every row of a
             # 36-hour horizon and the seconds are always :00 -- both are width spent on
-            # nothing, and this table is read on a phone, where the columns are what get
-            # squeezed first.
+            # nothing.
             {"matcher": {"id": "byName", "options": "from_t"},
              "properties": [{"id": "displayName", "value": "From"},
-                            {"id": "unit", "value": "time:MM-DD HH:mm"}]},
+                            {"id": "unit", "value": "time:MM-DD HH:mm"},
+                            {"id": "custom.width", "value": 110}]},
             {"matcher": {"id": "byName", "options": "until_t"},
              "properties": [{"id": "displayName", "value": "Until"},
-                            {"id": "unit", "value": "time:MM-DD HH:mm"}]},
+                            {"id": "unit", "value": "time:MM-DD HH:mm"},
+                            {"id": "custom.width", "value": 110}]},
             {"matcher": {"id": "byName", "options": "action"},
-             "properties": [{"id": "displayName", "value": "Set"}]},
+             "properties": [{"id": "displayName", "value": "Set"},
+                            {"id": "custom.width", "value": 90}]},
             {"matcher": {"id": "byName", "options": "set_to"},
              "properties": [{"id": "decimals", "value": 2},
-                            {"id": "displayName", "value": "to ct/kWh"}]},
+                            {"id": "displayName", "value": "to ct/kWh"},
+                            {"id": "custom.width", "value": 100}]},
             {"matcher": {"id": "byName", "options": "target_soc"},
              "properties": [{"id": "decimals", "value": 0}, {"id": "unit", "value": "percent"},
-                            {"id": "displayName", "value": "Target SoC"}]},
+                            {"id": "displayName", "value": "Target SoC"},
+                            {"id": "custom.width", "value": 110}]},
             {"matcher": {"id": "byName", "options": "exact"},
-             "properties": [{"id": "displayName", "value": "Exact"}]},
+             "properties": [{"id": "displayName", "value": "Exact"},
+                            {"id": "custom.width", "value": 70}]},
         ],
     },
     "gridPos": {"h": 8, "w": 24, "x": 0, "y": 42},
@@ -1036,15 +1045,28 @@ panels.append({
             "mappings": [],
             "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
         },
+        # Widths on every column, for the same reason as the settings table above. The time
+        # column is also cut to month-day and hour-minute: a column cannot be "only as wide
+        # as it needs to be" while it renders a full ISO timestamp, so narrowing it and
+        # shortening the format are one change, not two.
         "overrides": [
+            {"matcher": {"id": "byName", "options": "_time"},
+             "properties": [{"id": "displayName", "value": "Time"},
+                            {"id": "unit", "value": "time:MM-DD HH:mm"},
+                            {"id": "custom.width", "value": 110}]},
+            {"matcher": {"id": "byName", "options": "action"},
+             "properties": [{"id": "custom.width", "value": 110}]},
             {"matcher": {"id": "byName", "options": "kWh"},
-             "properties": [{"id": "decimals", "value": 2}]},
+             "properties": [{"id": "decimals", "value": 2},
+                            {"id": "custom.width", "value": 90}]},
             {"matcher": {"id": "byName", "options": "soc_pct"},
              "properties": [{"id": "decimals", "value": 0}, {"id": "unit", "value": "percent"},
-                            {"id": "displayName", "value": "SoC after"}]},
+                            {"id": "displayName", "value": "SoC after"},
+                            {"id": "custom.width", "value": 110}]},
             {"matcher": {"id": "byName", "options": "ct_kWh"},
              "properties": [{"id": "decimals", "value": 1},
-                            {"id": "displayName", "value": "ct/kWh"}]},
+                            {"id": "displayName", "value": "ct/kWh"},
+                            {"id": "custom.width", "value": 90}]},
         ],
     },
     "gridPos": {"h": 10, "w": 24, "x": 0, "y": 50},
@@ -1108,7 +1130,7 @@ join.left(
     }))
   |> yield(name: "actions")
 ''')],
-    "title": "Planned actions",
+    "title": "Planned Actions in app",
     "type": "table",
 })
 
@@ -1175,7 +1197,9 @@ dashboard = {
     #     under it move down 10 rows.
     # 14: title drops the "AlphaESS" prefix, as every dashboard here did. The uid is
     #     unchanged, so /d/alphaess-battery-plan and every link to it still resolve.
-    "version": 14,
+    # 15: both tables get explicit column widths and a short time format, for reading on a
+    #     phone; "Planned actions" renamed to "Planned Actions in app".
+    "version": 15,
     "weekStart": "",
 }
 

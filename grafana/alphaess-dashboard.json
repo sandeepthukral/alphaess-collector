@@ -1269,12 +1269,48 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "_time"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Time"
+              },
+              {
+                "id": "unit",
+                "value": "time:MM-DD HH:mm"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "action"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "kWh"
             },
             "properties": [
               {
                 "id": "decimals",
                 "value": 2
+              },
+              {
+                "id": "custom.width",
+                "value": 90
               }
             ]
           },
@@ -1295,6 +1331,10 @@
               {
                 "id": "displayName",
                 "value": "SoC after"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
               }
             ]
           },
@@ -1311,6 +1351,10 @@
               {
                 "id": "displayName",
                 "value": "ct/kWh"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
               }
             ]
           }
@@ -1352,7 +1396,7 @@
           "refId": "A"
         }
       ],
-      "title": "Planned actions",
+      "title": "Planned Actions in app",
       "transformations": [
         {
           "id": "organize",
@@ -1411,5 +1455,5 @@
   "timezone": "browser",
   "title": "Overview",
   "uid": "alphaess-main",
-  "version": 17
+  "version": 18
 }
