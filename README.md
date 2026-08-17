@@ -90,7 +90,7 @@ through the **Energy Losses** dashboard
 
 4. Open Grafana at http://localhost:3000 (login with
    `GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD`). The InfluxDB datasource and
-   three dashboards — **AlphaESS** (what the system is doing right now: SoC,
+   three dashboards — **Overview** (what the system is doing right now: SoC,
    battery power, collector status, a source→use Sankey and the power
    timeseries), **Energy** (the same in totals: per-day stats, bar charts and
    the daily/hourly tables) and **Energy Flow** (a source→use Sankey,
