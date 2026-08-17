@@ -112,8 +112,16 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
       Worth keeping the distinction: Grafana never reads this token, so the placeholder
       satisfies the stack-wide `:?` guard and everything looks healthy — the difference only
       shows up when the dispatcher tries to read the `planning` bucket in section 3
-- [ ] Put it and `INVERTER_IP` in the NAS `.env`
-- [ ] Give the inverter a DHCP reservation, if it does not have one
+- [x] Put it and `INVERTER_IP` in the NAS `.env` — **2026-08-17**. Note this one cannot be
+      confirmed by watching the dispatcher: `INVERTER_IP` is set to `192.168.68.151`, which
+      is also the compose fallback in `docker-compose.yml`, so deleting the key from `.env`
+      would change nothing observable. It was checked in the file, not inferred from a
+      working connection
+- [x] Give the inverter a DHCP reservation, if it does not have one — **2026-08-17**,
+      reserved in the router. Worth doing rather than ticking optimistically: a moved lease
+      makes the dispatcher silently stop connecting, and in dry run that is nearly
+      invisible, because `action` already reads `no dispatch` all day — the same string a
+      dead dispatcher produces. Monitor #5 is what catches it
 
 ## 3. Deploy, in dry run
 
