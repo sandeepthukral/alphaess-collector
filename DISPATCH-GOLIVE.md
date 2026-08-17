@@ -45,6 +45,20 @@ nothing in section 3 can start until it is done, and turning off the AlphaESS ap
 control gates all of it. The only code work left in section 5 is Part 3's heartbeat, which
 lands in `battery-planning`, not here.
 
+**Update, 2026-08-17 (later still):** sections 2 and 3 are done bar the day-long watch and
+the Kuma monitors. The dispatcher has been running in dry run since 18:05 and the §7.2
+panels are confirmed on the dashboard.
+
+Read the paragraph above again, though, because it is wrong in a way worth keeping: those
+panels read `NO DISPATCHER` **whether or not** the service was running — see section 3's
+third box. The reasoning was right and the conclusion was luck. A panel that displays the
+expected string is not evidence until it has been seen displaying a different one.
+
+Next action: **the full-day watch** (section 3, box four), reading `slot_action` and
+`plan_run` rather than `action`. The Kuma monitors can be created alongside it, and #7 will
+now stay green rather than firing, since the app's price control is off. Section 4 needs the
+watch done first — it is the last chance to catch a wrong decision for free.
+
 ---
 
 ## 1. Get it into version control
@@ -132,13 +146,41 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
       2026-08-17T18:05:04Z`, then `inverter limits: charge=15435 W discharge=15435 W`. Those
       limits sit inside the 15,015–15,645 W band `scheduler.py:68` records from 2026-08-16,
       which is the evidence for re-reading them hourly instead of caching at boot
-- [ ] Confirm `dispatch_state` is arriving in InfluxDB and the §7.2 panels are populated —
+- [x] Confirm `dispatch_state` is arriving in InfluxDB and the §7.2 panels are populated —
       **the InfluxDB half is confirmed, 2026-08-17.** All nine `raw_08xx` words plus
       `action`, `slot_action`, `plan_run`, `setpoint_w` and `duration_s` are landing, and
       the raw words decode back to the Modbus read exactly: `raw_0881/0882 = [0, 32000]` →
       0 W, matching `setpoint_w`. `expires_at` is correctly ABSENT — `state.py:103` emits it
-      only while the block is active, and a dry run never arms it. The panels are still to
-      be looked at in Grafana
+      only while the block is active, and a dry run never arms it.
+
+      **The Grafana half took two more PRs, and both bugs were in the panels rather than in
+      the dispatcher** — which is the argument for looking at the dashboard as a deploy step
+      instead of trusting the data. Both were only visible against a *resting* dispatcher,
+      the state this whole section runs in, and neither could have been found in test:
+
+      1. `Dispatch state` read `NO DISPATCHER` on a healthy dispatcher (#96). Grafana's
+         field picker treats an empty `reduceOptions.fields` as auto, and auto is **numeric
+         fields only** — `action` is a string, so it was dropped before any mapping was
+         consulted and the panel fell to its `noValue`. Every mapping was unreachable and
+         `NO DISPATCHER` was the only string it could ever display, which is precisely the
+         distinction the panel exists to draw. `Commanded power` worked throughout because
+         `setpoint_w` is numeric, and that is what made it look like a dispatcher fault
+      2. Fixing that with `/.*/` then showed **too much** (#97): `/.*/` is every field, and
+         Flux returns `_time` and the `sys_sn` tag next to `_value`, so the timestamp
+         rendered as a second red tile with the serial on the action's label. The query now
+         keeps only `_value`. Freshness is unaffected — `range(start: -5m)` enforces it by
+         returning no rows, not through the timestamp column
+
+      Also in #97: `Command expires in` was red all day. It yields nothing whenever no
+      command is live — the resting state, and the whole of this section — and Grafana
+      colours `noValue` with the **base** threshold step, which was red. That is the one
+      panel whose red means the battery is a minute from acting unsupervised, so a
+      permanently-red version of it is worse than no panel. Base is now neutral with red
+      from 0, and the countdown is floored at 0 so a stalled loop stays red instead of
+      counting past zero back onto the neutral base
+
+      **Confirmed on the dashboard 2026-08-17**: `no dispatch` as a single tile, `0 W`,
+      `0 %`, a grey `no command`, and the decode table agreeing with all of it
 - [ ] Watch a full day of dry-run decisions against what the battery actually did. This is
       the last chance to catch a wrong decision for free.
 
