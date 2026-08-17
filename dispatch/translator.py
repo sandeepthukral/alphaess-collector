@@ -115,7 +115,7 @@ def _can_harvest(
     the only place this rule is entitled to act.
 
     NO CALENDAR. The condition is read from the plan, and the season falls out of it: over
-    the whole archive it fires in the 16:00 and 17:00 local hours only, on 15 of 16 days.
+    the whole archive it fires in the 16:00 and 17:00 local hours only, on 15 of 18 days.
     A hardcoded June-August gate would idle through a dull July and miss a bright May.
     """
     if capacity_wh is None:

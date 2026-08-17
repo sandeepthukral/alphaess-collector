@@ -213,7 +213,10 @@ mechanism — nothing depends on the two schedules lining up.
 
 ```
 1. READ plan points from Influx: bucket `planning`, measurement `plan`,
-   from now-rounded-down-to-quarter to +36h.
+   from now-1h to now+48h. The lookback is NOT quarter-aligned: it exists so
+   a slow run cannot lose the interval it is currently in, and `upcoming()`
+   trims the finished ones afterwards. Pinned by
+   test_the_current_interval_is_kept_even_when_nearly_over.
 
 2. FOR each interval: pick the governing plan_run (§3.3).
 
@@ -313,7 +316,7 @@ Three constraints keep the rule narrow:
   inventory the dump depends on. The rule is therefore evaluated **per interval, before
   merging**, and that run splits into `self` 16:45–18:00 and `hold` 18:00–18:45.
 - **No calendar.** The condition is read from the plan and the season falls out of it: across
-  the 137-run archive it fires in the 16:00 and 17:00 local hours only, on 13 of 16 days.
+  the 138-run archive it fires in the 16:00 and 17:00 local hours only, on 15 of 18 days.
 
 Its own threshold, `SURPLUS_FLOOR_WH = 10`, deliberately *not* `ENERGY_FLOOR_WH`. That floor
 asks "did the LP intend a dispatch"; this asks "is any solar going to the meter". Reusing
@@ -322,8 +325,11 @@ exactly 50 Wh.
 
 Measured effect on the archive: all changes are `hold → self`, none in the other
 direction. Deduplicated to the newest run per interval — what would actually have been
-dispatched — **57 intervals across 15 of 16 days**, confined to the 16:00 and 17:00 local
-hours (47 of them from the surplus branch, 10 more from the balance point).
+dispatched — **57 intervals across 15 of 18 days**, confined to the 16:00 and 17:00 local
+hours (47 of them from the surplus branch, 10 more from the balance point). Before
+deduplication the same rule fires on 632 intervals, over the same 15 days: the archive's
+overlapping horizons mean each interval is planned about a dozen times, which is why the
+interval counts differ by an order of magnitude and the day counts do not differ at all.
 
 **The balance point is included, and it is the larger half of the win.** `export_wh` is a
 *difference of two forecasts*, so where they cancel its sign is set by the error rather than
@@ -453,7 +459,8 @@ EVERY 60 seconds:
    Log it, ping inverter-not-hijacked DOWN, and continue — our 60s
    rewrite wins, but the operator needs to know.
 
-6. BUILD the command:
+6. BUILD the command. Signs here are REGISTER-SPACE, which is the
+   opposite of every layer above it -- see the note below:
       charge     -> mode 2, power = -power_w, target_soc
       discharge  -> mode 2, power = +power_w, target_soc
       hold       -> mode 3, power 0, no SoC written
@@ -461,6 +468,16 @@ EVERY 60 seconds:
    Encode: raw_power = 32000 + watts ; raw_soc = pct / 0.4
 
 7. WRITE the dispatch block, duration = 300 s (5x the refresh interval).
+
+**Two sign conventions, and step 6 is the boundary between them.** The register counts
+*discharge* positive. Everything above the register boundary — `slots.decide()`, §7.1's
+`setpoint_w`, every panel on the dashboard — counts *charging* positive, because panel 9
+already negates `battery_power_w` in Flux and a "Commanded" stat disagreeing in sign with the
+"Battery Power" stat beside it would be worse than no panel at all. So the flip happens once,
+in `registers.py`, where the encoding constant lives: `decode_power` flips on the way out,
+step 6's table is written in register space on the way in. `registers.py`'s own docstring
+names this flip as the thing that goes silently wrong and writes a plausible number to real
+hardware.
 
 8. READ BACK, whenever anything was written -- including the single release
    on the way into idle, which is a write like any other.
@@ -685,10 +702,31 @@ directly beneath it, so the dashboard reads top-to-bottom as **plan → command 
 
 | Stat | Unit | Renders as | Thresholds |
 |---|---|---|---|
-| Dispatch state | — | `Charging from grid` / `Discharging to grid` / `Holding` / `Released — following house` / **`NO DISPATCHER`** | grey when released, red when stale |
+| Dispatch state | — | one of the seven strings below, or **`NO DISPATCHER`** | per-value colours, red when stale |
 | Commanded power | `watt` | `+2.5 kW` charge, `−4.5 kW` discharge | green charge / red discharge, matching panel 9 |
 | Target SoC | `percent` | `78 %` | plain text |
-| Command expires in | `s` | `4 m 12 s` | red under 60 s |
+| Command expires in | `s` | `4 m 12 s` | red under 60 s, blank when no command is live (§7.3) |
+
+**The state strings are a contract, and this is the whole list.**
+`state.describe_action()` is the source of truth; `test_the_state_stat_maps_every_action_the_dispatcher_can_emit`
+pins the two sides together. Value mappings must cover every one of them, because a string
+with no mapping renders in the panel's base colour — which is the red reserved for
+`NO DISPATCHER`. Getting this list wrong paints a working dispatcher as a dead one.
+
+| Emitted string (verbatim, lowercase) | Colour | Means |
+|---|---|---|
+| `charging from grid` | green | Mode 2, positive setpoint |
+| `charging from PV` | green | positive setpoint in a mode other than SoC-target |
+| `discharging to grid` | orange | negative setpoint |
+| `hold (battery frozen)` | blue | Mode 3 at 0 W — the verified hold |
+| `self-consumption (released)` | text | `start=0` after a deliberate release (§4.1's `self`) |
+| `no dispatch` | text | `start=0` with no release decision behind it |
+| `active at 0 W` | yellow | live block at 0 W in a mode this dispatcher never commands — the app is driving |
+| *(no data)* | red | `noValue: NO DISPATCHER` — not an emitted string, the absence of one |
+
+`self-consumption (released)` and `no dispatch` are the same registers; only the decision
+behind them differs, and only this process knows it. That is why the string is published
+rather than derived from the registers in Flux.
 
 Leave `decimals` unset on the watt stat — the generator's existing comment explains why
 (`watt` self-scales, and pinning decimals gives either `850.00 W` or `2 kW`).
@@ -754,17 +792,25 @@ Three guards, all required:
    dispatcher stopped" is the entire job of these panels, and the two look identical unless
    the query asks the question this way.
 
-Note that `Released — following house` and `NO DISPATCHER` describe the *same register
+Note that `self-consumption (released)` and `NO DISPATCHER` describe the *same register
 contents* — `start=0`, the point §4.1 already flags. Only the freshness of the point
 separates them, which is why guard 1 is not optional.
 
 ### 7.4 What this replaces
 
-**"What to set in the app" (panel 8) must go in the same change.** It is the dashboard face
-of `app_bands.py`, and §8 retires that. Leaving it up would put two contradictory
+**"What to set in the app" (panel 8) goes at go-live, not with the panels.** It is the
+dashboard face of `app_bands.py`, and §8 retires that. Leaving it up puts two contradictory
 instructions on one screen — a table telling you to type thresholds into the app, directly
-above a panel showing the dispatcher driving the same registers itself. Delete the panel when
-`app_bands.py` is gated; reclaim its 8 rows of height for the decode table.
+above a panel showing the dispatcher driving the same registers itself.
+
+That overlap is real and is deliberately time-boxed rather than avoided. The panels ship
+while the dispatcher is still in dry run, and for exactly that period panel 8 is the one
+that is *correct*: the app genuinely is in charge until `DISPATCH_LIVE=1`, and deleting the
+instructions for it first would leave a battery driven by nothing anybody can see. So the
+deletion is a go-live step — `DISPATCH-GOLIVE.md` §4 owns it — and the contradiction lasts
+only as long as the dry run does.
+
+(The decode table did not wait for those rows; it has its own.)
 
 ### 7.5 Mechanics
 

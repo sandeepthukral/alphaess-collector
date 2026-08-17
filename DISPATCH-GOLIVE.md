@@ -165,7 +165,9 @@ problem and a real one.
 - [ ] Whether Mode 1 honours its **SoC target** is still untested and now matters, since the
       power setpoint turned out to be real. ~2.8 kWh from 73 % to 83 %, so it needs its own
       long run rather than a 4-minute window
-- [ ] Delete Grafana panel 8 when the app's price bands stop mattering (a go-live change)
+- [ ] Delete Grafana panel 8 ("What to set in the app") once `DISPATCH_LIVE=1` is in and the
+      app's price bands stop mattering. Until then it is the panel that is *correct* — the app
+      really is in charge during the dry run. `DESIGN-dispatch.md` §7.4 has the reasoning
 - [ ] Plan-vs-actual reconciliation, monitor #9 (§5.4) — the daily job that catches "every
       monitor green, battery not following the plan"
 - [ ] `slots.json` hot-reload has never been tested against a live inverter (§9.6)
