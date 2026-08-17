@@ -556,7 +556,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"action\")\n  |> last()\n",
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"action\")\n  |> last()\n  |> keep(columns: [\"_value\"])\n",
           "refId": "A"
         }
       ],
@@ -700,7 +700,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Time left on the dead man's switch. The loop rewrites it every 60 s, so this should sit near 5 minutes and never fall far; dropping toward zero means the loop has stopped refreshing and the inverter is about to revert to self-consumption on its own. Blank means no command is live, which is a normal resting state, not a fault.",
+      "description": "Time left on the dead man's switch. The loop rewrites it every 60 s, so this should sit near 5 minutes and never fall far; dropping toward zero means the loop has stopped refreshing and the inverter is about to revert to self-consumption on its own. A grey 'no command' means nothing is dispatching, which is a normal resting state and the whole of a dry-run day, not a fault.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -708,12 +708,17 @@
           },
           "decimals": 0,
           "mappings": [],
+          "noValue": "no command",
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "text",
                 "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
               },
               {
                 "color": "green",
@@ -756,7 +761,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"expires_at\" or r._field == \"dispatch_active\"))\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> filter(fn: (r) => exists r.expires_at and exists r.dispatch_active\n                   and r.dispatch_active != 0)\n  |> map(fn: (r) => ({ _time: r._time, _value:\n       float(v: r.expires_at) - float(v: int(v: now())) / 1000000000.0 }))\n  |> yield(name: \"expires in\")\n",
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"expires_at\" or r._field == \"dispatch_active\"))\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> filter(fn: (r) => exists r.expires_at and exists r.dispatch_active\n                   and r.dispatch_active != 0)\n  |> map(fn: (r) => ({ _time: r._time, _value:\n       float(v: r.expires_at) - float(v: int(v: now())) / 1000000000.0 }))\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then 0.0 else r._value }))\n  |> yield(name: \"expires in\")\n",
           "refId": "A"
         }
       ],
@@ -2020,6 +2025,6 @@
   "timezone": "browser",
   "title": "Battery Plan",
   "uid": "alphaess-battery-plan",
-  "version": 16,
+  "version": 17,
   "weekStart": ""
 }
