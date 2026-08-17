@@ -134,11 +134,23 @@ problem and a real one.
         `27900` at line 1644
   - [ ] also review `slots.HARD_MAX_POWER_W` when the battery changes — a bigger battery may
         arrive with a bigger inverter
-- [ ] **Commit the schema fixture** (Part 2b). The runtime half is done — a renamed field
-      raises and names itself, and monitor #2 carries the field name. What is missing is
-      `tests/fixtures/planning_schema.json` plus the two tests: the translator's reads are a
-      subset of it, and every `from(bucket: "planning")` query in the dashboards only
-      references fields it lists
+- [x] **Commit the schema fixture** (Part 2b). **2026-08-17.**
+      `tests/fixtures/planning_schema.json` plus `tests/test_planning_schema.py`. Both halves
+      now exist: a renamed field raises at runtime and names itself to monitor #2, and an
+      *undeclared* read fails in CI.
+  - Three things the writing of it turned up, none of them expected:
+    - The bucket holds five measurements, not one. This repo reads three (`plan`,
+      `app_setting`, `plan_score`) and ignores `weather_forecast` / `weather_observed`.
+    - `plan.price_market` and the `market_price` measurement are **different things** — the
+      latter is in the `alphaess` bucket, and the price panels union the two. A field
+      extractor that reads a query as belonging to one bucket attributes one to the other;
+      the one here splits on `from(bucket:)` boundaries for exactly that reason.
+    - `plan.load_forecast_wh` is in the bucket. It is occupancy at 15-minute resolution and
+      this repo is public, so the fixture asserts it is declared **nowhere** — the same rule
+      `dispatch/corpus.py` applies at the parse boundary, one layer further out.
+  - The fixture records what this repo DEPENDS ON, not what the planner writes. Field lists
+    were verified against the live bucket on 2026-08-17; the tests deliberately do not
+    re-query it, since CI has no NAS and a test that skips without one guards nothing.
 - [ ] **One heartbeat in `battery-planning`** (Part 3). Monitor #1 `plan-run`, pinged by
       `plan-now.sh`. That repo has no Kuma reference anywhere today and `plan-now.sh` exits 1
       with nothing watching. Once dispatch depends on fresh plans, a silent planning failure

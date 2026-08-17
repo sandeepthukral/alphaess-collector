@@ -1,0 +1,74 @@
+{
+ "_about": [
+  "What THIS repo depends on in the `planning` bucket, which `battery-planning` writes.",
+  "PLAN-repo-seams.md Part 2b. It is a dependency manifest, not a schema dump: the planner",
+  "writes more than this, and the extra is deliberately absent so that dropping it stays a",
+  "non-event here.",
+  "",
+  "It exists because the dependency is otherwise invisible. A field rename in the other repo",
+  "blanks a dashboard panel with no error anywhere, and once the translator reads the same",
+  "measurement the same rename stops dispatch. Neither repo's tests cross the boundary, so",
+  "this file is the boundary, written down and reviewable in a diff.",
+  "",
+  "Verified against the live bucket on 2026-08-17 with `schema.measurementFieldKeys`. Every",
+  "field below existed then. The tests do NOT re-query the database -- they assert that the",
+  "code and the dashboards only ask for things named here, which is the half that can be",
+  "checked without a NAS.",
+  "",
+  "NOT DEPENDED ON, and to stay that way:",
+  "  - plan.load_forecast_wh -- the household's load forecast, i.e. occupancy at 15-minute",
+  "    resolution. `PlanInterval` has never carried it; see dispatch/corpus.py. This repo is",
+  "    public. If it ever appears in a read here, that is the bug this line exists to catch.",
+  "  - plan.pv_forecast_raw_wh -- the unclipped forecast; `pv_forecast_wh` is the one used.",
+  "  - the `weather_forecast` and `weather_observed` measurements, which nothing here reads."
+ ],
+ "bucket": "planning",
+ "verified_against_live_bucket": "2026-08-17",
+ "measurements": {
+  "plan": {
+   "why": "The LP optimiser's output. Read by dispatch/plan.py:from_influx and by the plan and main dashboards.",
+   "tags": ["plan_run"],
+   "required_fields": [
+    "charge_wh",
+    "discharge_wh",
+    "export_wh",
+    "import_wh",
+    "soc_wh"
+   ],
+   "optional_fields": [
+    "cost_eur",
+    "price_buy",
+    "price_market",
+    "price_sell",
+    "pv_forecast_wh",
+    "reserve_wh"
+   ]
+  },
+  "app_setting": {
+   "why": "Thresholds the plan implies for the AlphaESS app. Read by the plan dashboard's panel 8, which goes away once DISPATCH_LIVE=1.",
+   "tags": [],
+   "required_fields": [],
+   "optional_fields": ["set_to_eur_kwh", "until_s"]
+  },
+  "plan_score": {
+   "why": "Plan-vs-actual reconciliation. Read only by the score dashboard; nothing on the control path.",
+   "tags": [],
+   "required_fields": [],
+   "optional_fields": [
+    "cost_eur_actual",
+    "cost_eur_nobattery",
+    "cost_eur_plan",
+    "export_wh_actual",
+    "export_wh_plan",
+    "import_wh_actual",
+    "import_wh_plan",
+    "load_wh_actual",
+    "load_wh_forecast",
+    "pv_wh_actual",
+    "pv_wh_forecast",
+    "soc_wh_actual",
+    "soc_wh_plan"
+   ]
+  }
+ }
+}
