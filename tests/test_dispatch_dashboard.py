@@ -340,3 +340,71 @@ class TestPanelFive:
         names = {o["matcher"]["options"]
                  for o in self._panel()["fieldConfig"]["overrides"]}
         assert "commanded" in names
+
+
+class TestDecisionPanel:
+    """`Decision` is the only panel in the dispatch row that is not a register readback.
+
+    The rest of the row reads back the inverter, and dry run never writes it -- so they read
+    `no dispatch` / 0 W / `Released` on every tick of a dry-run day, whatever was decided.
+    This panel reads `slot_action`, which `state.py` publishes from the slot. Without it a
+    dry-run day is unobservable from the dashboard, which is the state it shipped in.
+    """
+
+    def _panel(self):
+        plan = json.loads((DASHBOARDS / "alphaess-battery-plan.json").read_text())
+        return next(p for p in plan["panels"] if p.get("title") == "Decision")
+
+    def test_it_reads_the_decision_not_the_readback(self):
+        """The whole point. `action` and `setpoint_w` are the inverter's account of itself
+        and are constant through a dry run; `slot_action` is the dispatcher's."""
+        query = " ".join(t["query"] for t in self._panel()["targets"])
+        assert '_field == "slot_action"' in query
+        assert '_field == "action"' not in query
+
+    def test_no_slot_does_not_render_as_a_fault(self):
+        """`slot_action` is conditional -- `state.py` writes it only while a slot is active.
+
+        So a healthy dispatcher outside the plan's horizon, or in a gap between slots, writes
+        a point without it and this panel goes to noValue. Grafana colours noValue with the
+        BASE threshold step, so a red base would accuse a working dispatcher of being down
+        for every unscheduled hour of the day. That is the same bug `Command expires in` had
+        with `expires_at`, and it is worth guarding twice because the two panels were written
+        months apart and the second did not learn it from the first.
+
+        The loud case is not lost: `action` IS written unconditionally, so `Dispatch state`
+        beside it still shouts NO DISPATCHER when the loop actually stops.
+        """
+        defaults = self._panel()["fieldConfig"]["defaults"]
+        base = next(s for s in defaults["thresholds"]["steps"] if s["value"] is None)
+        assert base["color"] != "red", (
+            "the base step colours noValue, and noValue here means 'nothing scheduled right "
+            "now' -- a normal rest, not a dead dispatcher")
+        assert defaults["noValue"] == "no slot", (
+            "an unlabelled blank reads as a broken panel; say which absence this is")
+
+    def test_it_maps_every_action_the_translator_can_emit(self):
+        """An unmapped action renders in the base colour and reads as nothing in particular.
+
+        Derived from `classify` rather than listed, so a fifth action added to section 4.1's
+        table fails here instead of quietly rendering grey on the dashboard.
+        """
+        from plan import PlanInterval
+        from translator import classify
+
+        t0 = dt.datetime(2026, 8, 15, 12, 0, tzinfo=dt.UTC)
+        cases = [
+            # charge_wh, discharge_wh, import_wh, export_wh
+            (2000, 0, 2000, 0),     # charge from the grid
+            (2000, 0, 0, 0),        # charge from PV only -- crosses no meter
+            (0, 2000, 0, 2000),     # discharge to the grid
+            (0, 2000, 0, 0),        # discharge into the house
+            (0, 0, 0, 0),           # standing still
+        ]
+        emitted = {classify(PlanInterval(start=t0, soc_wh=10000, charge_wh=c,
+                                         discharge_wh=d, import_wh=i, export_wh=e))
+                   for c, d, i, e in cases}
+        assert len(emitted) > 1, "the cases collapsed to one action -- guard is vacuous"
+
+        mapped = set(self._panel()["fieldConfig"]["defaults"]["mappings"][0]["options"])
+        assert emitted <= mapped, f"unmapped decisions: {sorted(emitted - mapped)}"
