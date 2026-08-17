@@ -21,9 +21,10 @@ import pytest
 import test_mode1_negative as probe
 
 # A baseline the pre-flight would actually accept: 1200 W into the battery, which
-# `plan_command` turns into a 396 W command with 804 W of separation.
+# `plan_command` turns into a 600 W command with 600 W of separation and a 200 W tolerance.
+# Bands: flat 0-200, honoured 400-800, ignored 1000-1400.
 BASE_CHARGE = 1200
-WANT = 396
+WANT = 600
 COMMANDED = -WANT           # register convention: negative charges
 SOLAR = 3000
 
@@ -68,7 +69,7 @@ class TestSampleHelper:
 class TestUndercommandVerdict:
     def test_honoured(self):
         """Charge lands on the setpoint and the power it stopped taking exports."""
-        lines = under(window(BASE_CHARGE, 0), window(400, 800))
+        lines = under(window(BASE_CHARGE, 0), window(620, 580))
         assert token(lines) == "HONOURED"
 
     def test_ignored(self):
@@ -79,11 +80,11 @@ class TestUndercommandVerdict:
     def test_a_frozen_battery_is_flat_not_honoured(self):
         """The bug this file was written for.
 
-        Charge 0 W is BELOW the midpoint of (396, 1200), and with the battery taking nothing
-        the whole surplus exports -- so the old one-sided test saw both channels "agree" and
-        printed `HONOURED. The battery took roughly what it was told to take` for a battery
-        that took nothing at all. FLAT is checked first precisely because the export channel
-        would otherwise rescue it.
+        Charge 0 W was BELOW the midpoint of (commanded, baseline), and with the battery
+        taking nothing the whole surplus exports -- so the original one-sided test saw both
+        channels "agree" and printed `HONOURED. The battery took roughly what it was told to
+        take` for a battery that took nothing at all. FLAT is checked first precisely because
+        the export channel would otherwise rescue it.
         """
         lines = under(window(BASE_CHARGE, 0), window(0, BASE_CHARGE))
         assert token(lines) == "FLAT"
@@ -91,16 +92,16 @@ class TestUndercommandVerdict:
     def test_honoured_survives_a_non_zero_baseline_export(self):
         """1200 W into the battery with 1000 W already exporting, so surplus is 2200 W.
 
-        Honoured means charge 400 W and export 1800 W -- an 800 W change. Judged against the
-        SURPLUS the threshold would be (2200-396)/2 = 902 W and this reads INCONCLUSIVE;
-        judged against the baseline CHARGE it is (1200-396)/2 = 402 W and it reads correctly.
+        Honoured means charge 620 W and export 1580 W -- a 580 W change. Judged against the
+        SURPLUS the threshold would be (2200-600)/2 = 800 W and this reads INCONCLUSIVE;
+        judged against the baseline CHARGE it is (1200-600)/2 = 300 W and it reads correctly.
         Only power the battery was already taking can be displaced.
         """
-        lines = under(window(BASE_CHARGE, 1000), window(400, 1800))
+        lines = under(window(BASE_CHARGE, 1000), window(620, 1580))
         assert token(lines) == "HONOURED"
 
     def test_a_charge_between_both_predictions_is_inconclusive(self):
-        lines = under(window(BASE_CHARGE, 0), window(800, 400))
+        lines = under(window(BASE_CHARGE, 0), window(900, 300))
         assert token(lines) == "INCONCLUSIVE"
 
     def test_an_aborted_window_is_inconclusive_not_ignored(self):
@@ -115,12 +116,55 @@ class TestUndercommandVerdict:
         assert token(under(window(BASE_CHARGE, 0), during, aborted=True)) == "INCONCLUSIVE"
 
     def test_too_few_samples_is_inconclusive(self):
-        during = window(400, 800, n=probe.MIN_DURING_SAMPLES - 1)
+        during = window(620, 580, n=probe.MIN_DURING_SAMPLES - 1)
         assert token(under(window(BASE_CHARGE, 0), during)) == "INCONCLUSIVE"
 
     def test_the_load_drift_warning_still_fires(self):
-        lines = under(window(BASE_CHARGE, 0), window(400, 800, solar=SOLAR + 2 * probe.LOAD_DRIFT))
+        lines = under(window(BASE_CHARGE, 0), window(620, 580, solar=SOLAR + 2 * probe.LOAD_DRIFT))
         assert any("house load moved" in ln for ln in lines)
+
+
+class TestTheHonouredBandHasRoomOnBothSides:
+    """Sweep the observed charge across the whole range and read the boundaries off.
+
+    A previous version put the FLAT cut at `want/2` while banding the other two at +/-tol.
+    With the command at a third of baseline that cut landed INSIDE the honoured band, so
+    HONOURED ran from 0.51x to 1.68x the setpoint and butted straight against FLAT -- a
+    battery clamping the magnitude while honouring the sign printed "took roughly what it was
+    told to take". The claim being certified is "Mode 1 is a real setpoint", and the design
+    commands specific powers on that basis, so the low side needs a gap as much as the high
+    side does.
+    """
+
+    def verdicts(self):
+        base = window(BASE_CHARGE, 0)
+        out = {}
+        for charge in range(0, BASE_CHARGE + 401):
+            during = window(charge, BASE_CHARGE - charge)
+            out[charge] = token(under(base, during))
+        return out
+
+    def test_flat_and_honoured_are_separated_by_inconclusive(self):
+        by_charge = self.verdicts()
+        flat = [c for c, t in by_charge.items() if t == "FLAT"]
+        honoured = [c for c, t in by_charge.items() if t == "HONOURED"]
+        assert max(flat) < min(honoured) - 1, "FLAT and HONOURED still abut"
+        assert all(by_charge[c] == "INCONCLUSIVE" for c in range(max(flat) + 1, min(honoured)))
+
+    def test_the_honoured_band_is_centred_on_the_setpoint(self):
+        honoured = [c for c, t in self.verdicts().items() if t == "HONOURED"]
+        low, high = min(honoured) / WANT, max(honoured) / WANT
+        assert 0.6 < low < 0.7, low
+        assert 1.3 < high < 1.4, high
+
+    def test_a_battery_clamping_at_half_the_setpoint_is_not_honoured(self):
+        """The scenario that motivated this: sign honoured, magnitude clamped.
+
+        0.5x is the ratio the old geometry called HONOURED (its low edge sat at 0.51x). It is
+        now squarely in the dead zone between FLAT and HONOURED, which is the honest reading.
+        """
+        during = window(WANT // 2, BASE_CHARGE - WANT // 2)
+        assert token(under(window(BASE_CHARGE, 0), during)) == "INCONCLUSIVE"
 
 
 class TestTheRecordedLiveRun:
@@ -140,24 +184,28 @@ class TestTheRecordedLiveRun:
         lines = probe.verdict(baseline, during, self.LIVE, False, undercommand=True)
         assert token(lines) == "HONOURED"
 
-    def test_the_setpoint_it_used_is_the_one_plan_command_still_derives(self):
-        assert probe.plan_command(1219, True)[0] == self.LIVE
+    def test_a_re_run_today_would_command_more_than_that_run_did(self):
+        """UNDER_FRACTION moved from a third to a half, so the same 1219 W baseline now asks
+        for ~609 W rather than 402 W. The recorded run is still readable -- its charge sits
+        well inside the honoured band for its own 402 W command -- but a re-run is not a
+        repeat, and the doc should not be read as if it were."""
+        assert probe.plan_command(1219, True)[0] == -609
 
 
 class TestSamplesThatDidNotCarryTheCommand:
     """`start=1` at pre-flight is a hard stop, but nothing stopped the app starting after."""
 
     def test_hijacked_samples_are_dropped_and_flagged(self):
-        good = window(400, 800, n=4)
+        good = window(620, 580, n=4)
         hijacked = window(5000, -3800, n=4, mode=2)
         lines = probe.verdict(window(BASE_CHARGE, 0), good + hijacked, COMMANDED, False,
                               undercommand=True)
         assert any("did not carry the command" in ln for ln in lines)
-        # Unfiltered, the median charge over those eight samples is 5000 W, not 400 W.
+        # Unfiltered, the median charge over those eight samples is 5000 W, not 620 W.
         assert token(lines) == "HONOURED"
 
     def test_a_different_power_in_the_block_also_counts_as_hijacked(self):
-        during = window(400, 800, n=6, commanded_w=-5000)
+        during = window(620, 580, n=6, commanded_w=-5000)
         assert probe.command_carrying(during, COMMANDED) == []
 
     def test_a_wholly_hijacked_window_is_inconclusive(self):
@@ -169,7 +217,7 @@ class TestSamplesThatDidNotCarryTheCommand:
     def test_a_dry_run_keeps_every_sample(self):
         """Nothing was written, so no sample can carry the command. Filtering would eat them
         all and make every dry run report INCONCLUSIVE."""
-        during = window(400, 800, start=0, commanded_w=0)
+        during = window(620, 580, start=0, commanded_w=0)
         lines = probe.verdict(window(BASE_CHARGE, 0), during, COMMANDED, False,
                               undercommand=True, dry_run=True)
         assert token(lines) == "HONOURED"
@@ -227,16 +275,21 @@ class TestPlanCommand:
             if watts is not None:
                 assert abs(watts) == int(available * probe.UNDER_FRACTION)
 
-    def test_the_prediction_bands_never_overlap_on_a_runnable_probe(self):
-        """What MIN_SEPARATION is actually for. If `want + tol` ever reached
-        `base_charge - tol`, a single charge reading could satisfy both hypotheses."""
+    def test_all_three_prediction_bands_stay_separated_by_a_real_gap(self):
+        """The geometry the whole verdict rests on.
+
+        Three predictions -- 0, want, base_charge -- each with a band one tolerance wide. If
+        any two bands touch, a single charge reading satisfies two hypotheses at once and the
+        verdict stops meaning anything. The FLAT/HONOURED pair is the one that has been wrong
+        twice, so it is asserted at the same strength as the other.
+        """
         for available in range(probe.MIN_CHARGE_UNDER, 8000, 25):
             watts, _ = probe.plan_command(available, True)
-            if watts is None:
-                continue
+            assert watts is not None, available
             want = abs(watts)
-            tol = max(probe.CHARGE_TOL_FLOOR, (available - want) / 3)
-            assert want + tol < available - tol, available
+            tol = max(probe.CHARGE_TOL_FLOOR, want / 3)
+            assert tol < want - tol, f"flat and honoured touch at {available}"
+            assert want + tol < available - tol, f"honoured and ignored touch at {available}"
 
     def test_max_power_clamps_the_undercommand_setpoint(self):
         watts, _ = probe.plan_command(20000, True)
@@ -260,10 +313,10 @@ class TestVerdictToken:
     @pytest.mark.parametrize("expected", ["HONOURED", "IGNORED", "FLAT", "INCONCLUSIVE"])
     def test_every_undercommand_outcome_is_reachable(self, expected):
         cases = {
-            "HONOURED": (window(BASE_CHARGE, 0), window(400, 800), False),
+            "HONOURED": (window(BASE_CHARGE, 0), window(620, 580), False),
             "IGNORED": (window(BASE_CHARGE, 0), window(BASE_CHARGE, 0), False),
             "FLAT": (window(BASE_CHARGE, 0), window(0, BASE_CHARGE), False),
-            "INCONCLUSIVE": (window(BASE_CHARGE, 0), window(800, 400), False),
+            "INCONCLUSIVE": (window(BASE_CHARGE, 0), window(900, 300), False),
         }
         baseline, during, aborted = cases[expected]
         assert token(under(baseline, during, aborted=aborted)) == expected

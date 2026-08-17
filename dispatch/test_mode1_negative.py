@@ -31,9 +31,12 @@ TWO PROBES, BECAUSE ONE QUESTION TURNED INTO TWO
       setpoint honoured -> battery charges the commanded power, the rest exports
       setpoint ignored  -> battery charges the whole surplus, export stays near zero
 
-  The signal is `surplus - commanded`, so a SMALL command is the informative one here --
-  the exact opposite of the overcommand probe's "do not be timid" advice below. Both are
-  right for their own probe.
+  The signal is `baseline charge - commanded`, so a SMALLER command is the informative one
+  here -- the opposite of the overcommand probe's "do not be timid" advice below. Both are
+  right for their own probe. But not arbitrarily small: the command has to stay far enough
+  ABOVE zero that "charged the setpoint" and "charged nothing" are still distinguishable, so
+  it is set at HALF the baseline charge rather than as little as possible. UNDER_FRACTION
+  says why that number and not a smaller one.
 
   It was run live on 2026-08-16 and returned HONOURED, decisively. 402 W commanded into
   a ~1220 W surplus: the battery charged 331-361 W for the whole four-minute window while
@@ -145,20 +148,32 @@ SOLAR_JITTER = 300         # baseline solar spread that means a cloud is moving 
 # Undercommand probe. The signal is `baseline charge - commanded` in the EXPORT channel --
 # baseline CHARGE, not surplus, because only power the battery was already taking can be
 # displaced -- so these are tuned to keep that difference large rather than the command.
-UNDER_FRACTION = 0.33      # ask for this share of the measured baseline charge
+UNDER_FRACTION = 0.5       # ask for this share of the measured baseline charge. HALF, not a
+                           # third, and the reason is the verdict rather than the command: the
+                           # three hypotheses predict charges of 0, want and base_charge, and
+                           # each gets a band one tolerance wide. At a third, `want/2` is
+                           # smaller than the tolerance the OTHER gap needs, so the "flat" and
+                           # "at the setpoint" bands are forced to abut and a battery clamping
+                           # at 0.51x the setpoint reads as HONOURED. At a half the three
+                           # predictions sit at 0, C/2 and C, evenly spaced, and one tolerance
+                           # around each leaves equal dead zones on both sides. The cost is a
+                           # smaller export signal -- half the baseline charge rather than two
+                           # thirds -- which MIN_SEPARATION still guards.
 MIN_COMMAND = 300          # ...but never less: very small setpoints risk landing under some
                            # inverter minimum and being special-cased, which would look like
                            # "ignored" for an entirely different reason.
-MIN_SEPARATION = 700       # baseline charge - commanded, below which the three hypotheses
-                           # stop being separable. Not a noise floor: it is what makes the
-                           # "at the setpoint" and "at the baseline" bands below DISJOINT.
-                           # With tol = max(250, separation/3), separation 700 gives bands
-                           # 700-2*250 = 200W apart at the worst case, and wider above it.
-CHARGE_TOL_FLOOR = 250     # how close to a prediction the observed charge must land. A floor
-                           # as well as a fraction, so a minimum-size command near MIN_COMMAND
-                           # is not judged against a tolerance tighter than sensor noise.
-MIN_CHARGE_UNDER = 1100    # the baseline charge that MIN_COMMAND and MIN_SEPARATION together
-                           # imply: at 1100W the command is 363W and the separation 737W.
+MIN_SEPARATION = 500       # baseline charge - commanded, below which the expected export step
+                           # is inside the noise a passing cloud makes. A NOISE floor only --
+                           # keeping the charge bands disjoint is UNDER_FRACTION's job now.
+CHARGE_TOL_FLOOR = 200     # how close to a prediction the observed charge must land, as a
+                           # floor under `want/3`. The live 2026-08-16 run sat 56W below its
+                           # setpoint with a standard deviation of 15W, so real regulation
+                           # slop is tens of watts; 200W is generous without being a third of
+                           # the setpoint itself.
+MIN_CHARGE_UNDER = 1200    # the baseline charge below which the dead zones close up. At
+                           # 1200W: command 600W, tolerance 200W, so the bands are 0-200,
+                           # 400-800 and 1000-1400 -- 200W of INCONCLUSIVE on either side of
+                           # the honoured band. Above it the gaps widen as want/3.
 MIN_SURPLUS_UNDER = 800    # weaker second gate. Surplus >= charge whenever nothing is
                            # importing, so MIN_CHARGE_UNDER normally binds first; this still
                            # catches a baseline that is importing while the battery charges.
@@ -166,13 +181,13 @@ MIN_DURING_SAMPLES = 4     # every figure in the undercommand verdict is a media
                            # cut short by `abort_on_import` can leave as few as two samples,
                            # and two samples do not make a median worth acting on.
 UNDER_JITTER = 800         # this probe tolerates more cloud than the overcommand one: it
-                           # aims at a third of the baseline charge, so a stale estimate
+                           # aims at half the baseline charge, so a stale estimate
                            # moves the setpoint slightly rather than collapsing the
                            # separation. It does NOT widen the verdict's own error bars in
                            # the way it once did -- every channel below is a median, and the
                            # export test is a delta across the command boundary.
 LOAD_DRIFT = 400           # baseline->during house-load move that makes the run weak: the
-                           # expected export is computed from the BASELINE surplus, so a
+                           # expected export is computed from the BASELINE charge, so a
                            # load stepping on mid-phase eats the very signal being read.
 
 
@@ -353,6 +368,16 @@ def verdict(baseline, during, commanded_w, aborted, undercommand=False, dry_run=
                          "AlphaESS app in plain self-consumption mode and re-run.")
             return lines
 
+    # Both probes, because both read medians of a channel a cloud also moves. The exemption is
+    # deliberate: an `abort_on_import` window ends on two consecutive CONFIRMED imports, and
+    # for the overcommand probe that is the whole answer -- CAP and DEMAND differ by kilowatts,
+    # so two samples settle it. Everything else here is a median and needs a median's worth.
+    if not aborted and len(during) < MIN_DURING_SAMPLES:
+        lines.append(f"=> INCONCLUSIVE. Only {len(during)} usable sample(s) during the "
+                     f"command. Every figure below is a median and needs at least "
+                     f"{MIN_DURING_SAMPLES}. Re-run.")
+        return lines
+
     # Medians throughout -- `base_surplus` used to be the one mean left in the file, and it is
     # the most load-bearing channel there is: it sets the setpoint and every threshold below.
     base_surplus = med([surplus_of(s) for s in baseline])
@@ -405,12 +430,19 @@ def _undercommand_verdict(baseline, during, want, base_charge, mid_charge, mid_g
         ignored   charge ~= base_charge    export flat
         flat      charge ~= 0              export up by the WHOLE base_charge
 
-    The earlier version asked only whether the charge was below the midpoint of
-    (want, base_charge), which `flat` satisfies trivially -- and `flat` also pushes the export
-    channel hard in the honoured direction, because the surplus has nowhere else to go. Both
-    channels then "agreed" on HONOURED for a battery that took nothing at all. That is the one
-    wrong answer that would have been acted on, so the charge test is now two-sided and FLAT
-    is decided BEFORE the export channel gets a chance to rescue it.
+    With UNDER_FRACTION at a half those three sit evenly spaced at 0, C/2 and C, and each gets
+    a band ONE TOLERANCE wide. Anything outside all three is INCONCLUSIVE, which is the honest
+    answer for a battery that honours the sign but clamps the magnitude. FLAT is still decided
+    first, because a frozen battery also pushes the export channel hard in the honoured
+    direction -- the surplus has nowhere else to go -- and must not be rescued by it.
+
+    Two earlier versions got this wrong in the same shape. The first asked only whether the
+    charge was below the midpoint of (want, base_charge), which a frozen battery satisfies
+    trivially: both channels "agreed" on HONOURED for a battery taking nothing at all. The
+    second fixed that but cut FLAT at `want/2` while banding the other two at +/-tol, and with
+    the command at a third of baseline that cut fell INSIDE the honoured band -- so HONOURED
+    ran from 0.51x to 1.68x the setpoint with no gap at all on the low side. Hence one rule for
+    all three predictions, and a fraction chosen so the rule has room to work.
 
     Everything is read as a DELTA, not an absolute: baseline export is rarely exactly zero,
     and only the change across the command boundary is attributable to the command.
@@ -421,21 +453,20 @@ def _undercommand_verdict(baseline, during, want, base_charge, mid_charge, mid_g
                 "honest reading of the command under which it imports -- something else drove "
                 "the register block, most likely the AlphaESS app. Put it in plain "
                 "self-consumption mode, clear any price thresholds, and re-run."]
-    if len(during) < MIN_DURING_SAMPLES:
-        return [f"=> INCONCLUSIVE. Only {len(during)} usable sample(s) during the command. "
-                f"Every figure here is a median and needs at least {MIN_DURING_SAMPLES}. "
-                f"Re-run."]
-
-    expected = base_charge - want               # export the setpoint would force, if honoured
+    expected = base_charge - want              # export the setpoint would force, if honoured
     base_grid = med([s["grid_w"] for s in baseline])
     delta_export = base_grid - mid_grid         # grid is import-positive, so this is +export
     exported = delta_export > expected / 2
 
-    # Bands around each prediction. The fraction keeps them disjoint as the numbers scale; the
-    # floor keeps a minimum-size command from being judged inside sensor noise. MIN_SEPARATION
-    # is what guarantees the two bands do not touch -- see its comment.
-    tol = max(CHARGE_TOL_FLOOR, expected / 3)
-    flat = mid_charge < max(MIN_SURPLUS, want / 2)
+    # ONE band, one tolerance wide, around each of the three predictions -- and nothing else
+    # deciding any of them. An earlier version cut FLAT at `want/2` instead, a second heuristic
+    # that had no relation to the tolerance the other two bands used: with the command at a
+    # third of baseline it landed INSIDE the honoured band, so the honoured verdict ran from
+    # 0.51x to 1.68x the setpoint with a hard edge against FLAT and a proper gap only on the
+    # far side. A battery that honours the sign but clamps the magnitude read as a real
+    # setpoint, which is precisely the claim this probe exists to certify.
+    tol = max(CHARGE_TOL_FLOOR, want / 3)
+    flat = abs(mid_charge) <= tol
     at_setpoint = abs(mid_charge - want) <= tol
     at_baseline = abs(mid_charge - base_charge) <= tol
 
@@ -465,12 +496,15 @@ def _undercommand_verdict(baseline, during, want, base_charge, mid_charge, mid_g
     else:
         charge_says = ("at the setpoint" if at_setpoint else
                        "at the baseline" if at_baseline else
-                       "between both predictions, matching neither")
+                       "DISCHARGING, which none of the three predicts" if mid_charge < 0 else
+                       "in a dead zone between two predictions, matching neither -- which is "
+                       "what a battery honouring the sign but clamping the magnitude looks like")
+        export_says = ("the setpoint displaced real power" if exported
+                       else "nothing was displaced")
         lines.append("=> INCONCLUSIVE. The channels do not agree on one hypothesis: export "
-                     f"says {'the setpoint displaced real power' if exported else 'nothing was displaced'}"
-                     f", and the charge sits {charge_says}. That is the signature of something "
-                     "else moving during the window, not of a fourth behaviour. Re-run in "
-                     "steadier conditions.")
+                     f"says {export_says}, and the charge sits {charge_says}. That is the "
+                     "signature of something else moving during the window, not of a fourth "
+                     "behaviour. Re-run in steadier conditions.")
 
     base_load = med([house_load(s) for s in baseline])
     during_load = med([house_load(s) for s in during])
