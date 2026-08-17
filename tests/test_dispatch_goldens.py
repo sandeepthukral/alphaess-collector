@@ -32,6 +32,7 @@ import json
 import os
 from collections import Counter
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -158,6 +159,91 @@ class TestReviewedRuns:
             assert len(entry["digest"]) == 64
 
 
+def _rebuild_runs(reasons: dict, by_run: dict, entries: dict) -> list[dict]:
+    """One reviewed-runs list, rebuilt from whatever corpus is on disk.
+
+    Split out of the regeneration test so the carry-through rule is reachable without
+    REGENERATE=1 and without rewriting the committed file. The rule is the whole reason this
+    function is worth having: a run that cannot be re-derived keeps its reviewed entry.
+    """
+    runs = []
+    for plan_run in reasons:
+        intervals = by_run.get(plan_run)
+        if intervals is None:
+            # NOT `continue`. A reviewed run missing from the local corpus is the ordinary
+            # case after re-fetching -- the corpus is gitignored and selection is by shape, so
+            # any refetch can return a different set -- and dropping it here would delete a
+            # human's review from the only file that records it. The entry still carries its
+            # reason, digest and counts from the last regeneration, so it is carried through
+            # verbatim. This is what the docstring below promises; it used to `continue`.
+            if plan_run in entries:
+                runs.append(entries[plan_run])
+            else:
+                # Named by the manifest, absent from the corpus, never reviewed. Nothing to
+                # preserve and nothing to derive, but it must not pass silently: it means the
+                # manifest and the corpus disagree about what was fetched.
+                print(f"WARNING: {plan_run} is in the manifest but not in the corpus, "
+                      f"and has no reviewed entry to carry forward -- skipping")
+            continue
+        doc, warnings = _translate(intervals)
+        runs.append({
+            "plan_run": plan_run,
+            "reason": reasons[plan_run],
+            "slots": len(doc["slots"]),
+            "actions": _actions(doc),
+            "warnings": warnings,
+            "digest": _digest(doc),
+        })
+    return runs
+
+
+class TestReviewHistorySurvivesRegeneration:
+    """`reviewed_runs.json` is the only record that a human looked at a run and accepted its
+    output. `dispatch/testdata/` is gitignored, so the corpus it was derived from may simply
+    not be on the next machine -- which makes "regenerate against a partial corpus" the normal
+    case rather than the exotic one."""
+
+    ENTRY: ClassVar[dict] = {
+        "plan_run": "2026-08-01T09:00:00Z",
+        "reason": "deepest discharge cycle in the window",
+        "slots": 42, "actions": {"discharge": 8}, "warnings": [], "digest": "a" * 64,
+    }
+
+    def test_a_reviewed_run_absent_from_the_corpus_is_carried_through(self):
+        """The regression. `continue` here deleted the reason, the digest and the fact that
+        anybody had ever reviewed it -- from the only file that knows."""
+        out = _rebuild_runs(
+            {self.ENTRY["plan_run"]: self.ENTRY["reason"]}, {}, {self.ENTRY["plan_run"]: self.ENTRY})
+        assert out == [self.ENTRY], "the reviewed entry was dropped, not carried through"
+
+    def test_it_is_carried_through_verbatim(self):
+        """Not rebuilt from the reason alone: the digest is the reviewed artefact, and
+        inventing a fresh one would silently re-bless output nobody looked at."""
+        out = _rebuild_runs(
+            {self.ENTRY["plan_run"]: "a different reason now"}, {},
+            {self.ENTRY["plan_run"]: self.ENTRY})
+        assert out[0]["digest"] == self.ENTRY["digest"]
+        assert out[0]["reason"] == self.ENTRY["reason"]
+
+    def test_an_unreviewable_unknown_run_is_skipped_not_invented(self, capsys):
+        """Manifest names it, corpus lacks it, nobody reviewed it. Nothing to carry, so it is
+        dropped -- but loudly, because it means the two disagree about what was fetched."""
+        out = _rebuild_runs({"2026-08-09T12:00:00Z": "some reason"}, {}, {})
+        assert out == []
+        assert "not in the corpus" in capsys.readouterr().out
+
+    def test_a_run_present_in_the_corpus_is_rebuilt_rather_than_carried(self):
+        """The carry-through must not shadow real regeneration, or the file would freeze."""
+        if not CORPUS:
+            pytest.skip("no corpus available")
+        ivs, meta = CORPUS[0]
+        stale = dict(self.ENTRY, plan_run=meta["plan_run"], digest="b" * 64)
+        out = _rebuild_runs({meta["plan_run"]: "why"}, {meta["plan_run"]: ivs},
+                            {meta["plan_run"]: stale})
+        assert out[0]["digest"] != stale["digest"], "a re-derivable run must be re-derived"
+        assert out[0]["reason"] == "why"
+
+
 @pytest.mark.skipif(not REGENERATE, reason="regeneration only")
 def test_regenerate_reviewed_runs():
     """Rewrites `reviewed_runs.json` from the local corpus. Never runs in a normal pytest.
@@ -165,6 +251,12 @@ def test_regenerate_reviewed_runs():
     Reasons come from the corpus manifest, which is what recorded why each run was selected in
     the first place; a run already in the golden file keeps its existing reason if the manifest
     no longer names it, so re-fetching a newer archive cannot erase the review history.
+
+    That promise covers the run being absent from the CORPUS too, not just from the manifest.
+    `dispatch/testdata/` is gitignored and selection is by shape rather than recency, so a
+    refetch legitimately returns a different set of runs -- and `reviewed_runs.json` is the
+    only place a human's review of a run is recorded. A reviewed run that cannot be
+    re-derived is therefore carried through unchanged rather than dropped.
     """
     if not CORPUS:
         pytest.skip("no corpus to regenerate from")
@@ -177,20 +269,7 @@ def test_regenerate_reviewed_runs():
         for sel in json.loads(manifest_path.read_text()).get("selected", []):
             reasons.setdefault(sel["plan_run"], sel["reason"])
 
-    runs = []
-    for plan_run in reasons:
-        intervals = by_run.get(plan_run)
-        if intervals is None:
-            continue
-        doc, warnings = _translate(intervals)
-        runs.append({
-            "plan_run": plan_run,
-            "reason": reasons[plan_run],
-            "slots": len(doc["slots"]),
-            "actions": _actions(doc),
-            "warnings": warnings,
-            "digest": _digest(doc),
-        })
+    runs = _rebuild_runs(reasons, by_run, {e["plan_run"]: e for e in existing["runs"]})
 
     REVIEWED.parent.mkdir(parents=True, exist_ok=True)
     REVIEWED.write_text(json.dumps({
