@@ -276,7 +276,15 @@ def svg_chart(runs, battery, soc, price, t0, t1) -> str:
 
     y_pr_1 = y_main_1 + 38 + H_PRICE
     prices = [v for _, v in price]
-    pr_hi, pr_lo = max([*prices, 0.01]), min([*prices, 0.0])
+    pr_hi = max([*prices, 0.01])
+    # ZERO IS ONLY THE BASELINE WHEN THE DAY ACTUALLY GOES NEGATIVE. Anchoring at zero
+    # unconditionally is what made the first version's price panel useless: a day of
+    # 0.137-0.214 EUR/kWh rendered every bar at 64-100% of full height, so the panel filled
+    # with near-identical blocks and the cheap hours -- the entire reason a price bar is on a
+    # dispatch review -- were invisible. When every price is positive the floor is the
+    # cheapest hour, padded so that hour still draws a visible stub rather than nothing.
+    lo = min(prices) if prices else 0.0
+    pr_lo = min(lo, 0.0) if lo < 0 else lo - 0.08 * (pr_hi - lo or 0.01)
     pr_rng = (pr_hi - pr_lo) or 1.0
 
     def y_price(p):
@@ -284,6 +292,21 @@ def svg_chart(runs, battery, soc, price, t0, t1) -> str:
 
     o = [f'<svg viewBox="0 0 {W} {y_pr_1 + 48}" class="chart" '
          f'xmlns="http://www.w3.org/2000/svg">']
+
+    # BEFORE THE FIRST DECISION, THIS CHART IS NOT A REVIEW OF ANYTHING. The window is a whole
+    # day but the dispatcher may have been publishing for only the last hour of it, and the
+    # SoC and price traces are drawn across the whole span regardless -- they come from the
+    # collector, which has been running for months. Left unmarked, 23 hours of untouched
+    # battery read as "reviewed, nothing to report", which is the same lie the NO DISPATCHER
+    # panel told: a page that looks like it is answering a question it never asked.
+    if runs and runs[0]["start"] > t0:
+        xb = x(runs[0]["start"])
+        o.append(f'<rect x="{PAD_L}" y="{y_main_0}" width="{max(xb - PAD_L, 0):.1f}" '
+                 f'height="{H_MAIN}" fill="var(--ink)" opacity="0.055"/>')
+        o.append(f'<line x1="{xb:.1f}" y1="{y_main_0}" x2="{xb:.1f}" y2="{y_main_1}" '
+                 f'stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="4 3"/>')
+        o.append(f'<text x="{xb - 7:.1f}" y="{y_main_0 + 13}" class="ax" '
+                 f'text-anchor="end">no dispatcher &mdash; not reviewed</text>')
 
     for r in runs:
         x0, x1 = x(max(r["start"], t0)), x(min(r["end"], t1))
@@ -335,6 +358,22 @@ def svg_chart(runs, battery, soc, price, t0, t1) -> str:
         o.append(f'<rect x="{x0:.1f}" y="{yy:.1f}" width="{max(x1 - x0 - 1, 0.8):.1f}" '
                  f'height="{max(y_pr_1 - yy, 0.5):.1f}" '
                  f'fill="{"#dc2626" if pv < 0 else "var(--price)"}" opacity="0.55"/>')
+
+    # The price scale, stated rather than implied. Two labels, because the baseline is NOT
+    # zero on an all-positive day (see above) and a bar chart with an unstated non-zero floor
+    # invites exactly the wrong reading -- "twice as tall" would not mean "twice the price".
+    if prices:
+        o.append(f'<text x="{PAD_L - 8}" y="{y_price(pr_hi) + 9:.1f}" class="ax" '
+                 f'text-anchor="end">{pr_hi:.2f}</text>')
+        o.append(f'<text x="{PAD_L - 8}" y="{y_pr_1:.1f}" class="ax" '
+                 f'text-anchor="end">{pr_lo:.2f}</text>')
+        o.append(f'<text x="{PAD_L - 8}" y="{y_pr_1 + 13:.1f}" class="ax" '
+                 f'text-anchor="end">&euro;/kWh</text>')
+        if pr_lo < 0 < pr_hi:
+            zy = y_price(0.0)
+            o.append(f'<line x1="{PAD_L}" y1="{zy:.1f}" x2="{W - PAD_R}" y2="{zy:.1f}" '
+                     f'stroke="var(--ink)" stroke-width="1" stroke-dasharray="2 3" '
+                     f'opacity="0.45"/>')
 
     # Actual battery power, charging-positive to match the dashboard and `setpoint_w`.
     if battery:
@@ -397,7 +436,13 @@ def main() -> int:
                         t0, t1)
         battery = q_series(api, a.bucket, "power_readings", "battery_power_w", t0, t1)
         soc = q_series(api, a.bucket, "power_readings", "soc_percent", t0, t1)
-        price = q_series(api, a.bucket, "market_price", "total", t0, t1, every="1h")
+        # `market_price`, not `total`. Two reasons, and the first one is the important one:
+        # it is the series the plan was optimised against and the one panel 2 of the dashboard
+        # draws, so a decision questioned here is questioned against the number that caused
+        # it. Second, `total` carries tax and markup, which is a near-constant additive
+        # offset -- it compresses the visible spread to nothing and never goes negative, so
+        # the red-bar case could not arise.
+        price = q_series(api, a.bucket, "market_price", "market_price", t0, t1, every="1h")
 
     if not ticks:
         sys.exit("no dispatch_state points in that window -- is the dispatcher running?")
@@ -447,6 +492,11 @@ def main() -> int:
         kinds=", ".join(f"{k} {v}" for k, v in sorted(counts.items())),
         plans=len(plan_runs),
         window=f"{local(t0):%a %d %b %H:%M} &ndash; {local(t1):%H:%M}",
+        # The window asked for and the window actually reviewed are different numbers whenever
+        # the dispatcher started late, and the difference is the single most misleading thing
+        # about this page if it is left to be inferred from the chart.
+        covered=(f"{local(runs[0]['start']):%H:%M} &ndash; {local(runs[-1]['end']):%H:%M}"
+                 f"{'' if runs[0]['start'] <= t0 + dt.timedelta(minutes=2) else ' only'}"),
         floor=f"{a.soc_floor:.0f}",
         tz=TZ_LABEL,
         generated=f"{local(now):%Y-%m-%d %H:%M}",
@@ -470,6 +520,7 @@ HTML = """<title>Dry Run Decisions</title>
 
 <dl class="summary">
   <div class="ro"><dt>window</dt><dd>{window}</dd></div>
+  <div class="ro"><dt>decisions cover</dt><dd>{covered}</dd></div>
   <div class="ro"><dt>ticks</dt><dd>{ticks:,}</dd></div>
   <div class="ro"><dt>decisions</dt><dd>{decisions}</dd></div>
   <div class="ro"><dt>plans used</dt><dd>{plans}</dd></div>
