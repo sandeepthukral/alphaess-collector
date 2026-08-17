@@ -935,6 +935,49 @@ Copy each printed token into the matching `.env` variable, then `sudo docker
 compose up -d`. The Grafana token is created the same way but should list a
 `--read-bucket` for every bucket it charts — see below.
 
+### `INFLUX_TOKEN_DISPATCH`
+
+The dispatcher's token is minted separately because it is the only one spanning
+two buckets, so it cannot be created until the `planning` bucket exists — see
+["The `planning` bucket"](#the-planning-bucket) below. Run that section first.
+
+```sh
+cd /volume1/docker/alphaess-collector
+set -a; . ./.env; set +a
+
+ALPHAESS_ID=$(sudo docker compose exec -T influxdb influx bucket list \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" --name "$INFLUX_BUCKET" --hide-headers | awk '{print $1}')
+PLANNING_ID=$(sudo docker compose exec -T influxdb influx bucket list \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" --name planning --hide-headers | awk '{print $1}')
+echo "alphaess: $ALPHAESS_ID  planning: $PLANNING_ID"
+
+sudo docker compose exec -T influxdb influx auth create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "dispatch: r planning, rw alphaess" \
+  --read-bucket "$PLANNING_ID" \
+  --read-bucket "$ALPHAESS_ID" --write-bucket "$ALPHAESS_ID"
+```
+
+Both `echo`ed ids must be non-empty. `influx bucket list --name` on a bucket that
+does not exist prints nothing and exits 0, so a typo yields an empty `--read-bucket`
+argument and a token scoped to less than you asked for — which surfaces much later
+as the dispatcher reading no plan and holding at self-consumption.
+
+**Read on `planning`, never write.** The plan is the other project's output and
+this one only consumes it; a write scope here would let a dispatcher bug corrupt
+the input it is reading. Write is on `alphaess` alone, for the `dispatch_state`
+readback behind the dashboard's dispatch panels.
+
+Put it in `.env` as `INFLUX_TOKEN_DISPATCH`, replacing any placeholder, then start
+the service on its own:
+
+```sh
+sudo docker compose up -d dispatch
+```
+
+Not a bare `up -d`, which recreates the collector and cost 922 s of samples on
+2026-08-10. The service starts in **dry run** regardless (`DISPATCH_LIVE` defaults
+to 0); going live is a separate, deliberate step — see `DISPATCH-GOLIVE.md`.
+
 > Tokens are shown in full only when created. If you lose one, delete it
 > (`influx auth list` / `influx auth delete`) and mint a replacement; there is no
 > way to read it back.
@@ -1010,6 +1053,10 @@ sudo docker compose exec -T influxdb influx auth create \
 
 The second token goes in `INFLUX_TOKEN_GRAFANA` here; the first goes in the
 planning project's own `.env` and never appears in this repository.
+
+Once this bucket exists, mint `INFLUX_TOKEN_DISPATCH` too — see
+["`INFLUX_TOKEN_DISPATCH`"](#influx_token_dispatch) above. It is the third reader
+of `planning` and the reason that section could not be run before this one.
 
 > **The planning token cannot read `planning`.** That is deliberate, but it means
 > the project cannot query back what it has written — no idempotent "skip runs

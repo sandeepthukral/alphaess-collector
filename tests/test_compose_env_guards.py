@@ -26,6 +26,17 @@ ENV_EXAMPLE = (REPO / ".env.example").read_text(encoding="utf-8")
 
 GUARDED = sorted(set(re.findall(r"\$\{([A-Z0-9_]+):\?", COMPOSE_TEXT)))
 
+# `.env` variable -> the `-d` description of the `influx auth create` that mints it. Spelled
+# out rather than derived from the variable name, because it does not follow: the pusher's
+# token is described by its service, `awtrix-pusher`. A derivation that happened to work for
+# three of four would just fail on whichever token is added next.
+MINT_DESCRIPTION = {
+    "INFLUX_TOKEN_COLLECTOR": "collector",
+    "INFLUX_TOKEN_PUSHER": "awtrix-pusher",
+    "INFLUX_TOKEN_GRAFANA": "grafana",
+    "INFLUX_TOKEN_DISPATCH": "dispatch",
+}
+
 
 def test_the_guards_were_actually_found():
     """A regex that silently matches nothing would make every test below vacuously pass."""
@@ -44,6 +55,24 @@ def test_a_guarded_variable_is_documented_in_deploy_md(var):
 def test_a_guarded_variable_has_a_placeholder_in_env_example(var):
     """Also what keeps CI green, which is why it cannot be the only check."""
     assert re.search(rf"^{var}=", ENV_EXAMPLE, re.M), ENV_EXAMPLE[:0] or var
+
+
+@pytest.mark.parametrize("var", [v for v in GUARDED if v.startswith("INFLUX_TOKEN_")])
+def test_a_guarded_token_has_a_command_that_mints_it(var):
+    """Naming the variable is not enough -- the operator still has to produce a value, and
+    these are `influx auth create` invocations with bucket IDs, not something to guess. The
+    first version of the dispatch documentation listed the token in the table and stopped
+    there, which left the reader exactly as stuck one step further along.
+
+    Keyed on the `-d` description, which is what `influx auth list` shows later; that makes
+    the check double as "every token can be identified after the fact".
+    """
+    service = MINT_DESCRIPTION.get(var)
+    assert service, (
+        f"{var} is a new guarded token with no entry in MINT_DESCRIPTION above. Add it there "
+        f"and add its `influx auth create` to DEPLOY.md, \"Scoped tokens\".")
+    assert re.search(rf'-d "{re.escape(service)}: ', DEPLOY), (
+        f"DEPLOY.md has no `influx auth create ... -d \"{service}: ...\"` for {var}")
 
 
 @pytest.mark.parametrize("var", GUARDED)
