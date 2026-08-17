@@ -97,9 +97,13 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
       that on 2026-08-15: `dpwr=-5000W dsoc=100.0% dt=5580s`, a 93-minute forced grid charge
       at 5 kW. See `DESIGN-dispatch.md` §8.
 - [ ] Confirm `d_start == 0` at rest once the app is off
-- [ ] Mint `INFLUX_TOKEN_DISPATCH` — scope `r planning, rw alphaess`, per `DEPLOY.md`,
+- [x] Mint `INFLUX_TOKEN_DISPATCH` — scope `r planning, rw alphaess`, per `DEPLOY.md`,
       "Scoped tokens". The only token in the stack that spans both buckets, which is why it
-      is not the collector's
+      is not the collector's. **Done 2026-08-17**, and it is the real minted token, not the
+      `placeholder-not-yet-minted` string that unblocked the Grafana restart on the same day.
+      Worth keeping the distinction: Grafana never reads this token, so the placeholder
+      satisfies the stack-wide `:?` guard and everything looks healthy — the difference only
+      shows up when the dispatcher tries to read the `planning` bucket in section 3
 - [ ] Put it and `INVERTER_IP` in the NAS `.env`
 - [ ] Give the inverter a DHCP reservation, if it does not have one
 
