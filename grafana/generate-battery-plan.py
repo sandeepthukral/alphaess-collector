@@ -273,6 +273,13 @@ def stat(id_, title, desc, query, unit, decimals, x, w, steps, color_mode="value
     and `NO DISPATCHER` was the only string it could ever display, on a live dispatcher as
     readily as on a dead one, which is precisely the distinction that panel exists to draw.
     `/.*/` selects all fields, which is what a string stat needs.
+
+    ALL fields, though, is the whole frame -- so a `string_value` panel's query must return
+    ONE column. Flux hands Grafana `_time` and every tag alongside `_value`, and `/.*/` picks
+    them all up: panel 20's first fix rendered a second tile counting `_time` as a value, red
+    because no mapping matches a timestamp and red is the base step, with the `sys_sn` tag
+    hung off the action's label. `DISPATCH_LAST_VALUE` keeps only `_value` for exactly this
+    reason, and `test_a_string_stat_reduces_exactly_one_column` holds the pair together.
     """
     defaults = {
         "color": {"mode": "thresholds"},
@@ -481,6 +488,12 @@ DISPATCH_LAST = '''from(bucket: "alphaess")
   |> last()
 '''
 
+# For the STRING stat only, which reduces `/.*/` -- see `stat`. Dropping `_time` and the tags
+# leaves the one column the panel is meant to show. The freshness guard is unaffected: it is
+# `range(start: -5m)` that enforces it, by returning no rows at all, not the timestamp column.
+DISPATCH_LAST_VALUE = DISPATCH_LAST + '''  |> keep(columns: ["_value"])
+'''
+
 # `Released - following house` and `NO DISPATCHER` describe the SAME register contents:
 # start=0. Only the freshness of the point separates them, which is why the short window
 # above is not optional. The base threshold step is red because it is also the colour Grafana
@@ -493,7 +506,7 @@ panels.append(stat(
     "still hold is not being refreshed. Note that a released dispatch and a dead dispatcher "
     "look identical at the register level - only the freshness of this point tells them "
     "apart.",
-    DISPATCH_LAST % "action", "none", None, 0, 6,
+    DISPATCH_LAST_VALUE % "action", "none", None, 0, 6,
     [{"color": "red", "value": None}],
     y=4, no_value="NO DISPATCHER", string_value=True,
     mappings=[{"type": "value", "options": {
@@ -548,12 +561,26 @@ panels.append(stat(
 # both. Crucially this KEEPS the case the panel exists for: a loop that stops mid-command
 # leaves both fields stale at the same instant, they still pivot onto one row, and the
 # countdown drains to zero and goes red exactly as it should.
+#
+# NO COMMAND LIVE IS NOT A FAULT, AND MUST NOT RENDER AS ONE. The gate above is doing its job
+# every time it yields nothing -- which is most of the time, and for the whole of a dry-run
+# day. With red as the BASE threshold step that resting state rendered as a full-width red
+# `No data`, because Grafana colours `noValue` with the base step. A panel that is red all day
+# teaches you to stop reading it, and this is the one panel whose red is supposed to mean the
+# battery is sixty seconds from doing something unsupervised. So the base step is now neutral
+# and red starts at 0: no command reads grey, a live command under a minute reads red.
+#
+# The clamp is what keeps a stalled loop red rather than letting it slide back to neutral.
+# `expires_at` is fixed while `now()` advances, so a stopped loop drives this negative -- and
+# negative would land back on the base step and go grey, in the exact failure this panel
+# watches for. Flooring at 0 pins it to the red step until the point ages out of the window.
 panels.append(stat(
     23, "Command expires in",
     "Time left on the dead man's switch. The loop rewrites it every 60 s, so this should sit "
     "near 5 minutes and never fall far; dropping toward zero means the loop has stopped "
-    "refreshing and the inverter is about to revert to self-consumption on its own. Blank "
-    "means no command is live, which is a normal resting state, not a fault.",
+    "refreshing and the inverter is about to revert to self-consumption on its own. A grey "
+    "'no command' means nothing is dispatching, which is a normal resting state and the whole "
+    "of a dry-run day, not a fault.",
     '''from(bucket: "alphaess")
   |> range(start: -5m)
   |> filter(fn: (r) => r._measurement == "dispatch_state"
@@ -565,10 +592,12 @@ panels.append(stat(
                    and r.dispatch_active != 0)
   |> map(fn: (r) => ({ _time: r._time, _value:
        float(v: r.expires_at) - float(v: int(v: now())) / 1000000000.0 }))
+  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then 0.0 else r._value }))
   |> yield(name: "expires in")
 ''', "s", 0, 18, 6,
-    [{"color": "red", "value": None}, {"color": "green", "value": 60}],
-    y=4))
+    [{"color": "text", "value": None}, {"color": "red", "value": 0},
+     {"color": "green", "value": 60}],
+    y=4, no_value="no command"))
 
 # --- Panel: the register decode table ---------------------------------------------------
 #
@@ -1211,7 +1240,7 @@ dashboard = {
     #     unchanged, so /d/alphaess-battery-plan and every link to it still resolve.
     # 15: both tables get explicit column widths and a short time format, for reading on a
     #     phone; "Planned actions" renamed to "Planned Actions in app".
-    "version": 16,
+    "version": 17,
     "weekStart": "",
 }
 

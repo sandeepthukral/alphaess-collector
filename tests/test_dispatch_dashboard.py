@@ -71,6 +71,20 @@ def dispatch_queries() -> list[tuple[str, str, str]]:
     return out
 
 
+def _stat_panels() -> list[tuple[str, str, dict]]:
+    """(dashboard, panel title, panel) for every stat and gauge, across all dashboards.
+
+    Both share the `reduceOptions` field picker, which is where this class's last two guards
+    live, and neither bug was specific to one dashboard.
+    """
+    out = []
+    for path in sorted(DASHBOARDS.glob("*.json")):
+        for panel in json.loads(path.read_text()).get("panels", []):
+            if panel.get("type") in ("stat", "gauge"):
+                out.append((path.name, panel.get("title", "?"), panel))
+    return out
+
+
 class TestFieldContract:
     def test_at_least_one_panel_reads_dispatch_state(self):
         """Guards the guard: a rename that made this file test nothing would be silent."""
@@ -232,6 +246,58 @@ class TestStalenessGuards:
                 f"fields={picked!r}. Auto selects numeric fields only, so this panel renders "
                 f"its noValue text in every state, including a healthy one")
         assert checked, "no stat panel reads a string field -- the guard found nothing"
+
+    def test_a_string_stat_reduces_exactly_one_column(self):
+        """`/.*/` means ALL fields, and Flux hands Grafana more than the one you asked for.
+
+        The fix above traded a panel that showed nothing for a panel that showed too much:
+        `_time` came back as a second tile, red, because no value mapping matches a timestamp
+        and red is the base step -- and the `sys_sn` tag hung itself off the action's label.
+        Seen on the dry run, 2026-08-17, one deploy after the first fix.
+
+        So the two halves are a pair, and this asserts the half the previous test cannot see:
+        having widened the picker to all columns, the query must return only the one.
+        """
+        checked = 0
+        for dashboard, title, panel in _stat_panels():
+            if panel["options"]["reduceOptions"]["fields"] != "/.*/":
+                continue
+            checked += 1
+            for tgt in panel.get("targets", []):
+                assert 'keep(columns: ["_value"])' in tgt.get("query", ""), (
+                    f"{title!r} in {dashboard} reduces every field but its query still "
+                    f"returns _time and the tags. Each renders as its own tile, and a "
+                    f"timestamp matches no mapping, so it takes the base threshold colour")
+        assert checked, "no stat reduces /.*/ -- the guard found nothing"
+
+    def test_no_command_live_does_not_render_as_a_fault(self):
+        """A panel that is red all day is a panel you stop reading.
+
+        `Command expires in` yields nothing whenever no command is live -- the resting state,
+        and the whole of a dry-run day. Grafana colours `noValue` with the BASE threshold
+        step, so a red base painted that normal state as a full-width red `No data`, on the
+        one panel whose red is meant to mean the battery is sixty seconds from acting
+        unsupervised. The panel's own description called the state normal while the panel
+        called it a fault.
+
+        The clamp is part of the same fix, not a separate tidy-up: `expires_at` is fixed while
+        `now()` advances, so a stalled loop drives this negative, and negative would land back
+        on the now-neutral base step and go grey in exactly the failure being watched for.
+        Neutral base and floor-at-zero only hold together.
+        """
+        panel = next(p for _, t, p in _stat_panels() if t == "Command expires in")
+        steps = panel["fieldConfig"]["defaults"]["thresholds"]["steps"]
+        base = next(s for s in steps if s["value"] is None)
+        assert base["color"] != "red", (
+            "the base step colours noValue, and noValue here means 'nothing is dispatching' "
+            "-- a normal rest, not a fault")
+        assert any(s["color"] == "red" and s["value"] == 0 for s in steps), (
+            "red has to start somewhere: a command with no time left on it is the fault this "
+            "panel exists to show")
+        query = " ".join(t.get("query", "") for t in panel.get("targets", []))
+        assert "if r._value < 0.0 then 0.0 else r._value" in query, (
+            "without the floor, a stalled loop counts past zero into the neutral base step "
+            "and the panel goes quiet precisely when it should be shouting")
 
 
 class TestPanelFive:
