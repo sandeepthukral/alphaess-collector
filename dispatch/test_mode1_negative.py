@@ -41,6 +41,19 @@ TWO PROBES, BECAUSE ONE QUESTION TURNED INTO TWO
   the charge moved 30 W (sd 15 W), with export up ~1014 W. A battery merely self-consuming
   would have tracked the surplus; this one tracked the setpoint and ignored the surplus.
 
+  That verdict was RE-CHECKED against the corrected logic below, because the version that
+  produced it would have printed HONOURED for a battery sitting flat at 0 W (it tested only
+  that the charge was BELOW the midpoint, never that it was NEAR the setpoint). The recorded
+  numbers pass the two-sided test on their own merits -- |346 - 402| = 56 W, well inside
+  tolerance, and baseline grid was -1 W so the surplus/charge distinction below did not bite
+  -- so the conclusion stands. It was luck that it did.
+
+  THE UNDERCOMMAND PROBE MEASURES AGAINST THE BASELINE CHARGE, NOT THE SURPLUS.
+  Only power the battery was actually taking can be displaced into the export channel. A
+  battery tapering at 600 W of a 1220 W surplus can free at most 600 W however bright it is;
+  judging against the 1220 W would predict an export step physics cannot deliver, and burn a
+  scarce clear-sky window on a false INCONCLUSIVE.
+
   So Mode 1 is a real, honoured, PV-only charge setpoint -- and NOT self-consumption: it
   exported over a kilowatt while the house was drawing 500 W. The `self` action of the
   dispatch design therefore still stays a RELEASE, contrary to the note in the CAP branch
@@ -91,6 +104,7 @@ import csv
 import inspect
 import signal
 import sys
+import time
 from datetime import datetime
 
 try:
@@ -128,17 +142,35 @@ IMPORT_CONFIRMED = 500     # grid import that cannot be read as measurement nois
 MAX_SOC = 85               # above this there is no room to charge
 SOLAR_JITTER = 300         # baseline solar spread that means a cloud is moving through
 
-# Undercommand probe. The signal is `surplus - commanded` in the EXPORT channel, so these
-# are tuned to keep that difference large rather than to keep the command large.
-UNDER_FRACTION = 0.33      # ask for this share of the measured surplus
+# Undercommand probe. The signal is `baseline charge - commanded` in the EXPORT channel --
+# baseline CHARGE, not surplus, because only power the battery was already taking can be
+# displaced -- so these are tuned to keep that difference large rather than the command.
+UNDER_FRACTION = 0.33      # ask for this share of the measured baseline charge
 MIN_COMMAND = 300          # ...but never less: very small setpoints risk landing under some
                            # inverter minimum and being special-cased, which would look like
                            # "ignored" for an entirely different reason.
-MIN_SEPARATION = 500       # surplus - commanded, below which export is inside the noise
-MIN_SURPLUS_UNDER = 800    # the surplus that MIN_COMMAND + MIN_SEPARATION together imply
+MIN_SEPARATION = 700       # baseline charge - commanded, below which the three hypotheses
+                           # stop being separable. Not a noise floor: it is what makes the
+                           # "at the setpoint" and "at the baseline" bands below DISJOINT.
+                           # With tol = max(250, separation/3), separation 700 gives bands
+                           # 700-2*250 = 200W apart at the worst case, and wider above it.
+CHARGE_TOL_FLOOR = 250     # how close to a prediction the observed charge must land. A floor
+                           # as well as a fraction, so a minimum-size command near MIN_COMMAND
+                           # is not judged against a tolerance tighter than sensor noise.
+MIN_CHARGE_UNDER = 1100    # the baseline charge that MIN_COMMAND and MIN_SEPARATION together
+                           # imply: at 1100W the command is 363W and the separation 737W.
+MIN_SURPLUS_UNDER = 800    # weaker second gate. Surplus >= charge whenever nothing is
+                           # importing, so MIN_CHARGE_UNDER normally binds first; this still
+                           # catches a baseline that is importing while the battery charges.
+MIN_DURING_SAMPLES = 4     # every figure in the undercommand verdict is a median. A window
+                           # cut short by `abort_on_import` can leave as few as two samples,
+                           # and two samples do not make a median worth acting on.
 UNDER_JITTER = 800         # this probe tolerates more cloud than the overcommand one: it
-                           # aims at a third of surplus, so a stale surplus estimate moves
-                           # the setpoint slightly rather than collapsing the separation.
+                           # aims at a third of the baseline charge, so a stale estimate
+                           # moves the setpoint slightly rather than collapsing the
+                           # separation. It does NOT widen the verdict's own error bars in
+                           # the way it once did -- every channel below is a median, and the
+                           # export test is a delta across the command boundary.
 LOAD_DRIFT = 400           # baseline->during house-load move that makes the run weak: the
                            # expected export is computed from the BASELINE surplus, so a
                            # load stepping on mid-phase eats the very signal being read.
@@ -199,37 +231,48 @@ def med(values):
     return sorted(values)[len(values) // 2]
 
 
-def plan_command(surplus, undercommand):
-    """Derive the commanded power from measured surplus. Returns (watts, why).
+def plan_command(available, undercommand):
+    """Derive the commanded power from the measured baseline. Returns (watts, why).
+
+    `available` is what the command has to work against, and it is a DIFFERENT quantity for
+    each probe -- which is the whole reason this takes one number rather than a sample list:
+
+      overcommand   the PV SURPLUS. The question is whether the inverter will reach past it
+                    to the grid, so the command has to exceed it.
+      undercommand  the baseline CHARGE. The signal is the export the setpoint displaces, and
+                    only power the battery was already taking can be displaced. Judging
+                    against the surplus instead promises an export step the hardware cannot
+                    produce whenever the battery is tapering below it.
 
     `watts` is None when no decisive command exists in this light, and `why` is then the
     abort text. The sign is the REGISTER's: negative charges.
     """
     if undercommand:
-        want = max(MIN_COMMAND, min(MAX_POWER, int(surplus * UNDER_FRACTION)))
-        separation = surplus - want
+        want = max(MIN_COMMAND, min(MAX_POWER, int(available * UNDER_FRACTION)))
+        separation = available - want
         if separation < MIN_SEPARATION:
             return None, (
-                f"surplus ~{surplus:+.0f}W leaves only {separation:.0f}W between it and the "
-                f"smallest useful command ({want}W). Under {MIN_SEPARATION}W the expected "
-                f"export is inside the noise a passing cloud makes, so 'honoured' and "
-                f"'ignored' would not be distinguishable. Re-run in brighter light.")
+                f"the battery is taking ~{available:+.0f}W, which leaves only "
+                f"{separation:.0f}W between that and the smallest useful command ({want}W). "
+                f"Under {MIN_SEPARATION}W the 'honoured' and 'ignored' charge predictions "
+                f"overlap and the expected export is inside the noise a passing cloud makes. "
+                f"Re-run in brighter light, or with a smaller house load.")
         return -want, (
-            f"decisive because {want}W is {separation:.0f}W BELOW the ~{surplus:+.0f}W "
-            f"surplus: if the setpoint is honoured that {separation:.0f}W has nowhere to go "
-            f"but the grid, so export jumps; if it is ignored the battery keeps taking the "
-            f"whole surplus and export stays near zero.")
+            f"decisive because {want}W is {separation:.0f}W BELOW the ~{available:+.0f}W the "
+            f"battery is already taking: if the setpoint is honoured that {separation:.0f}W "
+            f"has nowhere to go but the grid, so export jumps; if it is ignored the battery "
+            f"keeps taking what it was taking and export stays put.")
 
-    want = min(MAX_POWER, int(surplus) + MARGIN)
-    if want < surplus + MIN_MARGIN:
+    want = min(MAX_POWER, int(available) + MARGIN)
+    if want < available + MIN_MARGIN:
         return None, (
-            f"surplus ~{surplus:+.0f}W is too close to the {MAX_POWER}W ceiling. The command "
+            f"surplus ~{available:+.0f}W is too close to the {MAX_POWER}W ceiling. The command "
             f"could only reach {want}W, which does not exceed surplus by the {MIN_MARGIN}W "
             f"needed to tell 'cap' from 'demand'. Re-run when surplus is lower, with a larger "
             f"house load running, or with --undercommand.")
     return -want, (
-        f"decisive because {want}W exceeds the ~{surplus:+.0f}W surplus by "
-        f"{want - surplus:.0f}W: if it caps, grid stays near zero; if it demands, grid "
+        f"decisive because {want}W exceeds the ~{available:+.0f}W surplus by "
+        f"{want - available:.0f}W: if it caps, grid stays near zero; if it demands, grid "
         f"imports roughly that difference.")
 
 
@@ -247,8 +290,13 @@ async def watch(inv, seconds, interval, rows, phase, stop, abort_on_import=False
     point the question is answered and every further second is grid energy bought to
     learn nothing.
     """
-    out, elapsed, consecutive = [], 0, 0
-    while elapsed < seconds and not stop.is_set():
+    # A monotonic DEADLINE, not a counter incremented by `interval`. Each iteration also costs
+    # eight sequential Modbus reads, which a counter does not see -- so the loop used to run
+    # well past `seconds` of wall clock, and on the `during` phase could outlive the dead man's
+    # switch it set and fold post-expiry samples into the medians.
+    out, consecutive = [], 0
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline and not stop.is_set():
         s = await inv.sample()
         s["phase"] = phase
         out.append(s)
@@ -260,30 +308,66 @@ async def watch(inv, seconds, interval, rows, phase, stop, abort_on_import=False
                 print(f"\n  !! grid importing >{IMPORT_CONFIRMED}W on two consecutive samples "
                       f"-- question answered, releasing now rather than buying more.")
                 return out, True
-        await asyncio.sleep(min(interval, seconds - elapsed))
-        elapsed += interval
+        await asyncio.sleep(max(0, min(interval, deadline - time.monotonic())))
     return out, False
 
 
-def verdict(baseline, during, commanded_w, aborted, undercommand=False):
+def verdict_token(lines):
+    """The one-word verdict. Callers -- and tests -- must not have to parse the prose."""
+    for line in lines:
+        if line.startswith("=> "):
+            return line[3:].split(".", 1)[0].strip()
+    return None
+
+
+def command_carrying(during, commanded_w):
+    """The samples whose register block still holds the command we wrote.
+
+    The pre-flight refuses to start while somebody else is dispatching, but nothing stopped
+    them starting afterwards -- and the AlphaESS app was caught doing exactly that at 16:11
+    on 2026-08-15, mid-window. Those samples measure someone else's setpoint, so they cannot
+    be averaged in silently.
+    """
+    return [s for s in during
+            if s["d_start"] == 1 and s["d_mode"] == 1 and s["d_power_w"] == commanded_w]
+
+
+def verdict(baseline, during, commanded_w, aborted, undercommand=False, dry_run=False):
     """Read battery and grid TOGETHER. Grid alone is not enough: a kettle switching on
     mid-phase also produces import, and that must not be misread as force-charging."""
     if not during:
-        return ["no samples during the command -- inconclusive."]
+        return ["=> INCONCLUSIVE. No samples during the command."]
 
-    base_surplus = sum(surplus_of(s) for s in baseline) / len(baseline)
-    charge = [-s["battery_w"] for s in during]          # positive = charging
-    grid = [s["grid_w"] for s in during]
-    mid_charge = med(charge)
-    mid_grid = med(grid)
+    lines = []
+    if not dry_run:
+        carried = command_carrying(during, commanded_w)
+        if len(carried) < len(during):
+            lines.append(f"!! {len(during) - len(carried)} of {len(during)} samples did not "
+                         f"carry the command that was written (start/mode/power changed "
+                         f"underneath) -- the register block was driven by something else "
+                         f"during the window. They are excluded from every median below.")
+        during = carried
+        if not during:
+            lines.append("=> INCONCLUSIVE. Not one sample during the window carried the "
+                         "command that was written, so nothing here measures it. Put the "
+                         "AlphaESS app in plain self-consumption mode and re-run.")
+            return lines
+
+    # Medians throughout -- `base_surplus` used to be the one mean left in the file, and it is
+    # the most load-bearing channel there is: it sets the setpoint and every threshold below.
+    base_surplus = med([surplus_of(s) for s in baseline])
+    base_charge = med([-s["battery_w"] for s in baseline])      # positive = charging
+    mid_charge = med([-s["battery_w"] for s in during])
+    mid_grid = med([s["grid_w"] for s in during])
     want = abs(commanded_w)
 
-    lines = [f"baseline surplus ~{base_surplus:+.0f}W, commanded {commanded_w:+d}W, "
-             f"observed charge ~{mid_charge:+.0f}W, grid ~{mid_grid:+.0f}W"]
+    lines.append(f"baseline surplus ~{base_surplus:+.0f}W of which the battery took "
+                 f"~{base_charge:+.0f}W, commanded {commanded_w:+d}W, observed charge "
+                 f"~{mid_charge:+.0f}W, grid ~{mid_grid:+.0f}W")
 
     if undercommand:
-        return lines + _undercommand_verdict(baseline, during, want, base_surplus,
-                                             mid_charge, mid_grid)
+        return lines + _undercommand_verdict(baseline, during, want, base_charge,
+                                             mid_charge, mid_grid, aborted)
 
     if aborted or mid_grid > IMPORT_CONFIRMED:
         if mid_charge > base_surplus + MIN_MARGIN / 2:
@@ -312,53 +396,90 @@ def verdict(baseline, during, commanded_w, aborted, undercommand=False):
     return lines
 
 
-def _undercommand_verdict(baseline, during, want, base_surplus, mid_charge, mid_grid):
-    """Does the inverter honour a Mode 1 setpoint that is BELOW available surplus?
+def _undercommand_verdict(baseline, during, want, base_charge, mid_charge, mid_grid, aborted):
+    """Does the inverter honour a Mode 1 setpoint BELOW what the battery is already taking?
 
-    Read as a delta, not an absolute: baseline export is rarely exactly zero, and only the
-    CHANGE across the command boundary is attributable to the command. Two independent
-    channels have to agree -- charge and export -- because either one alone can be moved by
-    a cloud or a kettle.
+    THREE hypotheses, not two, and they predict three separated charge values:
+
+        honoured  charge ~= want          export up by (base_charge - want)
+        ignored   charge ~= base_charge    export flat
+        flat      charge ~= 0              export up by the WHOLE base_charge
+
+    The earlier version asked only whether the charge was below the midpoint of
+    (want, base_charge), which `flat` satisfies trivially -- and `flat` also pushes the export
+    channel hard in the honoured direction, because the surplus has nowhere else to go. Both
+    channels then "agreed" on HONOURED for a battery that took nothing at all. That is the one
+    wrong answer that would have been acted on, so the charge test is now two-sided and FLAT
+    is decided BEFORE the export channel gets a chance to rescue it.
+
+    Everything is read as a DELTA, not an absolute: baseline export is rarely exactly zero,
+    and only the change across the command boundary is attributable to the command.
     """
-    expected = base_surplus - want              # export the setpoint would force, if honoured
+    if aborted:
+        return ["=> INCONCLUSIVE. The window was cut short by confirmed grid import. This "
+                "probe commands LESS than the battery was already taking, so there is no "
+                "honest reading of the command under which it imports -- something else drove "
+                "the register block, most likely the AlphaESS app. Put it in plain "
+                "self-consumption mode, clear any price thresholds, and re-run."]
+    if len(during) < MIN_DURING_SAMPLES:
+        return [f"=> INCONCLUSIVE. Only {len(during)} usable sample(s) during the command. "
+                f"Every figure here is a median and needs at least {MIN_DURING_SAMPLES}. "
+                f"Re-run."]
+
+    expected = base_charge - want               # export the setpoint would force, if honoured
     base_grid = med([s["grid_w"] for s in baseline])
     delta_export = base_grid - mid_grid         # grid is import-positive, so this is +export
-    midpoint = (base_surplus + want) / 2        # charge lands either side of this
+    exported = delta_export > expected / 2
+
+    # Bands around each prediction. The fraction keeps them disjoint as the numbers scale; the
+    # floor keeps a minimum-size command from being judged inside sensor noise. MIN_SEPARATION
+    # is what guarantees the two bands do not touch -- see its comment.
+    tol = max(CHARGE_TOL_FLOOR, expected / 3)
+    flat = mid_charge < max(MIN_SURPLUS, want / 2)
+    at_setpoint = abs(mid_charge - want) <= tol
+    at_baseline = abs(mid_charge - base_charge) <= tol
 
     lines = [f"expected export if honoured ~{expected:+.0f}W; observed export change "
              f"~{delta_export:+.0f}W (baseline grid ~{base_grid:+.0f}W)",
-             f"charge ~{mid_charge:+.0f}W against commanded {want}W and surplus "
-             f"~{base_surplus:+.0f}W (midpoint {midpoint:.0f}W)"]
+             f"charge ~{mid_charge:+.0f}W against commanded {want}W and baseline charge "
+             f"~{base_charge:+.0f}W (tolerance +/-{tol:.0f}W)"]
 
-    exported = delta_export > expected / 2
-    charged_low = mid_charge < midpoint
-
-    if exported and charged_low:
+    if flat:
+        lines.append("=> FLAT. The battery charged nothing at all, despite genuine surplus and "
+                     f"a {want}W setpoint it was already exceeding. Export moved only because "
+                     "the surplus had nowhere else to go, NOT because the setpoint was "
+                     "honoured -- the same behaviour as the 32000 run. On this evidence Mode 1 "
+                     "is a freeze, not a setpoint. Re-run before believing it; an app-side SoC "
+                     "ceiling, cell balancing or charge taper produces the same trace.")
+    elif exported and at_setpoint:
         lines.append("=> HONOURED. The battery took roughly what it was told to take and the "
-                     "remaining surplus went to the grid. Mode 1 is a real setpoint, and CAP "
-                     "is confirmed rather than merely consistent.")
-    elif not exported and not charged_low:
-        lines.append("=> IGNORED. The battery absorbed the whole surplus regardless of a "
-                     f"{want}W setpoint, and export did not move. Mode 1 is accepted and "
-                     "discarded; it is self-consumption under another name.")
+                     "power it stopped taking went to the grid. Mode 1 is a real setpoint, and "
+                     "CAP is confirmed rather than merely consistent.")
+    elif not exported and at_baseline:
+        lines.append(f"=> IGNORED. The battery carried on taking ~{base_charge:+.0f}W "
+                     f"regardless of a {want}W setpoint, and export did not move. Mode 1 is "
+                     "accepted and discarded; it is self-consumption under another name.")
         lines.append("   The `self` action should stay a dispatch RELEASE -- a command that "
                      "does nothing is strictly worse than none: same behaviour, one more "
                      "active-block state that reads as a hijack.")
     else:
-        lines.append("=> INCONCLUSIVE. The two channels disagree -- export says "
-                     f"{'honoured' if exported else 'ignored'} and charge says "
-                     f"{'honoured' if charged_low else 'ignored'}. That is the signature of "
-                     "something else moving during the window, not of a third behaviour. "
-                     "Re-run in steadier conditions.")
+        charge_says = ("at the setpoint" if at_setpoint else
+                       "at the baseline" if at_baseline else
+                       "between both predictions, matching neither")
+        lines.append("=> INCONCLUSIVE. The channels do not agree on one hypothesis: export "
+                     f"says {'the setpoint displaced real power' if exported else 'nothing was displaced'}"
+                     f", and the charge sits {charge_says}. That is the signature of something "
+                     "else moving during the window, not of a fourth behaviour. Re-run in "
+                     "steadier conditions.")
 
     base_load = med([house_load(s) for s in baseline])
     during_load = med([house_load(s) for s in during])
     if abs(during_load - base_load) > LOAD_DRIFT:
         lines.append(f"!! house load moved {during_load - base_load:+.0f}W between baseline and "
                      f"command (>{LOAD_DRIFT}W). The expected export is derived from the "
-                     "BASELINE surplus, so treat the above as weak and re-run.")
-    if base_surplus < MIN_SURPLUS_UNDER:
-        lines.append("!! surplus was marginal -- treat all of the above as weak.")
+                     "BASELINE charge, so treat the above as weak and re-run.")
+    if base_charge < MIN_CHARGE_UNDER:
+        lines.append("!! the baseline charge was marginal -- treat all of the above as weak.")
     return lines
 
 
@@ -393,10 +514,12 @@ async def run(ip, port, slave_id, dry_run, duration_s, settle_s, interval_s, out
             return 1
         last = baseline[-1]
         soc = last["soc_pct"]
-        surplus = sum(surplus_of(s) for s in baseline) / len(baseline)
+        surplus = med([surplus_of(s) for s in baseline])
+        base_charge = med([-s["battery_w"] for s in baseline])
         solar_spread = max(s["solar_w"] for s in baseline) - min(s["solar_w"] for s in baseline)
 
-        print(f"\n  SoC {soc}%   surplus ~{surplus:+.0f}W   solar spread {solar_spread}W")
+        print(f"\n  SoC {soc}%   surplus ~{surplus:+.0f}W   battery taking ~{base_charge:+.0f}W"
+              f"   solar spread {solar_spread}W")
 
         if last["d_start"] == 1:
             print("\nABORT: a dispatch is already active (start=1). Something else is driving "
@@ -419,7 +542,15 @@ async def run(ip, port, slave_id, dry_run, duration_s, settle_s, interval_s, out
                   "commanded power is derived from is already stale. Re-run in steadier light.")
             return 2
 
-        watts, why = plan_command(surplus, undercommand)
+        if undercommand and base_charge < MIN_CHARGE_UNDER:
+            print(f"\nABORT: the battery is only taking ~{base_charge:+.0f}W of the "
+                  f"~{surplus:+.0f}W surplus, below {MIN_CHARGE_UNDER}W. Only power the "
+                  "battery is ALREADY taking can be displaced into the export channel, so a "
+                  "small baseline charge caps the signal however bright it is. Re-run when "
+                  "the battery is charging harder -- lower SoC, or a bigger surplus.")
+            return 2
+
+        watts, why = plan_command(base_charge if undercommand else surplus, undercommand)
         if watts is None:
             print(f"\nABORT: {why}")
             return 2
@@ -439,7 +570,7 @@ async def run(ip, port, slave_id, dry_run, duration_s, settle_s, interval_s, out
         after, _ = await watch(inv, settle_s, interval_s, rows, "after", stop)
 
         print("\n== verdict ==")
-        for line in verdict(baseline, during, watts, aborted, undercommand):
+        for line in verdict(baseline, during, watts, aborted, undercommand, dry_run):
             print("  " + line)
 
         if after and not any(s["d_start"] == 1 for s in after):
