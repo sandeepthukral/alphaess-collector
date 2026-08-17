@@ -171,11 +171,18 @@ services:
   # replica, and nothing else on the host may open 192.168.68.151:502 -- not a debug script,
   # not a Kuma TCP port monitor (section 6.2).
   #
-  # Starts in DRY RUN. `command:` below carries no `--live`, so the loop reads the inverter,
-  # decides, logs and publishes, and writes nothing. Going live is a deliberate edit by an
-  # operator who is watching the dashboard, per the plan's verification step 6 -- and step 7
-  # first: the AlphaESS app's own price control must be off, or two controllers fight over the
-  # same registers.
+  # Starts in DRY RUN: `DISPATCH_LIVE` is unset, so the loop reads the inverter, decides, logs
+  # and publishes, and writes nothing. Going live is `DISPATCH_LIVE=1` in `.env` followed by a
+  # restart -- an operator action taken while watching the dashboard, per the plan's
+  # verification step 6, and step 7 first: the AlphaESS app's own price control must be off, or
+  # two controllers fight over the same registers.
+  #
+  # A SETTING RATHER THAN AN EDIT HERE, deliberately. This file is tracked, and
+  # `tests/test_dispatch_deployment.py` asserts it never carries `--live` -- so going live by
+  # editing the `command:` below would red the suite on every branch afterwards until somebody
+  # weakened the guard, which is precisely the guard worth keeping. `entrypoint.sh` appends the
+  # flag; it cannot be passed through `command:` because an empty compose variable arrives as a
+  # positional argument and argparse exits 2 before the loop starts.
   #
   # Deploy with `sudo docker compose up -d dispatch`. Two things in that line, both
   # learned the hard way: docker on the Synology needs `sudo`, and a bare `up -d` recreates
@@ -187,6 +194,8 @@ services:
     command: ["--ip", "${INVERTER_IP:-192.168.68.151}"]
     environment:
       <<: *default-timezone
+      # Unset or 0 = dry run. This is the go-live switch; see the comment above the service.
+      DISPATCH_LIVE: ${DISPATCH_LIVE:-0}
       INFLUX_URL: http://influxdb:8086
       # Read on `planning` (the plan the translator consumes) and write on `alphaess` (the
       # dispatch_state readback behind section 7's panels). A separate token from the
