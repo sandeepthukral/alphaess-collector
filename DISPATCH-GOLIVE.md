@@ -91,12 +91,20 @@ lands in `battery-planning`, not here.
 
 These are the ones that need a human and a NAS. **The app one is the real gate.**
 
-- [ ] **Turn off the AlphaESS app's price-based control**, and clear its price thresholds.
+- [x] **Turn off the AlphaESS app's price-based control**, and clear its price thresholds.
       The fail-safe is silence — stop writing, let the inverter revert — and that is only
       safe while nothing else drives the same registers. The app was caught doing exactly
       that on 2026-08-15: `dpwr=-5000W dsoc=100.0% dt=5580s`, a 93-minute forced grid charge
-      at 5 kW. See `DESIGN-dispatch.md` §8.
-- [ ] Confirm `d_start == 0` at rest once the app is off
+      at 5 kW. See `DESIGN-dispatch.md` §8. **Done 2026-08-17**: the app was set to
+      self-sufficiency mode. Confirmed at the register level rather than in the app UI,
+      which is the stronger check — the block read `Released` and stayed byte-identical
+      across two reads twenty minutes apart. Monitor #7 catches a regression here
+- [x] Confirm `d_start == 0` at rest once the app is off — **2026-08-17**, whole-block read
+      via `registers.describe`: `0x0880=0` (Released), `0x0881` raw `32000`, which is
+      `POWER_OFFSET` exactly and so decodes to 0 W with no residue, `0x0886=0`.
+      `0x0887` held a leftover `90`, and a second read confirmed it static: with
+      `d_start == 0` nothing acts on it, and it cannot leak into a later command because
+      `Inverter.apply` writes the whole payload before arming `REG_START` (`scheduler.py:117`)
 - [x] Mint `INFLUX_TOKEN_DISPATCH` — scope `r planning, rw alphaess`, per `DEPLOY.md`,
       "Scoped tokens". The only token in the stack that spans both buckets, which is why it
       is not the collector's. **Done 2026-08-17**, and it is the real minted token, not the
@@ -109,12 +117,34 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
 
 ## 3. Deploy, in dry run
 
-- [ ] `sudo docker compose up -d dispatch` — **never a bare `up -d`**, which recreates the
-      collector and cost 922 s of samples on 2026-08-10
-- [ ] Confirm the container starts, writes `/data/slots.json`, and connects to the inverter
-- [ ] Confirm `dispatch_state` is arriving in InfluxDB and the §7.2 panels are populated
+- [x] `sudo docker compose up -d dispatch` — **never a bare `up -d`**, which recreates the
+      collector and cost 922 s of samples on 2026-08-10. **Done 2026-08-17**
+- [x] Confirm the container starts, writes `/data/slots.json`, and connects to the inverter —
+      **2026-08-17**, `33 slots to 2026-08-18T22:00:00Z (charge=13 discharge=13 hold=7) from
+      2026-08-17T18:05:04Z`, then `inverter limits: charge=15435 W discharge=15435 W`. Those
+      limits sit inside the 15,015–15,645 W band `scheduler.py:68` records from 2026-08-16,
+      which is the evidence for re-reading them hourly instead of caching at boot
+- [ ] Confirm `dispatch_state` is arriving in InfluxDB and the §7.2 panels are populated —
+      **the InfluxDB half is confirmed, 2026-08-17.** All nine `raw_08xx` words plus
+      `action`, `slot_action`, `plan_run`, `setpoint_w` and `duration_s` are landing, and
+      the raw words decode back to the Modbus read exactly: `raw_0881/0882 = [0, 32000]` →
+      0 W, matching `setpoint_w`. `expires_at` is correctly ABSENT — `state.py:103` emits it
+      only while the block is active, and a dry run never arms it. The panels are still to
+      be looked at in Grafana
 - [ ] Watch a full day of dry-run decisions against what the battery actually did. This is
-      the last chance to catch a wrong decision for free
+      the last chance to catch a wrong decision for free.
+
+      **Read `slot_action` and `plan_run`, not `action`, while in dry run.** `action` will
+      say `no dispatch` for the whole day even with a healthy dispatcher deciding every
+      60 s: `describe_action` only says `self-consumption (released)` when the *decision*
+      was `release`, and here the decision is `command` (a Mode 3 hold) that dry run
+      declines to write. The readback is then indistinguishable from a crashed dispatcher —
+      the exact ambiguity `state.py:44` flags, and the reason the decision is published
+      rather than inferred from the registers in Flux. `verified=False` in the tick log is
+      the same artefact and does NOT redden monitor #6: `scheduler.py:208` tests `dry_run`
+      before the `verified is False` branch. Monitor #7 stays meaningful throughout, since
+      a foreign command arms the block and `is_hijacked` catches an active block this
+      process did not write
 - [ ] Create the Kuma monitors, put each push URL in the NAS `.env`, and confirm each goes
       green — `DESIGN-dispatch.md` §6.1. All seven are pinged by code now; an unset URL makes
       the ping a no-op, so a monitor left out of `.env` stays silent rather than failing:
