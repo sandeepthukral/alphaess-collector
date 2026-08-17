@@ -1384,6 +1384,224 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "What the dispatcher would do in each interval, worked out from the plan the same way dispatch/translator.py works it out. Read it when the SoC graph above is ambiguous, which is most of the time: that graph steps, so a flat segment is just one interval and tells you nothing, and a rising one could be either 'charge' or 'self'. 'hold' is the row to look for - the battery is frozen at 0 W and any solar beyond the house load is exported, whatever the price. A run of 'hold' rows through the afternoon is surplus being given away. 'self' means the battery is simply released to self-consumption, either because the plan moves energy without touching the grid or because it is full and would otherwise spill. This is the plan's intent only. The live dispatcher checks each target against the battery's actual SoC and quietly turns a charge it has already overshot into a hold, so when actual SoC has drifted above plan you will get more holds than are listed here.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "_time"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Time"
+              },
+              {
+                "id": "unit",
+                "value": "time:MM-DD HH:mm"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "action"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "What dispatch does"
+              },
+              {
+                "id": "custom.width",
+                "value": 300
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "soc_pct"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "displayName",
+                "value": "SoC after"
+              },
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "charge_wh"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "unit",
+                "value": "watth"
+              },
+              {
+                "id": "displayName",
+                "value": "Charge"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "import_wh"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "unit",
+                "value": "watth"
+              },
+              {
+                "id": "displayName",
+                "value": "Import"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "export_wh"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "unit",
+                "value": "watth"
+              },
+              {
+                "id": "displayName",
+                "value": "Export"
+              },
+              {
+                "id": "custom.width",
+                "value": 90
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 32
+      },
+      "id": 11,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": false,
+            "displayName": "Time"
+          }
+        ]
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nfrom(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest)\n  |> filter(fn: (r) => r._field == \"charge_wh\" or r._field == \"discharge_wh\"\n                    or r._field == \"soc_wh\" or r._field == \"import_wh\"\n                    or r._field == \"export_wh\" or r._field == \"pv_forecast_wh\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> map(fn: (r) => ({\n      _time: r._time,\n      action:\n        if r.charge_wh > 50.0 and r.discharge_wh > 50.0 then\n          \"plan error -- charge and discharge in one interval\"\n        else if r.discharge_wh > 50.0 then\n          (if r.export_wh > 50.0 then \"discharge -- sells to grid\"\n           else \"self -- battery covers load\")\n        else if r.charge_wh > 50.0 then\n          (if r.import_wh > 50.0 then \"charge -- buys from grid\"\n           else \"self -- soaks up solar\")\n        else if r.soc_wh >= float(v: ${capacity_wh}) - 50.0 and r.import_wh <= 10.0\n             and (r.export_wh > 10.0 or r.pv_forecast_wh > 10.0) then\n          \"self -- full, still harvesting\"\n        else\n          \"hold -- surplus goes to grid\",\n      soc_pct: r.soc_wh / float(v: ${capacity_wh}) * 100.0,\n      charge_wh: r.charge_wh,\n      import_wh: r.import_wh,\n      export_wh: r.export_wh\n    }))\n  |> sort(columns: [\"_time\"])\n  |> yield(name: \"dispatch actions\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "What dispatch would do, interval by interval",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "indexByName": {
+              "_time": 0,
+              "action": 1,
+              "charge_wh": 3,
+              "export_wh": 5,
+              "import_wh": 4,
+              "soc_pct": 2
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
       "description": "What to type into the alphaess app, and when. The app takes one High/Low pair at a time, so each row is a setting to enter at 'From' and replace when the next row of the same direction comes due. 'to ct/kWh' is chosen so the app trades in exactly the intervals the plan trades in - not merely the ones it must catch, but also none of the ones it must leave alone, for the whole time the setting is live. Raw market price, matching the graph above. 'Exact' is no when no single threshold can do both, and counts the intervals that then go against the plan; treat those rows as the best available compromise rather than an instruction. 'Target SoC' is what the battery should read by 'Until'. Nothing here is read by the optimiser - it is the reverse, these numbers are worked backwards out of the plan so the app can be made to follow it.",
       "fieldConfig": {
         "defaults": {
@@ -1504,7 +1722,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 42
       },
       "id": 8,
       "options": {
@@ -1642,7 +1860,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 50
       },
       "id": 7,
       "options": {
@@ -1732,8 +1950,8 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "AlphaESS Battery Plan",
+  "title": "Battery Plan",
   "uid": "alphaess-battery-plan",
-  "version": 12,
+  "version": 14,
   "weekStart": ""
 }

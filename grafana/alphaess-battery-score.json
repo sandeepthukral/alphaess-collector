@@ -1666,8 +1666,8 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "AlphaESS Plan vs Actual",
+  "title": "Plan vs Actual",
   "uid": "alphaess-battery-score",
-  "version": 5,
+  "version": 6,
   "weekStart": ""
 }

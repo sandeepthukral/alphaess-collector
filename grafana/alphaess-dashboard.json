@@ -76,7 +76,7 @@
       "keepTime": false,
       "tags": [],
       "targetBlank": false,
-      "title": "AlphaESS Battery Plan",
+      "title": "Battery Plan",
       "tooltip": "The full plan: stat boxes, the price graph and the charge/discharge chart",
       "type": "link",
       "url": "/d/alphaess-battery-plan"
@@ -609,7 +609,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "What to type into the alphaess app, and when. The app takes one High/Low pair at a time, so each row is a setting to enter at 'From' and replace when the next row of the same direction comes due. 'to ct/kWh' is chosen so the app trades in exactly the intervals the plan trades in - not merely the ones it must catch, but also none of the ones it must leave alone, for the whole time the setting is live. Raw market price, matching the price graph on the AlphaESS Battery Plan dashboard. 'Exact' is no when no single threshold can do both, and counts the intervals that then go against the plan; treat those rows as the best available compromise rather than an instruction. 'Target SoC' is what the battery should read by 'Until'. Nothing here is read by the optimiser - it is the reverse, these numbers are worked backwards out of the plan so the app can be made to follow it.",
+      "description": "What to type into the alphaess app, and when. The app takes one High/Low pair at a time, so each row is a setting to enter at 'From' and replace when the next row of the same direction comes due. 'to ct/kWh' is chosen so the app trades in exactly the intervals the plan trades in - not merely the ones it must catch, but also none of the ones it must leave alone, for the whole time the setting is live. Raw market price, matching the price graph on the Battery Plan dashboard. 'Exact' is no when no single threshold can do both, and counts the intervals that then go against the plan; treat those rows as the best available compromise rather than an instruction. 'Target SoC' is what the battery should read by 'Until'. Nothing here is read by the optimiser - it is the reverse, these numbers are worked backwards out of the plan so the app can be made to follow it.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1245,7 +1245,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Every interval the plan does something in. Not the merged blocks that advise.py prints - those are built in Python from the same numbers and are not stored, so reproducing them here would mean writing the merge twice and letting the two drift. ct/kWh is the raw market price, the same number the price graph on the AlphaESS Battery Plan dashboard plots - not the all-in price the plan optimises against, which includes tax, sourcing markup and energy tax. Blank where the day-ahead has not been published yet. Where the list stops is usually the terminal reserve binding, not the price becoming unattractive: check whether the last row's SoC equals the Terminal reserve stat on the AlphaESS Battery Plan dashboard. The optimiser follows no price threshold at all - it solves the whole horizon. The sell/buy lines on that graph are read back out of these actions, not fed into them.",
+      "description": "Every interval the plan does something in. Not the merged blocks that advise.py prints - those are built in Python from the same numbers and are not stored, so reproducing them here would mean writing the merge twice and letting the two drift. ct/kWh is the raw market price, the same number the price graph on the Battery Plan dashboard plots - not the all-in price the plan optimises against, which includes tax, sourcing markup and energy tax. Blank where the day-ahead has not been published yet. Where the list stops is usually the terminal reserve binding, not the price becoming unattractive: check whether the last row's SoC equals the Terminal reserve stat on the Battery Plan dashboard. The optimiser follows no price threshold at all - it solves the whole horizon. The sell/buy lines on that graph are read back out of these actions, not fed into them.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1409,7 +1409,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "AlphaESS Dashboard",
+  "title": "Overview",
   "uid": "alphaess-main",
-  "version": 16
+  "version": 17
 }

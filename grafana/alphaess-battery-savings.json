@@ -1070,8 +1070,8 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "AlphaESS Battery Savings",
+  "title": "Battery Savings",
   "uid": "alphaess-battery-savings",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

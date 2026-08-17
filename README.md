@@ -26,7 +26,7 @@ stopped, tagged with `sys_sn`, `event` (`failure` / `recovered`) and — on
 failures — `error_class`. Fields: `failures` (consecutive count), `error` (the
 message, failures only), `outage_seconds` (`recovered` only). Successful polls
 write nothing here: `power_readings` arriving is the healthy signal. Read it
-through the **AlphaESS Collector Health** dashboard
+through the **Collector Health** dashboard
 ([grafana/alphaess-collector-health.json](grafana/alphaess-collector-health.json)).
 
 > **`load_power_w` is an identity, not a measurement.**
@@ -64,7 +64,7 @@ Measurement `daily_energy`, one row per local day, tagged `sys_sn` and
 from them: `conversion_loss_kwh` (derived load minus metered load),
 `battery_loss_kwh` (charge − discharge − ΔSoC×capacity) and `total_loss_kwh`,
 alongside `computed_at_unix` and the quality fields the gate ran on. Read it
-through the **AlphaESS Energy Losses** dashboard
+through the **Energy Losses** dashboard
 ([grafana/alphaess-energy-losses.json](grafana/alphaess-energy-losses.json)); see
 [DEPLOY.md](DEPLOY.md#nightly-conversion-loss-update) to schedule it.
 
@@ -93,7 +93,7 @@ through the **AlphaESS Energy Losses** dashboard
    three dashboards — **AlphaESS** (what the system is doing right now: SoC,
    battery power, collector status, a source→use Sankey and the power
    timeseries), **Energy** (the same in totals: per-day stats, bar charts and
-   the daily/hourly tables) and **AlphaESS Energy Flow** (a source→use Sankey,
+   the daily/hourly tables) and **Energy Flow** (a source→use Sankey,
    defaults to Today) — are provisioned automatically, no manual setup. The
    bundled Grafana also installs the `volkovlabs-echarts-panel` plugin the
    Sankey panels need.
