@@ -41,8 +41,12 @@ from heartbeat import send_heartbeat
 
 try:
     from pymodbus.client import AsyncModbusTcpClient
+    from pymodbus.exceptions import ModbusException
 except ImportError:  # --alive must work without pymodbus installed
     AsyncModbusTcpClient = None
+    # An empty tuple never matches in `except`, which is what we want: with pymodbus absent
+    # nothing here can reach the bus, so there is no Modbus failure left to catch.
+    ModbusException = ()
 
 log = logging.getLogger("dispatch")
 
@@ -85,7 +89,28 @@ class Inverter:
         self.kw = _id_kwarg()
 
     async def read(self, addr: int, count: int = 1, signed: bool = False) -> int:
-        r = await self.c.read_holding_registers(addr, **{"count": count, self.kw: self.slave})
+        try:
+            r = await self.c.read_holding_registers(addr,
+                                                    **{"count": count, self.kw: self.slave})
+        except ModbusException as e:
+            # WHY THIS CONVERSION EXISTS, and it is not tidiness.
+            #
+            # Every caller in this file degrades on `except OSError` -- read the SoC, fail,
+            # decide without it; read the block, fail, skip the hijack check. Those handlers
+            # were dead code for two years' worth of the failure they were written for.
+            # `pymodbus.exceptions.ModbusIOException` -- what a TIMEOUT raises, by far the
+            # commonest way a Modbus read fails -- does NOT subclass OSError:
+            #
+            #   ModbusIOException -> ModbusException -> Exception
+            #
+            # so it sailed past every one of them into `run()`'s catch-all, killing the whole
+            # tick and leaving a hole in dispatch_state. Observed twice on 2026-08-18 (13:03
+            # and 16:00), each time two consecutive ticks; the inverter answered normally on
+            # either side. Converting here, at the one boundary where pymodbus's exception
+            # vocabulary enters this file, is what makes those handlers real -- the
+            # alternative, four separate `except (OSError, ModbusException)` clauses, is four
+            # places for the next reader to miss one.
+            raise OSError(f"read {addr} failed: {e}") from e
         if r.isError():
             raise OSError(f"read {addr} failed: {r}")
         return R.decode(r.registers, signed)
@@ -98,7 +123,11 @@ class Inverter:
         after, when a decode turns out to have been wrong.
         """
         addr, count = R.DISPATCH_BLOCK
-        r = await self.c.read_holding_registers(addr, **{"count": count, self.kw: self.slave})
+        try:
+            r = await self.c.read_holding_registers(addr,
+                                                    **{"count": count, self.kw: self.slave})
+        except ModbusException as e:  # see Inverter.read
+            raise OSError(f"dispatch block read failed: {e}") from e
         if r.isError():
             raise OSError(f"dispatch block read failed: {r}")
         return list(r.registers)
@@ -110,7 +139,10 @@ class Inverter:
         if self.dry_run:
             log.info("      [dry-run] addr=%s values=%s", addr, values)
             return
-        r = await self.c.write_registers(addr, values, **{self.kw: self.slave})
+        try:
+            r = await self.c.write_registers(addr, values, **{self.kw: self.slave})
+        except ModbusException as e:  # see Inverter.read
+            raise OSError(f"write {addr}={values} failed: {e}") from e
         if r.isError():
             raise OSError(f"write {addr}={values} failed: {r}")
 
@@ -284,11 +316,15 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         cache["doc"], cache["error"] = None, str(e)
 
     # 4. Live SoC, read before deciding -- the direction rule needs it.
+    #
+    # `read_error` accumulates why the inverter could not be read, so that a tick which
+    # decided but could not see the hardware still publishes SOMETHING. See step 9.
+    read_error = ""
     try:
         live_soc = await inv.read(R.REG_BATTERY_SOC) / 10
     except OSError as e:
         log.warning("SoC read failed: %s", e)
-        live_soc = None
+        live_soc, read_error = None, str(e)
 
     decision = S.decide(cache.get("doc"), now, live_soc, cache.get("error", ""))
 
@@ -299,7 +335,7 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         cache["raw_words"] = raw_before
     except OSError as e:
         log.warning("dispatch block read failed: %s", e)
-        state = None
+        state, read_error = None, str(e)
 
     if state is not None and S.is_hijacked(state, cache.get("last_written")):
         log.warning("HIJACK: block active with mode=%s power=%+dW soc=%.1f%% that we did not "
@@ -357,7 +393,7 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
             verified = R.decode_block(raw_words)
         except OSError as e:
             log.warning("verify read failed: %s", e)
-            verified, raw_words = None, None
+            verified, raw_words, read_error = None, None, str(e)
 
     if verified is not None and decision.kind == "command":
         cmd = cache.get("last_written")
@@ -373,15 +409,35 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     else:
         cache["write_verified"] = None
 
+    # 9. Publish. A tick that could not read the inverter STILL publishes.
+    #
+    # It used to publish nothing, which made an unreadable inverter and a dead dispatcher the
+    # same shape in Influx: absence. That is the wrong default for the one series anybody
+    # consults when something looks wrong -- `review-dry-run.py` reported both 2026-08-18
+    # incidents as "no decision", which reads as "the loop stopped", and it took a container
+    # inspect and a log dive to find out the loop had been fine all along.
+    #
+    # The degraded point deliberately carries the DECISION and not the registers. What the
+    # dispatcher decided is known; what the inverter is doing is exactly what could not be
+    # read, and inventing a value for it -- carrying the last one forward, or publishing a
+    # zero -- would be a lie told by the process best placed to know better.
     cache["raw_words"] = raw_words
     publisher = cache.get("publisher")
-    if publisher is not None and verified is not None and raw_words is not None:
-        publisher.publish(
-            state_mod.build_fields(
-                verified, raw_words, now,
-                decision_kind=decision.kind, slot=decision.slot,
-                plan_run=(cache.get("doc") or {}).get("plan_run", "")),
-            now=now)
+    plan_run = (cache.get("doc") or {}).get("plan_run", "")
+    if publisher is not None:
+        if verified is not None and raw_words is not None:
+            publisher.publish(
+                state_mod.build_fields(
+                    verified, raw_words, now,
+                    decision_kind=decision.kind, slot=decision.slot,
+                    plan_run=plan_run),
+                now=now)
+        else:
+            publisher.publish(
+                state_mod.build_degraded_fields(
+                    slot=decision.slot, plan_run=plan_run,
+                    read_error=read_error or "no readback this tick"),
+                now=now)
 
     write_heartbeat(decision, verified, live_soc)
 

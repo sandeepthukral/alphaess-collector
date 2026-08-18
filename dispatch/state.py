@@ -120,6 +120,43 @@ def build_fields(
     return fields
 
 
+def build_degraded_fields(
+    slot: dict | None = None,
+    plan_run: str = "",
+    read_error: str = "",
+) -> dict:
+    """One `dispatch_state` point for a tick that decided but could not read the inverter.
+
+    WHAT IS DELIBERATELY ABSENT. No `action`, no `setpoint_w`, no `dispatch_active`, no raw
+    words. Those describe the hardware, and the hardware is what could not be read; the
+    honest report of an unknown is no field, not a stale value carried forward and not a
+    zero. Grafana's `last()` therefore keeps showing the previous readback, which is also the
+    truth: a command already written stays live for its full `duration_s` whether or not this
+    tick managed to look at it.
+
+    WHAT IS DELIBERATELY PRESENT. `slot_action` and `plan_run` -- the decision, which this
+    process knows perfectly well and which no failed read can take away. They are also two of
+    the five fields `review-dry-run.py` pivots on, so publishing them is what stops a Modbus
+    outage from rendering as a hole in the tick stream, indistinguishable from a loop that
+    died. The `read_error` field is the reason, in the words the exception used.
+
+    Not merged into `build_fields()` with optional arguments: that function's contract is
+    "every value is a function of a readback", and a version of it that sometimes has no
+    readback would need a branch at every field. Two small functions, one of which cannot
+    silently publish a half-truth.
+    """
+    fields: dict[str, int | float | str] = {
+        "read_error": read_error or "inverter unreadable",
+    }
+    if slot:
+        fields["slot_start"] = int(
+            dt.datetime.fromisoformat(slot["start"].replace("Z", "+00:00")).timestamp())
+        fields["slot_action"] = str(slot["action"])
+    if plan_run:
+        fields["plan_run"] = plan_run
+    return fields
+
+
 class StatePublisher:
     """Writes `dispatch_state` to the `alphaess` bucket, and never raises.
 
