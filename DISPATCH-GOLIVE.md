@@ -59,6 +59,22 @@ Next action: **the full-day watch** (section 3, box four), reading `slot_action`
 now stay green rather than firing, since the app's price control is off. Section 4 needs the
 watch done first — it is the last chance to catch a wrong decision for free.
 
+**Update, 2026-08-18:** the Kuma box is ticked — all seven monitors exist and are receiving
+real heartbeats, which took a container recreate on top of creating them. Grafana was
+restarted too, so the `Decision` panel (#100) is live and reads `hold`; it is the only tile on
+the dashboard that moves during a dry-run day, and it is the answer to the third box's
+ambiguity rather than another readback of it.
+
+The full-day watch is the last open box in section 3. A partial run over the first night —
+`--hours 12`, 21:52 to 07:38 — gives 558 ticks, 7 decisions, 4 faults and 6 previews, and
+every one of the four faults is a network stall rather than a dispatch fault. That is the
+shape to expect tonight, and section 3's box four now carries how to tell the two apart.
+
+Next action: **the full-day watch, after 22:30 local**, then section 4. Two script fixes worth
+folding in on the way: `scripts/is-it-deciding.py` answers "is it deciding right now" in under
+a second from the Mac, and the `GAP_S` constant it shares with `review-dry-run.py` needs to
+stay in step with Kuma #5's interval.
+
 ---
 
 ## 1. Get it into version control
@@ -182,7 +198,21 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
       **Confirmed on the dashboard 2026-08-17**: `no dispatch` as a single tile, `0 W`,
       `0 %`, a grey `no command`, and the decode table agreeing with all of it
 - [ ] Watch a full day of dry-run decisions against what the battery actually did. This is
-      the last chance to catch a wrong decision for free.
+      the last chance to catch a wrong decision for free. Run it **after 22:30 local**, with
+      `--hours 24` rather than the default: the default starts at local midnight, and the
+      dispatcher's first tick was 21:52 on 2026-08-17, so only an explicit window covers a
+      full day including an evening peak. The plan's last discharge block of the day runs
+      22:00–22:15, which is why 22:30 rather than 22:00.
+
+      **A gap fault is not automatically a dispatch fault.** Before treating one as a bug,
+      query `power_readings` over the same minutes. If the collector stalled too it is the
+      network, not the loop — the two use different transports and only something upstream of
+      both stalls both. Overnight 2026-08-17/18 all four gap faults were of that kind.
+
+      **Zero previews is the bad outcome, not the good one.** A preview is a divergence
+      between the decision and what the battery actually did, which is exactly the behaviour
+      change going live would buy; a day with none means the dispatcher is not worth
+      deploying. Faults are what block go-live.
 
       **Read `slot_action` and `plan_run`, not `action`, while in dry run.** `action` will
       say `no dispatch` for the whole day even with a healthy dispatcher deciding every
@@ -195,19 +225,55 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
       before the `verified is False` branch. Monitor #7 stays meaningful throughout, since
       a foreign command arms the block and `is_hijacked` catches an active block this
       process did not write
-- [ ] Create the Kuma monitors, put each push URL in the NAS `.env`, and confirm each goes
-      green — `DESIGN-dispatch.md` §6.1. All seven are pinged by code now; an unset URL makes
-      the ping a no-op, so a monitor left out of `.env` stays silent rather than failing:
-  - [ ] #2 `plan-in-influx` (2 h) and #3 `slots-written` (2 h) — pinged by the translator
-  - [ ] #4 `slots-fresh` (15 min) and #5 `dispatcher-alive` (2 min). Keep #5's interval
-        above the 60 s tick or one slow tick flaps it
-  - [ ] #6 `dispatch-confirmed` (5 min), #7 `inverter-not-hijacked` (5 min),
+- [x] Create the Kuma monitors, put each push URL in the NAS `.env`, and confirm each goes
+      green — `DESIGN-dispatch.md` §6.1. **2026-08-17 evening, confirmed green 2026-08-18.**
+      All seven are pinged by code now; an unset URL makes the ping a no-op, so a monitor left
+      out of `.env` stays silent rather than failing:
+  - [x] #2 `plan-in-influx` (2 h) and #3 `slots-written` (2 h) — pinged by the translator
+  - [x] #4 `slots-fresh` (15 min) and #5 `dispatcher-alive`. Keep #5's interval above the
+        60 s tick or one slow tick flaps it — **2 min was still too tight, see below**
+  - [x] #6 `dispatch-confirmed` (5 min), #7 `inverter-not-hijacked` (5 min),
         #8 `soc-floor` (15 min). **#7 will fire, correctly, until the app's price control is
-        off** — the block is being hijacked as of 2026-08-16. Create it last, or expect it red
-  - [ ] Set `SOC_FLOOR_PCT` to match the planner's `minBatterySOCPct`. Two repos, nothing
+        off** — the block is being hijacked as of 2026-08-16. Create it last, or expect it red.
+        In the event #7 has been green throughout, the app's price control having been cleared
+        under section 2 first
+  - [x] Set `SOC_FLOOR_PCT` to match the planner's `minBatterySOCPct`. Two repos, nothing
         comparing them
-  - [ ] **Do NOT create a TCP port monitor on `192.168.68.151:502`.** It would steal the
-        inverter's single Modbus connection from the dispatcher — §6.2
+  - [x] **Do NOT create a TCP port monitor on `192.168.68.151:502`.** It would steal the
+        inverter's single Modbus connection from the dispatcher — §6.2. None was created
+
+      **Creating the monitors is not deploying them.** The push URLs go into `.env`, and the
+      running container never re-reads `.env` — so all seven sat receiving nothing until
+      `sudo docker compose up -d dispatch` recreated it. That recreate is what makes this box
+      true, and it is a separate action from creating the monitors.
+
+      **How the recreate was confirmed, because the obvious check does not work.** Looking for
+      a restart-sized hole in the `dispatch_state` tick stream proves nothing: a recreate costs
+      about 132 s, which is exactly the length of the ordinary slow ticks, so it hides in the
+      noise. It was read as "never recreated" on that basis and that was wrong. What settles it
+      is the heartbeat payload — #5 carrying `command: hold at 0 W` rather than only the manual
+      `setup check` beat, since the container can only send that with the push URL in its
+      environment, and the URL did not exist before the monitor did. A second, independent
+      signal: the translator's hourly `plan_run` step moved from :52/:53 past the hour to
+      :13/:14, and only a restart moves that phase.
+
+      **Kuma's own trap:** setting Heartbeat Interval silently drags Retry Interval to the same
+      value. Set Retry Interval *after* Interval, or it is not what the form shows.
+
+      Also not automatic: the Telegram notification carries a "Default" badge but was **not**
+      enabled on the new monitors. Tick it on each one.
+
+      **#5 `dispatcher-alive` needs 180 s / retries 2 / retry 90, not 120 s.** At 120 s it
+      logged four Down→Up flaps overnight 2026-08-17/18 — 02:17, 05:37, 07:05, 07:21 — for a
+      dispatcher that never missed a decision. The stalls are real but they are not dispatch:
+      `power_readings` has gaps in the same minutes, and the collector reaches the AlphaESS
+      cloud over the WAN while dispatch reaches the inverter over the LAN, so only something
+      upstream of both stalls both. The home network was unstable from the afternoon of
+      2026-08-17. Worst observed stall is 276 s, so 180 s with retries 1 / retry 60 still
+      alerts at 240 s; retries 2 / retry 90 rides it out and still catches a dead loop in
+      6 min. `TICK_S`/`GAP_S` in `scripts/review-dry-run.py` and `scripts/is-it-deciding.py`
+      are deliberately the same numbers — change all three together or they disagree about
+      what a stalled loop is
 
 ## 4. Go live
 
