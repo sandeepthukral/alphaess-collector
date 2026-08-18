@@ -7,6 +7,10 @@ the NAS-specific bits: getting the repo and secrets onto the box, host-port
 conflicts, verifying the collector's link MTU after network changes, the nightly
 battery-savings task, and monitoring that collection is actually happening.
 
+**Stopping the dispatcher in a hurry:** `sudo docker compose stop dispatch`. It
+releases the inverter on the way out, and anything it wrote expires within 300 s
+regardless — see [Running the dispatcher](#running-the-dispatcher).
+
 ## 1. Clone on the NAS
 
 ```sh
@@ -130,6 +134,101 @@ Prints the raw API response and parsed fields without writing to InfluxDB.
 Confirmed so far (live test 2026-07-17): `pbat` negative = battery charging,
 positive = discharging. `pgrid` positive = importing from grid is the expected
 convention but was 0 during testing — verify after dark when importing.
+
+## Running the dispatcher
+
+Every other service here reads. The dispatcher **writes to hardware**, so it is the
+one that needs a stop procedure you can follow without thinking. Going live is a
+separate, deliberate step — `DISPATCH-GOLIVE.md` — but once it is live, this is how
+you operate it. The design reasoning behind all of it is `DESIGN-dispatch.md` §8.
+
+### The kill switch
+
+```sh
+sudo docker compose stop dispatch
+```
+
+That is the whole thing. SIGTERM reaches the scheduler (`entrypoint.sh` execs it as
+PID 1 precisely so it does), the loop breaks, and `finally:` writes `REG_START = 0`.
+The inverter is back on plain self-consumption before the command returns —
+**0.4 s**, measured on the first live stop, 2026-08-18.
+
+**If that fails, silence still works.** Every command carries
+`DISPATCH_DURATION_S = 300`: nothing this dispatcher writes survives five minutes
+without being actively refreshed. Kill the container, kill the NAS, unplug the
+switch the inverter is on — it reverts on its own. There is no state you can reach
+where a bad command outlives five minutes of nothing happening, which is why "stop
+writing" is always a valid emergency response and why `stop_grace_period: 30s`
+(below) is a convenience rather than a safety property.
+
+### Reading the last lines of the log
+
+```sh
+sudo docker compose logs --tail 5 dispatch
+```
+
+One line per 60 s tick, and every field earns its place:
+
+```
+command | hold at 0 W | soc=4.8% | verified=True | ours
+```
+
+| Field | Reads | Means |
+|---|---|---|
+| kind | `command` / `release` / `idle` | `idle` is the fail-safe: no plan, stale plan, no slot, or SoC unreadable. It writes nothing after releasing once |
+| reason | `hold at 0 W` | The decision in words, including a downgrade — a charge whose target is not above live SoC says so here and becomes a hold |
+| soc | `4.8%` | Live SoC read this tick. `?` means the register could not be read, and no Mode 2 command is issued when it says that |
+| verified | `True` / `False` / `None` | The post-write readback matched what was written. **`False` is normal in dry run** and means nothing — nothing was written, so nothing can verify. Live, `False` is monitor #6's alarm: the log says commanded, the battery is not |
+| ownership | `ours` / `HIJACKED` | `HIJACKED` means the block is active with a command this process did not write, i.e. the app is driving. §8 |
+
+After a stop, the line you want is:
+
+```
+dispatch released on exit
+```
+
+That is `finally:` confirming the release actually wrote, as distinct from the
+container merely dying. **Its absence after a stop is the one result worth acting
+on** — see below.
+
+`tick failed, continuing:` with a pymodbus traceback is the inverter not answering,
+not a dispatcher fault. Two or three in a row is a normal transient; the loop keeps
+its 60 s cadence and publishes a degraded `dispatch_state` point carrying the
+decision and `read_error`, so the gap shows up as an event with a cause rather than
+a hole in the series.
+
+### Starting it again
+
+```sh
+sudo docker compose up -d dispatch
+```
+
+**Named service, always.** A bare `docker compose up -d` recreates the collector and
+cost 922 s of samples on 2026-08-10.
+
+It re-commands within one tick. Add `--build` only when the change touched
+`dispatch/` source; a `docker-compose.yml` or `.env` change needs no rebuild.
+
+**Expect the dashboard to be wrong for a few minutes after a stop.** `Dispatch state`
+will still read `hold (battery frozen)` and `0x0880` will still show `1`, because the
+publish happens inside `tick()` while the release runs in `finally:` after the loop —
+so the last point in Influx is the last *commanded* state, not the released one. The
+inverter is genuinely released; the series has not caught up. `Command expires`
+counting down to 0, and monitor #5 `dispatcher-alive` going red after 180 s, are the
+panels telling the truth in that window.
+
+### If the release did not land
+
+You stopped it and there is no `dispatch released on exit`. Nothing is on fire: the
+dead man's switch has it, and the inverter reverts within 300 s of the last write.
+Watch `Command expires` reach 0 and `0x0880` fall to `0` on the dashboard.
+
+Then find out why, because it should not happen. `stop_grace_period: 30s` on the
+dispatch service exists for exactly this: the release is a Modbus write, and against
+an unresponsive inverter pymodbus spends 3 s × 3 retries — about 12 s — before
+giving up, which is longer than Docker's default 10 s grace. A stop that took the
+full 30 s and still did not release means the inverter was not answering at all, and
+the next question is whether anything else is holding its single Modbus connection.
 
 ## Battery-savings pricing jobs
 

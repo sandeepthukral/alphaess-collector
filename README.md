@@ -129,6 +129,23 @@ network changes, the nightly battery-savings task, the
 [drill that proves it restores](DEPLOY.md#verifying-a-backup-restores), and
 collection monitoring.
 
+## Dispatch (writing to the inverter)
+
+Everything above reads. The `dispatch` service is the one that **writes**: it turns
+the sibling `battery-planning` project's optimiser output into Modbus commands on the
+inverter. It starts in dry run — `DISPATCH_LIVE` defaults to `0`, deciding and
+publishing but writing no registers — and going live is a deliberate, separate step.
+
+- Design and the fail-safe: [`DESIGN-dispatch.md`](DESIGN-dispatch.md)
+- Going live, once: [`DISPATCH-GOLIVE.md`](DISPATCH-GOLIVE.md)
+- **Operating it, including the kill switch:**
+  [`DEPLOY.md` → Running the dispatcher](DEPLOY.md#running-the-dispatcher)
+
+The short version of the kill switch, because it should not need a search:
+`sudo docker compose stop dispatch` releases the inverter on the way out, and every
+command expires within 300 s of the last write regardless — so cutting power or
+network to any part of this reverts the battery to self-consumption on its own.
+
 ## AWTRIX clock display (Ulanzi TC001)
 
 Push a few live stats to an [AWTRIX 3](https://blueforcer.github.io/awtrix3/)

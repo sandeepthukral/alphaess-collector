@@ -83,6 +83,17 @@ folding in on the way: `scripts/is-it-deciding.py` answers "is it deciding right
 a second from the Mac, and the `GAP_S` constant it shares with `review-dry-run.py` needs to
 stay in step with Kuma #5's interval.
 
+**Update, 2026-08-18 (live):** section 4 is done — the dispatcher is writing to the inverter.
+First live command 23:30, a Mode 3 hold at 0 W, `verified=True`, kill switch exercised and the
+release confirmed in the log. Nothing in sections 1–4 is open.
+
+The one thing to watch is not in this file: **tomorrow's 12:15 charge, 4,629 Wh**, the first
+live command whose effect shows up in the power trace rather than only in a register. A hold
+at 0 W is verifiable but invisible — the battery was already at 0 W — so it proves the write
+path and nothing about the plan being right.
+
+Next action: section 5 Part 3, the `plan-run` heartbeat, which lands in `battery-planning`.
+
 ---
 
 ## 1. Get it into version control
@@ -333,13 +344,31 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
 
 ## 4. Go live
 
-- [ ] Add `DISPATCH_LIVE=1` to `.env` — **not** to `docker-compose.yml`, which is tracked and
+- [x] Add `DISPATCH_LIVE=1` to `.env` — **not** to `docker-compose.yml`, which is tracked and
       guarded by `tests/test_dispatch_deployment.py`; editing it to go live would red the
-      suite on every branch afterwards
-- [ ] `sudo docker compose up -d dispatch`, and **watch the first command land** — verify the
-      readback matches what was written, not just that the log says "commanded"
-- [ ] Confirm release-on-exit works: `docker compose stop dispatch`, then check the block is
-      inactive rather than counting down
+      suite on every branch afterwards. **Done 2026-08-18, 23:30.**
+- [x] `sudo docker compose up -d dispatch`, and **watch the first command land** — verify the
+      readback matches what was written, not just that the log says "commanded".
+      **Done 2026-08-18.** The first live command was a Mode 3 hold at 0 W, and the readback
+      agreed with it on four consecutive ticks: `0x0880 Raw 1 Active`, `verified=True`.
+      `verified` is the box's whole point — it is the field that separates "the log says
+      commanded" from "the battery is doing it", and through the entire dry-run day it read
+      `False` on every tick because nothing was written for it to confirm. This is the first
+      time it has ever been observed `True`, which makes it the first evidence that the write
+      path works end to end rather than the first evidence that it runs
+- [x] Confirm release-on-exit works: `docker compose stop dispatch`, then check the block is
+      inactive rather than counting down. **Done 2026-08-18.** `Stopped 0.4s`, and the log's
+      last line is `dispatch released on exit` — so the release ran inside the grace period
+      with two orders of magnitude to spare, and #104's `stop_grace_period: 30s` is margin
+      rather than a fix for something observed.
+
+      **Do not read the dashboard for this.** For up to five minutes after a stop the panels
+      keep showing the last *commanded* state — `hold (battery frozen)`, a healthy countdown —
+      because the publish is inside `tick()` while the release runs in `finally:` after the
+      loop, so the release is never published. The last point is a live command by
+      construction, and panels 20 and 23 both window five minutes and take `last()`. Read the
+      log line, or `scripts/is-it-deciding.py`, and treat the tiles as five minutes stale.
+      `DEPLOY.md`'s *Running the dispatcher* section is where this now lives for good
 
 ## 5. Cross-repo seams — `PLAN-repo-seams.md` Parts 2 and 3
 
