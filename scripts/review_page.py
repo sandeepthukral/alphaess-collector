@@ -181,6 +181,8 @@ svg.sw { width:24px; height:10px; flex:none; overflow:visible; }
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 
 details { border-top:1px solid var(--rule); padding-top:11px; }
+.stalls { margin:9px 0 2px; padding-left:19px; color:var(--muted); font-size:13px; }
+.stalls li { margin:5px 0; }
 summary { cursor:pointer; color:var(--muted); font-size:13px;
   font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
 summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; border-radius:2px; }

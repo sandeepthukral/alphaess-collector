@@ -58,6 +58,19 @@ TICK_S = 60
 # Two missed ticks. One slow tick is a slow Modbus read, which is normal and not worth a
 # finding; three minutes of silence is the loop not running.
 GAP_S = 180
+# A hole in the COLLECTOR's own sampling, near a dispatch gap, that means both processes
+# stopped together rather than the dispatch loop dying on its own. The collector samples about
+# every 30 s and `q_series` averages into one-minute buckets, so consecutive points are
+# normally 60 s apart; 150 s is at least two missing buckets and cannot be jitter.
+COLLECTOR_GAP_S = 150
+# How far either side of the dispatch gap to look for that hole. THE TWO DO NOT ALIGN, and
+# expecting them to is the mistake this constant exists to fix: they poll at different rates,
+# over different transports, with different timeouts, so a network spell takes them out at
+# different moments and releases them at different moments. Measured strictly inside the
+# dispatch gap, the real 02:14 stall of 2026-08-18 scored 123 s -- under the threshold -- only
+# because the collector held on 110 s longer at the start and recovered 43 s later at the end.
+# Two minutes covers that skew without reaching into unrelated minutes.
+MATCH_PAD_S = 120
 # A plan older than this is one the translator should already have replaced -- it runs every
 # three hours. Matches monitor #4's window in DESIGN-dispatch.md section 6.1.
 STALE_PLAN_S = 4 * 3600
@@ -173,21 +186,61 @@ def find_gaps(ticks: list[dict]) -> list[tuple[dt.datetime, dt.datetime, float]]
     return out
 
 
-def findings(ticks, runs, battery, soc, soc_floor) -> tuple[list[str], list[str]]:
+def longest_hole(series, t0: dt.datetime, t1: dt.datetime) -> float:
+    """Seconds of the longest stretch inside [t0, t1] where `series` has no point.
+
+    The window edges count as boundaries, so a series that simply stops before `t0` and
+    resumes after `t1` reports the whole window rather than zero -- which is the answer that
+    matters, since that is exactly the shape of a collector that was also down.
+    """
+    edges = [t0] + [t for t, _ in series if t0 < t < t1] + [t1]
+    return max((b - a).total_seconds() for a, b in zip(edges, edges[1:]))
+
+
+def findings(ticks, runs, battery, soc,
+             soc_floor) -> tuple[list[str], list[str], list[str]]:
     """(faults, previews). Two lists, because they are read completely differently.
 
     A fault is something to fix before going live. A preview is a behaviour change going live
     would cause -- the reason for doing it at all. Mixing them into one "warnings" list, as
     the corpus review can afford to, would make a normal dry-run day look alarming.
+
+    A stall is the third kind and it is neither: the tick stream stopped because something
+    upstream of the whole stack stopped, and no change to `dispatch/` would prevent it. It is
+    separated rather than dropped because a silent omission is how you stop noticing that the
+    network is bad.
     """
-    faults, previews = [], []
+    faults, previews, stalls = [], [], []
 
     for t0, t1, gap in find_gaps(ticks):
-        faults.append(
-            f"<b>{gap / 60:.0f} min with no decision</b>, "
-            f"{local(t0):%H:%M} &rarr; {local(t1):%H:%M}. The loop ticks every {TICK_S} s; "
-            f"a silence this long is the loop not running, and in dry run nothing else shows "
-            f"it &mdash; <code>action</code> reads <code>no dispatch</code> either way")
+        # WHY THE COLLECTOR IS THE CONTROL. This page used to assert that a gap was "the loop
+        # not running", which it cannot know: the two processes reach entirely different
+        # things -- dispatch talks Modbus to the inverter over the LAN, the collector talks
+        # HTTPS to the AlphaESS cloud over the WAN -- so nothing short of something upstream
+        # of both stalls both. On 2026-08-17/18 all six gaps were of that kind, during a spell
+        # of bad home networking, and the page called every one of them a dispatch fault.
+        # Stating a cause with no evidence, on the most alarming item on the page, is the
+        # worst place to be confidently wrong.
+        pad = dt.timedelta(seconds=MATCH_PAD_S)
+        hole = longest_hole(battery, t0 - pad, t1 + pad)
+        where = f"{local(t0):%H:%M} &rarr; {local(t1):%H:%M}"
+        if not battery:
+            faults.append(
+                f"<b>{gap / 60:.0f} min with no decision</b>, {where}. The loop ticks every "
+                f"{TICK_S} s, so this is either the loop or the network &mdash; and there is "
+                f"no <code>power_readings</code> data in this window to tell them apart")
+        elif hole >= COLLECTOR_GAP_S:
+            stalls.append(
+                f"<b>{gap / 60:.0f} min</b>, {where}. The collector stopped sampling around "
+                f"the same time, for {hole / 60:.0f} min, and it reaches the AlphaESS cloud "
+                f"over the WAN while dispatch reaches the inverter over the LAN &mdash; so "
+                f"this is upstream of both, not the dispatch loop")
+        else:
+            faults.append(
+                f"<b>{gap / 60:.0f} min with no decision</b>, {where}. The collector kept "
+                f"sampling either side of it, so the network was up and <b>this one is the "
+                f"dispatch loop</b>. In dry run nothing else shows it &mdash; "
+                f"<code>action</code> reads <code>no dispatch</code> either way")
 
     armed = [t for t in ticks if (t.get("action") or "") != "no dispatch"]
     if armed:
@@ -254,7 +307,7 @@ def findings(ticks, runs, battery, soc, soc_floor) -> tuple[list[str], list[str]
                 f"{actual_cp:+.0f} W. Going live would have overridden self-consumption "
                 f"for {r['ticks']} min here")
 
-    return faults, previews
+    return faults, previews, stalls
 
 
 def svg_chart(runs, battery, soc, price, t0, t1) -> str:
@@ -448,7 +501,7 @@ def main() -> int:
         sys.exit("no dispatch_state points in that window -- is the dispatcher running?")
 
     runs = decision_runs(ticks)
-    faults, previews = findings(ticks, runs, battery, soc, a.soc_floor)
+    faults, previews, stalls = findings(ticks, runs, battery, soc, a.soc_floor)
     counts = Counter(r["action"] for r in runs)
     tick_counts = Counter((t.get("slot_action") or "self") for t in ticks)
     plan_runs = sorted({str(t["plan_run"]) for t in ticks if t.get("plan_run")})
@@ -467,8 +520,18 @@ def main() -> int:
 
     fault_html = ("<div class='warn'><b>Faults &mdash; fix before going live</b><ul>"
                   + "".join(f"<li>{f}</li>" for f in faults) + "</ul></div>") if faults else \
-        ("<div class='ok'>No faults: every tick accounted for, the block was never armed by "
-         "anything else, no plan went stale, and no discharge was decided under the floor.</div>")
+        (f"<div class='ok'>No faults: "
+         f"{'every gap was a network stall' if stalls else 'every tick accounted for'}, the "
+         f"block was never armed by anything else, no plan went stale, and no discharge was "
+         f"decided under the floor.</div>")
+    # Collapsed, and deliberately not styled as a warning. These are real -- the decisions
+    # genuinely stopped -- but nothing in this repo can fix them, so they must not compete for
+    # attention with the list above. Open by default would put the loudest block on the page
+    # in front of the reader every morning the network was bad.
+    stall_html = ("<details><summary>" + (
+        f"{len(stalls)} network stall(s) &mdash; nothing to fix here"
+    ) + "</summary><ul class='stalls'>"
+        + "".join(f"<li>{s}</li>" for s in stalls) + "</ul></details>") if stalls else ""
     preview_html = ("<div class='legend'><div class='leg'><b>What going live would have "
                     "changed</b></div>"
                     + "".join(f"<div class='leg note' style='margin:0;padding:0;border:0'>"
@@ -484,6 +547,7 @@ def main() -> int:
         chart=svg_chart(runs, battery, soc, price, t0, t1),
         legend=legend,
         faults=fault_html,
+        stalls=stall_html,
         previews=preview_html,
         rows="".join(rows),
         ticks=len(ticks),
@@ -503,7 +567,7 @@ def main() -> int:
     )
     out.write_text(page)
     print(f"{len(ticks)} ticks, {len(runs)} decisions, {len(faults)} faults, "
-          f"{len(previews)} previews -> {out}")
+          f"{len(stalls)} network stalls, {len(previews)} previews -> {out}")
     return 0
 
 
@@ -529,6 +593,8 @@ HTML = """<title>Dry Run Decisions</title>
 </dl>
 
 {faults}
+
+{stalls}
 
 <section>
   <div class="rh">
