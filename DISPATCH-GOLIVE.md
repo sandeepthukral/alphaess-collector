@@ -70,7 +70,15 @@ The full-day watch is the last open box in section 3. A partial run over the fir
 every one of the four faults is a network stall rather than a dispatch fault. That is the
 shape to expect tonight, and section 3's box four now carries how to tell the two apart.
 
-Next action: **the full-day watch, after 22:30 local**, then section 4. Two script fixes worth
+**Update, 2026-08-18 (later):** section 3 is finished. The full-day watch ran at 22:40 over
+a true 24 h window; its two faults were traced to a dead `except OSError` in `scheduler.py`
+that could never catch a pymodbus timeout, and both halves of that are fixed and tested.
+Box four also gained the finding that a dry-run review can never show an evening discharge —
+the drained battery removes it from the plan — so that criterion is retired rather than
+waited on. 3,178 tests pass, ruff clean.
+
+Next action: **section 4**, and it should be watched rather than left running. Two script
+fixes worth
 folding in on the way: `scripts/is-it-deciding.py` answers "is it deciding right now" in under
 a second from the Mac, and the `GAP_S` constant it shares with `review-dry-run.py` needs to
 stay in step with Kuma #5's interval.
@@ -197,7 +205,7 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
 
       **Confirmed on the dashboard 2026-08-17**: `no dispatch` as a single tile, `0 W`,
       `0 %`, a grey `no command`, and the decode table agreeing with all of it
-- [ ] Watch a full day of dry-run decisions against what the battery actually did. This is
+- [x] Watch a full day of dry-run decisions against what the battery actually did. This is
       the last chance to catch a wrong decision for free. Run it **after 22:30 local**, with
       `--hours 24` rather than the default: the default starts at local midnight, and the
       dispatcher's first tick was 21:52 on 2026-08-17, so only an explicit window covers a
@@ -208,6 +216,37 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
       query `power_readings` over the same minutes. If the collector stalled too it is the
       network, not the loop — the two use different transports and only something upstream of
       both stalls both. Overnight 2026-08-17/18 all four gap faults were of that kind.
+      `review-dry-run.py` does this comparison itself since #102, so the page separates them.
+
+      **And a real dispatch fault is not automatically a dispatch bug — but on 2026-08-18 it
+      was one.** The two faults that survived the network cross-check, 13:02→13:05 and
+      15:59→16:03, decomposed like this:
+
+      - *The trigger was the inverter, not the loop.* pymodbus's frame trace shows
+        transactions `0xeb`–`0xf2` all answered normally, then one request with no reply.
+        Two consecutive ticks failed, ~12 s each (3 retries × ~3 s), which is what walked the
+        tick phase `:33 → :45 → :57 → :58`. `docker inspect` gave `restarts=0`: the process
+        was alive throughout. Live, both would have been harmless — ~145 s without a refresh
+        against `DISPATCH_DURATION_S = 300`, so the command stays live and the dead man's
+        switch never engages.
+      - *The bug was ours.* The traceback died at `scheduler.py:288`, and line 289 is
+        `except OSError` — a handler written to lose the SoC and decide without it.
+        **`pymodbus.exceptions.ModbusIOException` does not subclass `OSError`**
+        (`ModbusIOException → ModbusException → Exception`), so that handler, and the three
+        like it, had never once fired. A read timeout — much the commonest Modbus failure —
+        went straight past all of them into `run()`'s catch-all and killed the whole tick.
+        Worst of the four is the verify read at `:358`, guarded by `if not inv.dry_run and
+        wrote:`: the one error handler that exists **only on the live path** had never
+        executed, and was broken. `Inverter.limits()` is worse in a different way — it is
+        called before `run()`'s try, so an unreachable inverter at container start took the
+        process down and `restart: unless-stopped` brought it back to try again.
+      - *Fixed* by converting at the one boundary where pymodbus's exceptions enter the file
+        (`Inverter.read`/`read_raw_block`/`write`), so all four handlers become real, and by
+        publishing a degraded `dispatch_state` point carrying `slot_action`, `plan_run` and
+        `read_error` when the inverter cannot be read. That second half is the one that
+        matters for this box: without it an unreadable inverter and a dead dispatcher are the
+        same shape in Influx — absence — which is exactly why these two took a container
+        inspect and a log dive to tell apart.
 
       **Zero previews is the bad outcome, not the good one.** A preview is a divergence
       between the decision and what the battery actually did, which is exactly the behaviour
@@ -225,6 +264,23 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
       before the `verified is False` branch. Monitor #7 stays meaningful throughout, since
       a foreign command arms the block and `is_hijacked` catches an active block this
       process did not write
+
+      **Done 2026-08-18 22:40**, window Mon 17 Aug 22:40 → Tue 18 Aug 22:40. 1,383 ticks,
+      22 decisions, 24 plans, 2 faults, 8 network stalls, 17 previews. Both faults were the
+      same defect and are fixed; see below. The previews are coherent — hold overnight to
+      bank charge for the peak, three afternoon direction reversals where the plan wanted to
+      buy while the house was drawing from the battery.
+
+      **The evening-discharge criterion is unreachable under dry run, and waiting does not
+      fix it.** Tick mix over the full day: `charge 209, discharge 27, hold 1147`. Twenty-
+      seven minutes of discharge in twenty-four hours, all of it 08:00–08:30. The 19:30–21:30
+      sell that the 14:05 plan promised never became a decision, and the reason is a ratchet
+      this box did not anticipate: with dispatch writing nothing the battery self-consumes
+      itself flat (38.4 % → 5.2 % over the day), every hourly re-plan reads that falling SoC,
+      and a battery with nothing in it is never asked to sell. Each successive day therefore
+      starts lower and produces *worse* evidence than the last. **Do not wait for an evening
+      discharge to appear in a dry-run review.** It cannot, and the box is amended to say so
+      rather than leaving the next reader watching for it.
 - [x] Create the Kuma monitors, put each push URL in the NAS `.env`, and confirm each goes
       green — `DESIGN-dispatch.md` §6.1. **2026-08-17 evening, confirmed green 2026-08-18.**
       All seven are pinged by code now; an unset URL makes the ping a no-op, so a monitor left
