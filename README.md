@@ -146,6 +146,12 @@ The short version of the kill switch, because it should not need a search:
 command expires within 300 s of the last write regardless — so cutting power or
 network to any part of this reverts the battery to self-consumption on its own.
 
+And the short version of "is it actually running", which needs no SSH:
+
+```sh
+set -a; . ./.env; set +a && .venv/bin/python3 scripts/is-it-deciding.py
+```
+
 ## AWTRIX clock display (Ulanzi TC001)
 
 Push a few live stats to an [AWTRIX 3](https://blueforcer.github.io/awtrix3/)

@@ -142,6 +142,63 @@ one that needs a stop procedure you can follow without thinking. Going live is a
 separate, deliberate step — `DISPATCH-GOLIVE.md` — but once it is live, this is how
 you operate it. The design reasoning behind all of it is `DESIGN-dispatch.md` §8.
 
+### Is it deciding? — the check that runs from your laptop
+
+```sh
+set -a; . ./.env; set +a          # for INFLUX_TOKEN_GRAFANA, read-only
+.venv/bin/python3 scripts/is-it-deciding.py
+```
+
+```
+  decision   hold       battery frozen at 0 W -- Mode 3, surplus exported
+  readback   hold (battery frozen) / 0 W (live)
+  plan       2026-08-18T20:05:02Z  (1.9 h old)
+  last tick  23:58:17  (4 s ago)
+
+DECIDING -- ticking every 60 s as it should.
+```
+
+No SSH and no Modbus — it reads InfluxDB over the tailnet, so it works from
+anywhere and cannot perturb the thing it is measuring. Exit code is `0` deciding,
+`1` stalled, `2` down, so it drops straight into a shell check. `--watch` re-reads
+every 60 s, which is how you catch a decision changing at a slot boundary.
+
+**It is honest about absence, which the dashboard is not.** The query windows five
+minutes, so a dispatcher that died during breakfast returns no rows and prints
+`NOT DECIDING` — rather than the confident, well-formatted answer a wider range with
+`last()` would give you about a decision made hours ago. Nothing else here has that
+property for free.
+
+Two readings that look like faults and are not:
+
+- **`decision (no slot)`** — `slot_action` is only written while a slot is active, so
+  a healthy dispatcher outside the plan's horizon, or in a gap between slots, writes
+  a point without it. Normal resting state.
+- **`readback ... (dry run)`** — dry run writes no registers, so the readback never
+  changes whatever the dispatcher decided. In dry run the `decision` line is the only
+  one carrying information, which is the entire reason it is published from the slot
+  rather than from the registers.
+
+#### The three checks, and when each is the right one
+
+| | Reads | Needs | Answers |
+|---|---|---|---|
+| `scripts/is-it-deciding.py` | InfluxDB | the tailnet | **Right now.** "Did I just break it" |
+| `scheduler.py --alive` | the heartbeat file in the container | `sudo docker compose exec` on the NAS | The loop is alive without opening a Modbus connection. This is also the Dockerfile's healthcheck |
+| `scripts/review-dry-run.py` | InfluxDB, a whole day | the tailnet | **"Was yesterday any good."** The only one that sees gaps: a loop that died and restarted looks perfectly healthy to the other two a minute later |
+
+`TICK_S` and `GAP_S` are deliberately the same numbers in the first and third, and
+must stay in step with Kuma monitor #5's interval — three components disagreeing
+about what counts as a stalled loop is worse than any one of them being wrong.
+
+**On the dashboard, the panel that cannot lie is `Command expires in`.** `Dispatch
+state` reading `hold (battery frozen)` is *not* evidence the loop is running: a
+released dispatch and a dead dispatcher have identical registers (`start=0`), so only
+the freshness of the point separates them. `Command expires in` is gated on
+`expires_at` and `dispatch_active` being written at the same instant and floors at
+zero, so a stopped loop drains it to red rather than leaving it sitting at a healthy
+five minutes.
+
 ### The kill switch
 
 ```sh
