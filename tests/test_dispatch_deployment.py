@@ -131,6 +131,24 @@ def test_the_scheduler_is_the_process_that_receives_sigterm():
     assert "exec python -u /app/scheduler.py" in ENTRYPOINT
 
 
+def test_release_on_exit_gets_longer_than_the_default_grace_period():
+    """The other half of the SIGTERM story, and the half that is easy to have wrong.
+
+    Reaching the scheduler is necessary but not sufficient: the release it then performs is a
+    Modbus write, and against an unresponsive inverter pymodbus spends ~12 s (3 s x 3 retries)
+    before giving up. Docker's default grace period is 10 s, so `stop` would SIGKILL the
+    process mid-release and leave the command live until the 300 s dead man's switch expired
+    -- in the one situation where somebody has decided they want it to stop NOW.
+
+    Asserted as a floor rather than an exact string so raising it later does not fail here.
+    """
+    grace = DISPATCH["stop_grace_period"]
+    assert grace.endswith("s"), f"expected seconds, got {grace!r}"
+    assert int(grace[:-1]) >= 15, (
+        "a Modbus release against a slow inverter needs longer than pymodbus's own "
+        "retry ladder, which is about 12 s")
+
+
 def test_the_container_user_has_a_pinned_uid():
     """Docker seeds a named volume's ownership from the image only when it CREATES the volume.
     `alphaess-dispatch-data` already exists on the NAS, chowned to the UID `useradd` happened

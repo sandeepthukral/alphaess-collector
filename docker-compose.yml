@@ -191,6 +191,23 @@ services:
     build: ./dispatch
     restart: unless-stopped
     logging: *default-logging
+    # THE KILL SWITCH NEEDS LONGER THAN DOCKER'S DEFAULT 10 s.
+    #
+    # `docker compose stop dispatch` is the primary way to stop a command that is doing the
+    # wrong thing, and it works by SIGTERM: the loop breaks and `finally:` runs
+    # `inv.release()`, which writes REG_START=0 and hands the battery straight back to
+    # self-consumption (`scheduler.py`, section 8).
+    #
+    # That release is a Modbus write, and the case where you most want to stop the dispatcher
+    # is exactly the case where the inverter is slow to answer -- pymodbus spends 3 s x 3
+    # retries, about 12 s, before it gives up. Longer than the default grace period, so
+    # Docker would SIGKILL the process mid-release and the last command would stay live until
+    # its 300 s dead man's switch expired. The backstop works; it is five minutes slower than
+    # the button you just pressed, which is the wrong five minutes.
+    #
+    # 30 s covers a full retry ladder plus the client close with room to spare, and costs
+    # nothing on a healthy stop, which returns in well under a second.
+    stop_grace_period: 30s
     command: ["--ip", "${INVERTER_IP:-192.168.68.151}"]
     environment:
       <<: *default-timezone
