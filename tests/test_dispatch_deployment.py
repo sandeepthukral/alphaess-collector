@@ -178,3 +178,26 @@ def test_a_failed_first_translation_does_not_stop_the_container():
     line = next(line for line in ENTRYPOINT.splitlines()
                 if line.startswith("python -u /app/translate.py"))
     assert line.rstrip().endswith("|| \\"), "the initial translation must be non-fatal"
+
+
+def test_the_refresh_interval_default_is_the_same_number_in_both_places():
+    """The default lives twice: compose passes it in, and the entrypoint falls back to its own
+    value when the variable is absent entirely. They only agree by hand.
+
+    Worth pinning because disagreement is invisible in the normal case - compose always sets
+    the variable, so the entrypoint's own default is only reached when someone runs the image
+    directly, which is exactly when nobody is comparing the two. The number also has to stay
+    well under the planner's cadence: at 3600 this ran a measured 46 minutes behind and a plan
+    could expire before it was ever read (2026-08-19)."""
+    import re
+    composeDefault = re.search(
+        r"TRANSLATE_INTERVAL_S:\s*\$\{TRANSLATE_INTERVAL_S:-(\d+)\}",
+        (REPO / "docker-compose.yml").read_text(encoding="utf-8"))
+    entrypointDefault = re.search(r'TRANSLATE_INTERVAL_S:-(\d+)', ENTRYPOINT)
+    assert composeDefault and entrypointDefault, "the interval default moved or was renamed"
+    assert composeDefault.group(1) == entrypointDefault.group(1), (
+        f"compose defaults to {composeDefault.group(1)}s but the entrypoint falls back to "
+        f"{entrypointDefault.group(1)}s")
+    assert int(composeDefault.group(1)) <= 900, (
+        "the translator must read a new plan well inside the planner's hourly cadence, or a "
+        "plan can expire before it is read")
