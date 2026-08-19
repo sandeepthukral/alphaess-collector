@@ -18,11 +18,24 @@
 set -eu
 
 SLOTS="${SLOTS_PATH:-/data/slots.json}"
-# Hourly, not three-hourly, although the planner runs every 3 h. A fixed-interval loop is not
-# aligned to the planner's schedule, so a 3 h loop can sit up to three hours behind a plan that
-# has already landed. The query is one Influx read; running it four times as often costs
-# nothing and keeps `slots.json` within an hour of the newest plan.
-INTERVAL="${TRANSLATE_INTERVAL_S:-3600}"
+# Five minutes, not hourly. A fixed-interval loop is not aligned to the planner's schedule, so
+# the gap here is not the average lag but the WORST one: at 3600 the translator sat a measured
+# 46 minutes behind every plan, because it fired at :51 while the planner writes at :05.
+#
+# That is not merely stale, it is long enough to make a correct plan unexecutable. On
+# 2026-08-19 the planner published the battery's floor-restoring buy for 06:00Z-06:30Z at
+# 06:05Z; this loop did not read it until 06:51Z, by which time the window had closed and
+# `upcoming()` correctly discarded it. The battery held below its 10 % floor all morning
+# against a plan that had asked it not to, and nothing in the stack could see the difference
+# -- a discarded past slot and a plan that never wanted to charge look identical from here.
+#
+# The planner-side fix (battery-planning, "Plan only the intervals the dispatcher can still
+# act on") stops the plan committing energy to intervals that have already started, so this
+# is no longer the only thing standing between a good plan and a dead one. It is still the
+# thing that decides how fresh the file is, and the cost argument has not changed: one Influx
+# read per pass, now twelve an hour instead of one. Measured end to end at 103 s from plan
+# run to dispatched command.
+INTERVAL="${TRANSLATE_INTERVAL_S:-300}"
 
 # Validated, because `set -e` makes a bad value fatal to the refresh loop and NOT to the
 # container: `sleep abc` exits non-zero, the subshell dies, and the scheduler keeps dispatching
@@ -43,8 +56,8 @@ case "$INTERVAL" in
     *) [ "$INTERVAL" -gt 0 ] || valid=no ;;
 esac
 if [ "$valid" = no ]; then
-    echo "TRANSLATE_INTERVAL_S='$INTERVAL' is not a positive integer -- using 3600" >&2
-    INTERVAL=3600
+    echo "TRANSLATE_INTERVAL_S='$INTERVAL' is not a positive integer -- using 300" >&2
+    INTERVAL=300
 fi
 
 # Absolute paths, and the working directory is /data rather than /app: the audit log and the

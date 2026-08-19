@@ -232,9 +232,10 @@ services:
       # If this number ever does change, both copies have to change on the same day or the
       # two halves disagree about what 100 % means.
       BATTERY_CAPACITY_WH: ${BATTERY_CAPACITY_WH:-27900}
-      # How often the translator re-reads the plan. Hourly by default although the planner
-      # runs every 3 h -- see dispatch/entrypoint.sh for why a 3 h loop lags a 3 h producer.
-      TRANSLATE_INTERVAL_S: ${TRANSLATE_INTERVAL_S:-3600}
+      # How often the translator re-reads the plan -- see dispatch/entrypoint.sh for why five
+      # minutes and not an hour. At 3600 this ran a measured 46 minutes behind the planner and
+      # a plan could expire before it was ever read (2026-08-19).
+      TRANSLATE_INTERVAL_S: ${TRANSLATE_INTERVAL_S:-300}
       # Kuma push URLs, section 6.1. Unset = no heartbeat, which is the right default for a
       # dry run and the wrong one once this is live: DISPATCH-GOLIVE.md section 3 creates all
       # seven and confirms each goes green before `--live` is added.
