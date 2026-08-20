@@ -44,13 +44,13 @@ def test_dashboards_were_found():
     added to grafana/ but never mounted in docker-compose.yml, which provisions
     nothing and fails silently -- see test_every_dashboard_is_mounted below.
     """
-    assert len(DASHBOARDS) == 8
+    assert len(DASHBOARDS) == 9
 
 
 def test_generators_were_found():
     """The pairing glob has the same failure mode as the dashboard glob: match nothing,
     test nothing, pass."""
-    assert len(GENERATORS) == 3
+    assert len(GENERATORS) == 4
 
 
 @pytest.mark.parametrize("generator", GENERATORS, ids=lambda p: p.name)
