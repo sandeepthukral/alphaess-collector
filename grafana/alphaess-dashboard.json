@@ -42,8 +42,8 @@
       "version": "7.2.5"
     },
     {
-      "id": "table",
-      "name": "Table",
+      "id": "state-timeline",
+      "name": "State timeline",
       "type": "panel",
       "version": ""
     }
@@ -80,6 +80,18 @@
       "tooltip": "The full plan: stat boxes, the price graph and the charge/discharge chart",
       "type": "link",
       "url": "/d/alphaess-battery-plan"
+    },
+    {
+      "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": false,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Dispatch",
+      "tooltip": "The command, not the plan: why it decided that, whether the write landed, and the registers behind it",
+      "type": "link",
+      "url": "/d/alphaess-dispatch"
     }
   ],
   "panels": [
@@ -401,6 +413,344 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "The one tile. DISPATCHING means the loop is alive, serving a fresh plan and writing. It stays green through 'hold' and 'self', which are decisions like any other and are most of a normal day - a tile that demanded an active command would be red by lunchtime and you would stop reading it. Red means the loop is trying and failing: BLIND is a Modbus read it could not do, NOT LANDING is a write the inverter took and did not honour. STALE PLAN means it is fine but flying on old information and will drop to idle. DRY RUN means it is deciding and writing nothing, on purpose. NO DISPATCHER means no point has arrived in five minutes: open the Dispatch dashboard, which has 'Last tick' and 'Why'.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [
+            {
+              "options": {
+                "BLIND": {
+                  "color": "red",
+                  "index": 5
+                },
+                "DISPATCHING": {
+                  "color": "green",
+                  "index": 0
+                },
+                "DRY RUN": {
+                  "color": "blue",
+                  "index": 1
+                },
+                "NO PLAN": {
+                  "color": "orange",
+                  "index": 3
+                },
+                "NOT LANDING": {
+                  "color": "red",
+                  "index": 4
+                },
+                "STALE PLAN": {
+                  "color": "orange",
+                  "index": 2
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "noValue": "NO DISPATCHER",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 0,
+        "y": 4
+      },
+      "id": 23,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\")\n  |> filter(fn: (r) => r._field == \"live\" or r._field == \"read_error\"\n                    or r._field == \"verified\" or r._field == \"plan_run\")\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> filter(fn: (r) => exists r.live)\n  |> map(fn: (r) => ({ _time: r._time, _value:\n      if exists r.read_error then \"BLIND\"\n      else if exists r.verified and r.verified == 0 then \"NOT LANDING\"\n      else if not exists r.plan_run then \"NO PLAN\"\n      else if float(v: int(v: now()) - int(v: time(v: r.plan_run))) / 1000000000.0 > 14400.0\n        then \"STALE PLAN\"\n      else if r.live == 0 then \"DRY RUN\"\n      else \"DISPATCHING\" }))\n  |> keep(columns: [\"_value\"])\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Dispatcher",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "What the PLAN asked for in the slot covering right now, from slot_action. 'no slot' is normal - it means the plan has nothing scheduled for this moment, not that the dispatcher is down. In dry run this is the only one of these four tiles that moves.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [
+            {
+              "options": {
+                "charge": {
+                  "color": "green",
+                  "index": 0
+                },
+                "discharge": {
+                  "color": "orange",
+                  "index": 1
+                },
+                "hold": {
+                  "color": "blue",
+                  "index": 2
+                },
+                "self": {
+                  "color": "text",
+                  "index": 3
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "noValue": "no slot",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 8,
+        "y": 4
+      },
+      "id": 24,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"slot_action\")\n  |> last()\n  |> keep(columns: [\"_value\"])\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Decision",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "What the loop actually did with that decision. 'command' wrote the block; 'release' handed the battery back to self-consumption; 'idle' wrote nothing at all, which is the fail-safe. READ IT BESIDE 'Decision', because since #109 the two legitimately disagree: a hold whose charge target is already met releases to soak up surplus solar rather than freezing the battery while the sun spills. Decision 'hold' with Doing 'release' is that working, and 'Why', on the Dispatch dashboard, says so.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [
+            {
+              "options": {
+                "command": {
+                  "color": "green",
+                  "index": 0
+                },
+                "idle": {
+                  "color": "orange",
+                  "index": 2
+                },
+                "release": {
+                  "color": "text",
+                  "index": 1
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 14,
+        "y": 4
+      },
+      "id": 25,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"decision_kind\")\n  |> last()\n  |> keep(columns: [\"_value\"])\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Doing",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Time left on the dead man's switch. The loop rewrites it every 60 s, so this should sit near five minutes and never fall far; draining toward zero means the loop has stopped refreshing and the inverter is about to revert to self-consumption on its own. A grey 'no command' means nothing is dispatching, which is a normal resting state and the whole of a dry-run day, not a fault.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "noValue": "no command",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0
+              },
+              {
+                "color": "green",
+                "value": 60
+              }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 19,
+        "y": 4
+      },
+      "id": 26,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"expires_at\" or r._field == \"dispatch_active\"))\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> filter(fn: (r) => exists r.expires_at and exists r.dispatch_active\n                   and r.dispatch_active != 0)\n  |> map(fn: (r) => ({ _time: r._time, _value:\n       float(v: r.expires_at) - float(v: int(v: now())) / 1000000000.0 }))\n  |> map(fn: (r) => ({ r with _value: if r._value < 0.0 then 0.0 else r._value }))\n  |> yield(name: \"expires in\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Command expires in",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
       "description": "Three lines on the same instant. 'planned' is the plan's SoC at the END of each interval, shifted onto that end so it lines up with a measurement taken there; 'actual' is the last reading in each 5-minute window, not a quarter-hour average, so a battery that stopped mid-slot shows as a flat stretch rather than a gentler slope. Both are drawn straight between points because SoC ramps; the two step lines are the ones that genuinely hold a value. Read the gaps: commanded against planned is a dispatcher problem, actual against commanded is a delivery one. A step-shaped gap of exactly one interval used to be a charting artefact and no longer is.",
       "fieldConfig": {
         "defaults": {
@@ -556,9 +906,9 @@
       },
       "gridPos": {
         "h": 9,
-        "w": 12,
+        "w": 24,
         "x": 0,
-        "y": 4
+        "y": 8
       },
       "id": 20,
       "options": {
@@ -617,181 +967,85 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "What to type into the alphaess app, and when. The app takes one High/Low pair at a time, so each row is a setting to enter at 'From' and replace when the next row of the same direction comes due. 'to ct/kWh' is chosen so the app trades in exactly the intervals the plan trades in - not merely the ones it must catch, but also none of the ones it must leave alone, for the whole time the setting is live. Raw market price, matching the price graph on the Battery Plan dashboard. 'Exact' is no when no single threshold can do both, and counts the intervals that then go against the plan; treat those rows as the best available compromise rather than an instruction. 'Target SoC' is what the battery should read by 'Until'. Nothing here is read by the optimiser - it is the reverse, these numbers are worked backwards out of the plan so the app can be made to follow it.",
+      "description": "What the dispatcher will do next, as blocks - read from the translator's own slots rather than worked out again from the plan. Contiguous intervals with the same action, power and target are already merged into one slot, so a run of fifteen-minute discharges reads as one evening band. The neutral 'horizon end' block is where the plan stops; without it the last band would run to the edge of the panel and a horizon that ends at 22:00 would look like one that never ends.",
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
+          "color": {
+            "mode": "thresholds"
           },
-          "mappings": [],
+          "custom": {
+            "fillOpacity": 70,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineWidth": 0,
+            "spanNulls": false
+          },
+          "mappings": [
+            {
+              "options": {
+                "charge": {
+                  "color": "green",
+                  "index": 0
+                },
+                "discharge": {
+                  "color": "orange",
+                  "index": 1
+                },
+                "hold": {
+                  "color": "blue",
+                  "index": 2
+                },
+                "horizon end": {
+                  "color": "text",
+                  "index": 4
+                },
+                "self": {
+                  "color": "text",
+                  "index": 3
+                }
+              },
+              "type": "value"
+            }
+          ],
+          "noValue": "no slots published - has the translator run since #113?",
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "text"
+                "color": "text",
+                "value": null
               }
             ]
           }
         },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "from_t"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "From"
-              },
-              {
-                "id": "unit",
-                "value": "time:MM-DD HH:mm"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "until_t"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Until"
-              },
-              {
-                "id": "unit",
-                "value": "time:MM-DD HH:mm"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "action"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Set"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "set_to"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 2
-              },
-              {
-                "id": "displayName",
-                "value": "to ct/kWh"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "target_soc"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 0
-              },
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "displayName",
-                "value": "Target SoC"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "exact"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Exact"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Set"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 99
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "to ct/kWh"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 94
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Target SoC"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 107
-              }
-            ]
-          }
-        ]
+        "overrides": []
       },
       "gridPos": {
-        "h": 9,
-        "w": 12,
-        "x": 12,
-        "y": 4
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 17
       },
-      "id": 21,
+      "id": 27,
       "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
+        "alignValue": "left",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
         },
-        "showHeader": true,
-        "sortBy": [
-          {
-            "desc": false,
-            "displayName": "From"
-          }
-        ]
+        "mergeValues": true,
+        "rowHeight": 0.9,
+        "showValue": "auto",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
       },
       "pluginVersion": "11.6.0",
       "targets": [
@@ -800,34 +1054,12 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "newest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nfrom(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"app_setting\" and r.plan_run == newest)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> map(fn: (r) => ({\n      from_t: r._time,\n      // until_s is seconds because an InfluxDB field cannot hold a time.\n      until_t: time(v: int(v: r.until_s) * 1000000000),\n      action: if r.action == \"sell\" then \"sell above\" else \"buy below\",\n      set_to: r.set_to_eur_kwh * 100.0,\n      target_soc: r.target_soc_wh / float(v: ${capacity_wh}) * 100.0,\n      // Spelled out rather than left as a 0/1: a column of bare zeroes beside a column of\n      // prices reads as a price of zero, and the count is the part worth acting on.\n      exact: if r.exact > 0.0 then \"yes\"\n             else \"no - \" + string(v: int(v: r.extra_intervals)) + \" interval(s) against plan\"\n    }))\n  |> sort(columns: [\"from_t\"])\n  |> yield(name: \"app settings\")\n",
+          "query": "newest = (from(bucket: \"alphaess\")\n  |> range(start: -48h, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_slots\" and r._field == \"action\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nnowS = float(v: int(v: now())) / 1000000000.0\n\n// The whole of the newest run, elapsed slots included. Each panel narrows it differently.\nrun = from(bucket: \"alphaess\")\n  |> range(start: -48h, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_slots\" and r.plan_run == newest)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> sort(columns: [\"_time\"])\n\nbands = run\n  |> map(fn: (r) => ({ _time: r._time, _value: r.action }))\ntail = run\n  |> tail(n: 1)\n  |> map(fn: (r) => ({ _time: time(v: int(v: r.end_s) * 1000000000),\n                       _value: \"horizon end\" }))\n\nunion(tables: [bands, tail])\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> yield(name: \"slots\")\n",
           "refId": "A"
         }
       ],
-      "title": "What to set in the app",
-      "transformations": [
-        {
-          "id": "merge",
-          "options": {}
-        },
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "includeByName": {},
-            "indexByName": {
-              "action": 2,
-              "exact": 5,
-              "from_t": 0,
-              "set_to": 3,
-              "target_soc": 4,
-              "until_t": 1
-            },
-            "renameByName": {}
-          }
-        }
-      ],
-      "type": "table"
+      "title": "What the dispatcher will do next",
+      "type": "state-timeline"
     },
     {
       "datasource": {
@@ -843,7 +1075,7 @@
         "h": 11,
         "w": 8,
         "x": 0,
-        "y": 13
+        "y": 21
       },
       "id": 13,
       "options": {
@@ -1074,7 +1306,7 @@
         "h": 11,
         "w": 8,
         "x": 8,
-        "y": 13
+        "y": 21
       },
       "id": 2,
       "options": {
@@ -1210,7 +1442,7 @@
         "h": 11,
         "w": 8,
         "x": 16,
-        "y": 13
+        "y": 21
       },
       "id": 1,
       "options": {
@@ -1247,182 +1479,6 @@
       "timeFrom": "24h",
       "title": "Power",
       "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "description": "Every interval the plan does something in. Not the merged blocks that advise.py prints - those are built in Python from the same numbers and are not stored, so reproducing them here would mean writing the merge twice and letting the two drift. ct/kWh is the raw market price, the same number the price graph on the Battery Plan dashboard plots - not the all-in price the plan optimises against, which includes tax, sourcing markup and energy tax. Blank where the day-ahead has not been published yet. Where the list stops is usually the terminal reserve binding, not the price becoming unattractive: check whether the last row's SoC equals the Terminal reserve stat on the Battery Plan dashboard. The optimiser follows no price threshold at all - it solves the whole horizon. The sell/buy lines on that graph are read back out of these actions, not fed into them.",
-      "fieldConfig": {
-        "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text"
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "_time"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Time"
-              },
-              {
-                "id": "unit",
-                "value": "time:MM-DD HH:mm"
-              },
-              {
-                "id": "custom.width",
-                "value": 110
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "action"
-            },
-            "properties": [
-              {
-                "id": "custom.width",
-                "value": 110
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "kWh"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 2
-              },
-              {
-                "id": "custom.width",
-                "value": 90
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "soc_pct"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 0
-              },
-              {
-                "id": "unit",
-                "value": "percent"
-              },
-              {
-                "id": "displayName",
-                "value": "SoC after"
-              },
-              {
-                "id": "custom.width",
-                "value": 110
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "ct_kWh"
-            },
-            "properties": [
-              {
-                "id": "decimals",
-                "value": 1
-              },
-              {
-                "id": "displayName",
-                "value": "ct/kWh"
-              },
-              {
-                "id": "custom.width",
-                "value": 90
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 10,
-        "w": 24,
-        "x": 0,
-        "y": 24
-      },
-      "id": 22,
-      "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
-          ],
-          "show": false
-        },
-        "showHeader": true,
-        "sortBy": [
-          {
-            "desc": false,
-            "displayName": "Time"
-          }
-        ]
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "import \"join\"\n\nnewest = (from(bucket: \"planning\")\n  |> range(start: -14d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r._field == \"soc_wh\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nplan = from(bucket: \"planning\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"plan\" and r.plan_run == newest)\n  |> filter(fn: (r) => r._field == \"charge_wh\" or r._field == \"discharge_wh\"\n                    or r._field == \"soc_wh\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> filter(fn: (r) => r.charge_wh > 0.0 or r.discharge_wh > 0.0)\n  |> group()\n\n// timeSrc: \"_start\" because aggregateWindow otherwise labels each window by its stop,\n// which would slide every price 15 minutes past the interval it belongs to - a table that\n// still looks entirely reasonable. createEmpty + fill carry an hourly price across the\n// quarters it covers, for days before the 2026-08-01 15-min cutover.\nmkt = from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"market_price\" and r._field == \"market_price\")\n  |> aggregateWindow(every: 15m, fn: last, timeSrc: \"_start\", createEmpty: true)\n  |> fill(usePrevious: true)\n  |> group()\n  |> keep(columns: [\"_time\", \"_value\"])\n\n// Left, not inner: the plan runs past the published day-ahead, and an inner join would\n// drop those intervals rather than show them with no price. A table that silently ends\n// early is worse than one with blank cells.\njoin.left(\n  left: plan,\n  right: mkt,\n  on: (l, r) => l._time == r._time,\n  as: (l, r) => ({\n      _time: l._time,\n      action: if l.charge_wh > 0.0 then \"charge\" else \"discharge\",\n      kWh: (if l.charge_wh > 0.0 then l.charge_wh else l.discharge_wh) / 1000.0,\n      soc_pct: l.soc_wh / float(v: ${capacity_wh}) * 100.0,\n      ct_kWh: r._value * 100.0\n    }))\n  |> yield(name: \"actions\")\n",
-          "refId": "A"
-        }
-      ],
-      "title": "Planned Actions in app",
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "includeByName": {},
-            "indexByName": {
-              "_time": 0,
-              "action": 1,
-              "ct_kWh": 2,
-              "kWh": 4,
-              "soc_pct": 3
-            },
-            "renameByName": {}
-          }
-        }
-      ],
-      "type": "table"
     }
   ],
   "preload": false,
@@ -1463,5 +1519,5 @@
   "timezone": "browser",
   "title": "Overview",
   "uid": "alphaess-main",
-  "version": 18
+  "version": 19
 }

@@ -457,7 +457,11 @@ problem and a real one.
       long run rather than a 4-minute window
 - [ ] Delete Grafana panel 8 ("What to set in the app") once `DISPATCH_LIVE=1` is in and the
       app's price bands stop mattering. Until then it is the panel that is *correct* — the app
-      really is in charge during the dry run. `DESIGN-dispatch.md` §7.4 has the reasoning
+      really is in charge during the dry run. `DESIGN-dispatch.md` §7.4 has the reasoning.
+      **Half done, 2026-08-20:** §7.4 counted one copy and there were two — the Overview
+      dashboard carried "What to set in the app" and "Planned Actions in app" as well, and
+      those are gone, replaced by the dispatch tile row. Battery Plan's panels 7 and 8 are
+      still up and still blocked on TODO item 1, its unbumped `version`
 - [ ] Plan-vs-actual reconciliation, monitor #9 (§5.4) — the daily job that catches "every
       monitor green, battery not following the plan"
 - [ ] `slots.json` hot-reload has never been tested against a live inverter (§9.6)
