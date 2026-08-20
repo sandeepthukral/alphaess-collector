@@ -93,7 +93,7 @@ class TestFreshness:
         2026-08-20: `plan_run` at :05 past every hour, unbroken over 30 h), so two hours is
         the same "one run may be late, two and the battery falls back" rule the original 4 h
         encoded when the planner ran 3-hourly."""
-        assert S.MAX_PLAN_AGE == dt.timedelta(hours=2)
+        assert dt.timedelta(hours=2) == S.MAX_PLAN_AGE
         assert not S.freshness(doc(generated_at=T0 - dt.timedelta(hours=2, minutes=1)), T0)[0]
 
     def test_exactly_at_the_age_limit_is_still_fresh(self):
