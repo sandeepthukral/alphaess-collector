@@ -25,6 +25,11 @@ MEASUREMENT = "dispatch_state"
 # Columns Flux itself supplies, which are legitimately referenced but are not our fields.
 FLUX_COLUMNS = {"_time", "_value", "_field", "_measurement", "_start", "_stop", "sys_sn"}
 
+# A query that rebinds `_value` to a numeric conversion delivers a number to Grafana
+# whatever the field it read was. `float(` and `int(` are Flux's only two numeric casts, so
+# this catches the whole class rather than the one panel that prompted it.
+CONVERTS_TO_NUMBER = re.compile(r"_value:\s*(?:float|int)\(")
+
 
 def published_field_values() -> dict:
     """A fully populated `dispatch_state` point, values kept.
@@ -48,6 +53,21 @@ def published_fields() -> set[str]:
     return set(published_field_values())
 
 
+def degraded_field_values() -> dict:
+    """A fully populated degraded `dispatch_state` point, values kept.
+
+    The value types matter here for the same reason they do above: `read_error` is a string
+    that only ever appears in this shape, so a stat reading it needs the same `/.*/` field
+    picker as any other string stat and nothing derived from `build_fields` alone would say
+    so.
+    """
+    return build_degraded_fields(
+        slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
+        plan_run="2026-08-15T15:00:00Z", read_error="timed out",
+        decision_kind="idle", reason="live SoC unreadable", live=True,
+        live_soc_pct=41.2, write_verified=False)
+
+
 def degraded_fields() -> set[str]:
     """Every field name `state.build_degraded_fields` can emit.
 
@@ -56,11 +76,7 @@ def degraded_fields() -> set[str]:
     `read_error` is a field no fully-populated point ever carries, and a panel reading it was
     failing the allowlist below for naming a field this repo does publish.
     """
-    return set(build_degraded_fields(
-        slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
-        plan_run="2026-08-15T15:00:00Z", read_error="timed out",
-        decision_kind="idle", reason="live SoC unreadable", live=True,
-        live_soc_pct=41.2, write_verified=False))
+    return set(degraded_field_values())
 
 
 def conditional_fields() -> set[str]:
@@ -99,6 +115,45 @@ def _stat_panels() -> list[tuple[str, str, dict]]:
         for panel in json.loads(path.read_text()).get("panels", []):
             if panel.get("type") in ("stat", "gauge"):
                 out.append((path.name, panel.get("title", "?"), panel))
+    return out
+
+
+def _panels_reading(field: str) -> list[tuple[str, str, dict]]:
+    """Every stat or gauge whose query filters on `field`, across all dashboards.
+
+    Selected by WHAT THE PANEL READS, not by dashboard filename and panel title, which is
+    how the guards below were written and why several of them had stopped covering
+    anything. A dispatch stat is a stat that reads a `dispatch_state` field; whether it is
+    called `Dispatch state` on Battery Plan or `Dispatcher` on Dispatch, and whichever file
+    it lives in, the mapping and threshold rules are the same rules. `Decision` on the
+    Dispatch dashboard shipped in #115 with no guard on it at all, for exactly that reason:
+    the test naming the panel found Battery Plan's copy first and stopped looking.
+
+    Same principle as `shipped_modules()` in `test_dispatch_deployment.py`, and the same
+    bug it was extracted from -- a hardcoded list is green for precisely the case it exists
+    to catch, because the new thing is not on it.
+    """
+    out = []
+    for dashboard, title, panel in _stat_panels():
+        query = " ".join(t.get("query", "") for t in panel.get("targets", []))
+        if f'_field == "{field}"' in query:
+            out.append((dashboard, title, panel))
+    return out
+
+
+def _timeseries_titled(title: str) -> list[tuple[str, dict]]:
+    """(dashboard, panel) for every timeseries with this title, across all dashboards.
+
+    Charts are matched by title where stats are matched by field: a chart is a composition
+    of several series and has no single field that identifies it. The same chart genuinely
+    is copied between dashboards under the same name -- `Planned SoC vs actual SoC` is on
+    both Overview and Battery Plan -- and the copies have to keep agreeing.
+    """
+    out = []
+    for path in sorted(DASHBOARDS.glob("*.json")):
+        for panel in json.loads(path.read_text()).get("panels", []):
+            if panel.get("type") == "timeseries" and panel.get("title") == title:
+                out.append((path.name, panel))
     return out
 
 
@@ -259,25 +314,26 @@ class TestStalenessGuards:
                     f"{dashboard} / {title}: last() over {w} would render a stale command "
                     f"as current -- section 7.3 requires a window of a few loop iterations")
 
+    def test_there_are_state_stats_to_guard(self):
+        """Guards the two guards below, which iterate a discovered set and would otherwise
+        pass by finding nothing -- the failure mode this whole PR exists to close."""
+        assert _panels_reading("action"), "no stat reads the `action` field"
+
     def test_the_state_stat_declares_a_loud_no_value(self):
         """`Released - following house` and `NO DISPATCHER` are the SAME register contents:
         start=0. Only freshness separates them, so the absence has to be loud."""
-        plan = json.loads((DASHBOARDS / "alphaess-battery-plan.json").read_text())
-        panel = next(p for p in plan["panels"] if p.get("title") == "Dispatch state")
-        defaults = panel["fieldConfig"]["defaults"]
-        assert defaults["noValue"] == "NO DISPATCHER"
-        # The base threshold step is what colours a no-data reading, so it must be the
-        # alarming one; the mappings below it colour the states actually commanded.
-        assert defaults["thresholds"]["steps"][0]["color"] == "red"
+        for dashboard, title, panel in _panels_reading("action"):
+            defaults = panel["fieldConfig"]["defaults"]
+            assert defaults["noValue"] == "NO DISPATCHER", f"{dashboard} / {title}"
+            # The base threshold step is what colours a no-data reading, so it must be the
+            # alarming one; the mappings below it colour the states actually commanded.
+            assert defaults["thresholds"]["steps"][0]["color"] == "red", (
+                f"{dashboard} / {title}")
 
     def test_the_state_stat_maps_every_action_the_dispatcher_can_emit(self):
         """A state with no mapping renders in the base colour -- red -- and would read as a
         failure while the dispatcher was working perfectly."""
         from state import describe_action
-
-        plan = json.loads((DASHBOARDS / "alphaess-battery-plan.json").read_text())
-        panel = next(p for p in plan["panels"] if p.get("title") == "Dispatch state")
-        mapped = set(panel["fieldConfig"]["defaults"]["mappings"][0]["options"])
 
         emitted = set()
         for mode in (1, 2, 3):
@@ -288,7 +344,11 @@ class TestStalenessGuards:
             words = [0, *R.encode_power(0), 0, 0, 3, 50, *R.encode_int32(300)]
             emitted.add(describe_action(R.decode_block(words), kind))
 
-        assert emitted <= mapped, f"unmapped dispatch states: {sorted(emitted - mapped)}"
+        for dashboard, title, panel in _panels_reading("action"):
+            mapped = set(panel["fieldConfig"]["defaults"]["mappings"][0]["options"])
+            assert emitted <= mapped, (
+                f"{dashboard} / {title}: unmapped dispatch states "
+                f"{sorted(emitted - mapped)}")
 
     def test_the_state_stat_can_reach_its_mappings(self):
         """Mapping every action is not enough if the panel never sees the value.
@@ -306,23 +366,33 @@ class TestStalenessGuards:
         Written over every stat rather than panel 20 alone, and over the string fields
         `state.py` actually emits rather than a hardcoded name, so a future string stat is
         covered without anyone remembering this.
+
+        "Every stat" used to mean every stat ON BATTERY PLAN, which was true when that was
+        the only dashboard reading `dispatch_state` and quietly stopped being true in #115.
+        It now means every stat in `grafana/`, which is what the docstring above always
+        claimed.
         """
-        plan = json.loads((DASHBOARDS / "alphaess-battery-plan.json").read_text())
         strings = {k for k, v in published_field_values().items() if isinstance(v, str)}
+        strings |= {k for k, v in degraded_field_values().items() if isinstance(v, str)}
         assert strings, "no string fields found -- this guard would pass vacuously"
 
         checked = 0
-        for panel in plan["panels"]:
-            if panel.get("type") not in ("stat", "gauge"):
-                continue
+        for dashboard, title, panel in _stat_panels():
             query = " ".join(t.get("query", "") for t in panel.get("targets", []))
             reads = {s for s in strings if f'_field == "{s}"' in query}
             if not reads:
                 continue
+            if CONVERTS_TO_NUMBER.search(query):
+                # Reading a string field is not the same as DELIVERING one. `Plan age`
+                # reads `plan_run`, a timestamp string, and hands Grafana the seconds since
+                # it -- a float. Requiring `/.*/` there would be requiring the wrong picker
+                # for the wrong reason, and the panel it is protecting against renders
+                # nothing at all. What matters is the type that reaches the reducer.
+                continue
             checked += 1
             picked = panel["options"]["reduceOptions"]["fields"]
             assert picked == "/.*/", (
-                f"{panel.get('title')!r} reduces string field(s) {sorted(reads)} with "
+                f"{title!r} in {dashboard} reduces string field(s) {sorted(reads)} with "
                 f"fields={picked!r}. Auto selects numeric fields only, so this panel renders "
                 f"its noValue text in every state, including a healthy one")
         assert checked, "no stat panel reads a string field -- the guard found nothing"
@@ -365,61 +435,73 @@ class TestStalenessGuards:
         on the now-neutral base step and go grey in exactly the failure being watched for.
         Neutral base and floor-at-zero only hold together.
         """
-        panel = next(p for _, t, p in _stat_panels() if t == "Command expires in")
-        steps = panel["fieldConfig"]["defaults"]["thresholds"]["steps"]
-        base = next(s for s in steps if s["value"] is None)
-        assert base["color"] != "red", (
-            "the base step colours noValue, and noValue here means 'nothing is dispatching' "
-            "-- a normal rest, not a fault")
-        assert any(s["color"] == "red" and s["value"] == 0 for s in steps), (
-            "red has to start somewhere: a command with no time left on it is the fault this "
-            "panel exists to show")
-        query = " ".join(t.get("query", "") for t in panel.get("targets", []))
-        assert "if r._value < 0.0 then 0.0 else r._value" in query, (
-            "without the floor, a stalled loop counts past zero into the neutral base step "
-            "and the panel goes quiet precisely when it should be shouting")
+        found = _panels_reading("expires_at")
+        assert found, "no stat reads `expires_at` -- the guard found nothing"
+        for dashboard, title, panel in found:
+            steps = panel["fieldConfig"]["defaults"]["thresholds"]["steps"]
+            base = next(s for s in steps if s["value"] is None)
+            assert base["color"] != "red", (
+                f"{dashboard} / {title}: the base step colours noValue, and noValue here "
+                f"means 'nothing is dispatching' -- a normal rest, not a fault")
+            assert any(s["color"] == "red" and s["value"] == 0 for s in steps), (
+                f"{dashboard} / {title}: red has to start somewhere: a command with no time "
+                f"left on it is the fault this panel exists to show")
+            query = " ".join(t.get("query", "") for t in panel.get("targets", []))
+            assert "if r._value < 0.0 then 0.0 else r._value" in query, (
+                f"{dashboard} / {title}: without the floor, a stalled loop counts past zero "
+                f"into the neutral base step and the panel goes quiet precisely when it "
+                f"should be shouting")
 
 
 class TestPanelFive:
     """The third series is what makes the chart diagnostic: the gap between planned and
     commanded is a dispatcher bug, the gap between commanded and actual is delivery error."""
 
-    def _panel(self):
-        plan = json.loads((DASHBOARDS / "alphaess-battery-plan.json").read_text())
-        return next(p for p in plan["panels"]
-                    if p.get("title") == "Planned SoC vs actual SoC")
+    TITLE = "Planned SoC vs actual SoC"
+
+    def _panels(self):
+        """Both copies. This chart is on Overview as well as Battery Plan, and the guards
+        below are about the trap in the query, which the copy has too."""
+        found = _timeseries_titled(self.TITLE)
+        assert found, f"no timeseries titled {self.TITLE!r} -- the guard found nothing"
+        return found
 
     def test_it_carries_a_commanded_series(self):
-        queries = " ".join(t["query"] for t in self._panel()["targets"])
-        assert '"commanded"' in queries
+        for dashboard, panel in self._panels():
+            queries = " ".join(t["query"] for t in panel["targets"])
+            assert '"commanded"' in queries, dashboard
 
     def test_the_commanded_series_is_restricted_to_live_mode_2_commands(self):
         """0x0886 keeps its last value through a hold and through a release -- a Mode 3 hold
         writes no target at all. Plotting the register unconditionally would draw a confident
         flat line at a target nothing is driving toward."""
-        q = next(t["query"] for t in self._panel()["targets"]
-                 if MEASUREMENT in t.get("query", ""))
-        assert "dispatch_active != 0" in q
-        assert "mode == 2" in q
+        for dashboard, panel in self._panels():
+            q = next(t["query"] for t in panel["targets"]
+                     if MEASUREMENT in t.get("query", ""))
+            assert "dispatch_active != 0" in q, dashboard
+            assert "mode == 2" in q, dashboard
 
     def test_the_idle_stretches_are_nulled_rather_than_filtered_away(self):
         """The restriction above has to leave a datapoint behind saying "nothing commanded
         here". Dropping the rows instead gives a stepAfter line no points to step through,
         and Grafana joins the two ends -- redrawing the exact flat line the restriction
         exists to prevent, which is a worse failure than not having the series at all."""
-        q = next(t["query"] for t in self._panel()["targets"]
-                 if MEASUREMENT in t.get("query", ""))
-        assert "debug.null" in q
-        assert 'import "internal/debug"' in q, "debug.null needs its import to be in the query"
-        assert "filter(fn: (r) => r.dispatch_active" not in q, (
-            "the live-command test must null the value, not filter the row away")
+        for dashboard, panel in self._panels():
+            q = next(t["query"] for t in panel["targets"]
+                     if MEASUREMENT in t.get("query", ""))
+            assert "debug.null" in q, dashboard
+            assert 'import "internal/debug"' in q, (
+                f"{dashboard}: debug.null needs its import to be in the query")
+            assert "filter(fn: (r) => r.dispatch_active" not in q, (
+                f"{dashboard}: the live-command test must null the value, not filter the "
+                f"row away")
 
     def test_the_series_has_its_own_override(self):
         """Without a byName override the series falls back to panel defaults -- filled area
         on the SoC axis, indistinguishable from the planned line."""
-        names = {o["matcher"]["options"]
-                 for o in self._panel()["fieldConfig"]["overrides"]}
-        assert "commanded" in names
+        for dashboard, panel in self._panels():
+            names = {o["matcher"]["options"] for o in panel["fieldConfig"]["overrides"]}
+            assert "commanded" in names, dashboard
 
 
 class TestDecisionPanel:
@@ -431,16 +513,23 @@ class TestDecisionPanel:
     dry-run day is unobservable from the dashboard, which is the state it shipped in.
     """
 
-    def _panel(self):
-        plan = json.loads((DASHBOARDS / "alphaess-battery-plan.json").read_text())
-        return next(p for p in plan["panels"] if p.get("title") == "Decision")
+    def _panels(self):
+        """Every stat reading `slot_action`, wherever it lives and whatever it is called.
+
+        There are two of these now -- Battery Plan's and the Dispatch dashboard's -- and
+        until this change the guards below tested the first one twice and the second never.
+        """
+        found = _panels_reading("slot_action")
+        assert found, "no stat reads `slot_action` -- the guard found nothing"
+        return found
 
     def test_it_reads_the_decision_not_the_readback(self):
         """The whole point. `action` and `setpoint_w` are the inverter's account of itself
         and are constant through a dry run; `slot_action` is the dispatcher's."""
-        query = " ".join(t["query"] for t in self._panel()["targets"])
-        assert '_field == "slot_action"' in query
-        assert '_field == "action"' not in query
+        for dashboard, title, panel in self._panels():
+            query = " ".join(t["query"] for t in panel["targets"])
+            assert '_field == "slot_action"' in query, f"{dashboard} / {title}"
+            assert '_field == "action"' not in query, f"{dashboard} / {title}"
 
     def test_no_slot_does_not_render_as_a_fault(self):
         """`slot_action` is conditional -- `state.py` writes it only while a slot is active.
@@ -455,13 +544,16 @@ class TestDecisionPanel:
         The loud case is not lost: `action` IS written unconditionally, so `Dispatch state`
         beside it still shouts NO DISPATCHER when the loop actually stops.
         """
-        defaults = self._panel()["fieldConfig"]["defaults"]
-        base = next(s for s in defaults["thresholds"]["steps"] if s["value"] is None)
-        assert base["color"] != "red", (
-            "the base step colours noValue, and noValue here means 'nothing scheduled right "
-            "now' -- a normal rest, not a dead dispatcher")
-        assert defaults["noValue"] == "no slot", (
-            "an unlabelled blank reads as a broken panel; say which absence this is")
+        for dashboard, title, panel in self._panels():
+            defaults = panel["fieldConfig"]["defaults"]
+            base = next(s for s in defaults["thresholds"]["steps"] if s["value"] is None)
+            assert base["color"] != "red", (
+                f"{dashboard} / {title}: the base step colours noValue, and noValue here "
+                f"means 'nothing scheduled right now' -- a normal rest, not a dead "
+                f"dispatcher")
+            assert defaults["noValue"] == "no slot", (
+                f"{dashboard} / {title}: an unlabelled blank reads as a broken panel; say "
+                f"which absence this is")
 
     def test_it_maps_every_action_the_translator_can_emit(self):
         """An unmapped action renders in the base colour and reads as nothing in particular.
@@ -486,5 +578,7 @@ class TestDecisionPanel:
                    for c, d, i, e in cases}
         assert len(emitted) > 1, "the cases collapsed to one action -- guard is vacuous"
 
-        mapped = set(self._panel()["fieldConfig"]["defaults"]["mappings"][0]["options"])
-        assert emitted <= mapped, f"unmapped decisions: {sorted(emitted - mapped)}"
+        for dashboard, title, panel in self._panels():
+            mapped = set(panel["fieldConfig"]["defaults"]["mappings"][0]["options"])
+            assert emitted <= mapped, (
+                f"{dashboard} / {title}: unmapped decisions {sorted(emitted - mapped)}")
