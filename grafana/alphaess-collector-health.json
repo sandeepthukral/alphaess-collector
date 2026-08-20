@@ -807,6 +807,222 @@
       ],
       "title": "Outages",
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Per-day sample coverage, recomputed here from raw power_readings rather than read from daily_cost/daily_energy -- those measurements silently drop any day under 96% coverage (the quality gate in pricing.py/efficiency.py) instead of writing a low number, so the days worth investigating are exactly the ones invisible there. Days are Netherlands calendar days (Europe/Amsterdam, DST-aware), matching day_window_utc() in pricing.py, so a red row here is the same day excluded from those dashboards. 'Gaps > 90s' counts inter-sample gaps over 3x the 30s poll interval; Coverage % charges only the excess above one interval for each such gap, plus any unsampled time before the first sample or after the last of the day -- identical accounting to pricing.compute_day()/efficiency.coverage_of(). Today's row, and any row the time picker cuts into mid-day, is judged against its elapsed portion of the day, not a fixed 24h. A day with literally zero samples (the collector fully down, not just flaky) has no row here at all -- check 'Failed polls' / 'Since last failure' above for that case.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false,
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "_time"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Date"
+              },
+              {
+                "id": "unit",
+                "value": "time:YYYY-MM-DD"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "coverage_pct"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Coverage %"
+              },
+              {
+                "id": "unit",
+                "value": "percent"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "red",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 96
+                    },
+                    {
+                      "color": "green",
+                      "value": 99
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_gap_s"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Max gap (s)"
+              },
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 130
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 300
+                    },
+                    {
+                      "color": "red",
+                      "value": 1800
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "gap_count"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Gaps > 90s"
+              },
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 21
+      },
+      "id": 9,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": [
+          {
+            "desc": true,
+            "displayName": "Date"
+          }
+        ]
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"date\"\nimport \"timezone\"\n\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\n// Same accounting as pricing.compute_day() / efficiency.coverage_of(): cadence\n// drift and the odd skipped poll never count as missing, only gaps beyond 3x\n// the poll interval (charged at gap - pollIntervalS each), plus any unsampled\n// head/tail of the day.\n//\n// Every conditional below is written on a single physical line, and every\n// intermediate value is its own `map()` stage rather than a local variable --\n// Grafana's bundled Flux parser errors on multi-line if/then/else and on\n// block-bodied functions with local `x = ...` assignments (confirmed against\n// the live instance; both are otherwise-valid Flux, just not accepted here).\npollIntervalS = 30.0\ngapThresholdS = 90.0\n\nsamples = from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"soc_percent\")\n  |> group()\n  |> sort(columns: [\"_time\"])\n\n// One row per Amsterdam calendar day (DST-aware, via option location). For\n// each day: first/last sample time, the largest inter-sample gap, how many\n// gaps exceeded gapThresholdS, and the total charged \"outage\" seconds. The\n// gap since the previous sample is recomputed inline wherever it is needed --\n// a record literal's fields cannot see each other, so there is no way to name\n// it once.\ndaily = samples\n  |> aggregateWindow(\n      every: 1d,\n      timeSrc: \"_start\",\n      createEmpty: false,\n      fn: (tables=<-, column) => tables\n        |> sort(columns: [\"_time\"])\n        |> reduce(\n            identity: {count: 0, first_time: time(v: 0), last_time: time(v: 0), prev_time: time(v: 0), max_gap: 0.0, gap_count: 0, outage: 0.0},\n            fn: (r, accumulator) => ({count: accumulator.count + 1, first_time: (if accumulator.count == 0 then r._time else accumulator.first_time), last_time: r._time, prev_time: r._time, max_gap: (if accumulator.count == 0 then accumulator.max_gap else if (float(v: int(v: r._time) - int(v: accumulator.prev_time)) / 1000000000.0) > accumulator.max_gap then (float(v: int(v: r._time) - int(v: accumulator.prev_time)) / 1000000000.0) else accumulator.max_gap), gap_count: accumulator.gap_count + (if accumulator.count > 0 and (float(v: int(v: r._time) - int(v: accumulator.prev_time)) / 1000000000.0) > gapThresholdS then 1 else 0), outage: accumulator.outage + (if accumulator.count > 0 and (float(v: int(v: r._time) - int(v: accumulator.prev_time)) / 1000000000.0) > gapThresholdS then (float(v: int(v: r._time) - int(v: accumulator.prev_time)) / 1000000000.0) - pollIntervalS else 0.0)})\n        )\n    )\n\n// Coverage denominator: the day's own [local midnight, next local midnight)\n// clipped to the selected time range and to now(). An in-progress day (or a\n// day the picker only partly covers) is judged on its elapsed portion, not a\n// fixed 24h. For a fully-contained past day this reduces to the plain day\n// length (23h/25h on a DST-transition day). Built as a chain of single-field\n// `map()` stages -- each one references only fields an earlier stage already\n// added -- rather than local variables, for the parser reason noted above.\nresult = daily\n  |> map(fn: (r) => ({r with day_end: date.add(d: 1d, to: r._time)}))\n  |> map(fn: (r) => ({r with range_start: (if r._time > v.timeRangeStart then r._time else v.timeRangeStart)}))\n  |> map(fn: (r) => ({r with range_end_a: (if r.day_end < v.timeRangeStop then r.day_end else v.timeRangeStop)}))\n  |> map(fn: (r) => ({r with range_end: (if r.range_end_a < now() then r.range_end_a else now())}))\n  |> map(fn: (r) => ({r with day_len_s: float(v: int(v: r.range_end) - int(v: r.range_start)) / 1000000000.0}))\n  |> map(fn: (r) => ({r with head_s: (if r.first_time > r.range_start then float(v: int(v: r.first_time) - int(v: r.range_start)) / 1000000000.0 else 0.0)}))\n  |> map(fn: (r) => ({r with tail_s: (if r.range_end > r.last_time then float(v: int(v: r.range_end) - int(v: r.last_time)) / 1000000000.0 else 0.0)}))\n  |> map(fn: (r) => ({r with raw_coverage_pct: (if r.day_len_s > 0.0 then (1.0 - (r.head_s + r.tail_s + r.outage) / r.day_len_s) * 100.0 else 0.0)}))\n  |> map(fn: (r) => ({r with coverage_pct: (if r.raw_coverage_pct > 0.0 then r.raw_coverage_pct else 0.0)}))\n  |> map(fn: (r) => ({_time: r._time, coverage_pct: r.coverage_pct, max_gap_s: r.max_gap, gap_count: r.gap_count}))\n  |> sort(columns: [\"_time\"], desc: true)\n  |> yield(name: \"coverage_by_day\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Sample coverage by day",
+      "type": "table"
     }
   ],
   "preload": false,
@@ -828,6 +1044,6 @@
   "timezone": "browser",
   "title": "Collector Health",
   "uid": "alphaess-collector-health",
-  "version": 3,
+  "version": 8,
   "weekStart": ""
 }
