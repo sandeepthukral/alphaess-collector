@@ -75,6 +75,17 @@ MONITOR_URLS = {
 # there for, a derate, is exactly the case where the number changes mid-run.
 LIMITS_REFRESH_S = 3600
 
+# A house that is neither generating nor drawing more than this. Anything past it from the
+# measurement registers is a decode error, not a reading: the site is a 5 kW inverter behind a
+# 3x25 A connection.
+IMPLAUSIBLE_POWER_W = 30000
+
+# How long to wait before re-reading a dispatch block that did not verify. Long enough for the
+# inverter to finish ingesting a block written milliseconds earlier, short enough to be
+# invisible inside a 60 s loop -- and it is only ever paid on a tick that was about to raise an
+# alarm anyway.
+VERIFY_RETRY_DELAY_S = 0.5
+
 
 def _id_kwarg() -> str:
     """pymodbus renamed slave= to device_id=. Detected rather than pinned, because the
@@ -182,7 +193,8 @@ def configure_logging(retention_days: int, verbose: bool):
     log.setLevel(logging.DEBUG if verbose else logging.INFO)
 
 
-def write_heartbeat(decision: S.Decision, state: dict | None, live_soc: float | None):
+def write_heartbeat(decision: S.Decision, state: dict | None, live_soc: float | None,
+                    surplus_w: float | None = None):
     """Written every tick, dry-run or live.
 
     This answers the one question no register can: is the process alive and looking at the
@@ -198,6 +210,7 @@ def write_heartbeat(decision: S.Decision, state: dict | None, live_soc: float | 
         "fresh": decision.fresh,
         "slot": decision.slot,
         "live_soc_pct": live_soc,
+        "surplus_w": surplus_w,
         "readback": state,
     }
     tmp = HEARTBEAT_PATH.with_suffix(".tmp")
@@ -326,7 +339,32 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         log.warning("SoC read failed: %s", e)
         live_soc, read_error = None, str(e)
 
-    decision = S.decide(cache.get("doc"), now, live_soc, cache.get("error", ""))
+    # Surplus generation, for the one decision that needs to know whether the sun is beating
+    # the house: a charge whose target is already met freezes the battery, and freezing while
+    # PV is spilling exports free solar (`slots._charge_target_reached`).
+    #
+    # Two registers rather than the grid meter alone, because grid power moves when we act and
+    # generation-minus-load does not -- the identity and the measurements are in
+    # `slots.SURPLUS_HARVEST_W`. A failed read is None, not zero: None falls back to the old
+    # freeze, zero would claim the house is eating everything it makes.
+    try:
+        grid_w = await inv.read(R.REG_GRID_POWER, 2, signed=True)
+        batt_w = await inv.read(R.REG_BATTERY_POWER, signed=True)
+        surplus_w = -(grid_w + batt_w)
+        log.debug("surplus: grid=%+dW battery=%+dW -> %+dW", grid_w, batt_w, surplus_w)
+        if abs(grid_w) > IMPLAUSIBLE_POWER_W or abs(batt_w) > IMPLAUSIBLE_POWER_W:
+            # Neither register has ever been read by this process before 2026-08-20, so their
+            # scale is documented rather than observed. A decode that is wrong by a factor is
+            # the failure this guard is for, and the honest response is None -- the same
+            # fallback as an unreadable register, i.e. the pre-existing freeze.
+            log.warning("implausible power reading (grid=%+dW battery=%+dW) -- ignoring the "
+                        "surplus rule this tick", grid_w, batt_w)
+            surplus_w = None
+    except OSError as e:
+        log.warning("surplus read failed: %s -- a met charge target will hold, not release", e)
+        surplus_w = None
+
+    decision = S.decide(cache.get("doc"), now, live_soc, cache.get("error", ""), surplus_w)
 
     # 5. Hijack check, before we overwrite the evidence.
     try:
@@ -399,6 +437,34 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         cmd = cache.get("last_written")
         ok = bool(verified["dispatch_active"]) and cmd is not None and S.matches_command(
             verified, cmd)
+
+        if not ok and not inv.dry_run:
+            # ONE RE-READ BEFORE CRYING WOLF. The block does not update atomically: START is
+            # written last and lands first, so a readback taken microseconds later can show
+            # `dispatch_active=1` beside a `mode` and `power` the device has not ingested yet.
+            #
+            # OBSERVED 2026-08-20 15:16:29Z, the first tick after a rebuild: wrote
+            # mode=2 +4848 W to 90.5 %, read back `mode=0 power=0 duration=90` with
+            # dispatch_active already 1 -- the half-applied state of a block that was released
+            # a second earlier by the outgoing container. The next tick read mode 2 at 4,848 W
+            # and every tick since has verified.
+            #
+            # It matters because of what it costs when it is wrong: monitor #6 means "the
+            # inverter is refusing our writes", and a DOWN on every single deploy is how a
+            # monitor becomes something you scroll past. The retry is a READ, so it cannot
+            # change what the battery is doing -- and if the second read still disagrees, the
+            # alarm below fires exactly as it did before and now means what it says.
+            await asyncio.sleep(VERIFY_RETRY_DELAY_S)
+            try:
+                raw_words = await inv.read_raw_block()
+                verified = R.decode_block(raw_words)
+                ok = bool(verified["dispatch_active"]) and S.matches_command(verified, cmd)
+                if ok:
+                    log.info("write verified on re-read after %.1f s -- the block was "
+                             "mid-ingest on the first look", VERIFY_RETRY_DELAY_S)
+            except OSError as e:
+                log.warning("verify re-read failed: %s", e)
+
         if not ok and not inv.dry_run:
             # Monitor #6. A write that silently does not land is the failure this whole
             # design fears most: every log line says "commanded", the battery does nothing,
@@ -439,7 +505,7 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
                     read_error=read_error or "no readback this tick"),
                 now=now)
 
-    write_heartbeat(decision, verified, live_soc)
+    write_heartbeat(decision, verified, live_soc, surplus_w)
 
     # 10. Report to Kuma. Last, so every ping describes a completed tick rather than one in
     # progress -- and after the heartbeat file, which is the check that must never depend on

@@ -88,6 +88,14 @@ class TestFreshness:
         assert not fresh
         assert "5.0 h old" in why
 
+    def test_the_age_limit_is_two_missed_planner_runs(self):
+        """The number tracks the planner's cadence, not the clock. It runs hourly (confirmed
+        2026-08-20: `plan_run` at :05 past every hour, unbroken over 30 h), so two hours is
+        the same "one run may be late, two and the battery falls back" rule the original 4 h
+        encoded when the planner ran 3-hourly."""
+        assert S.MAX_PLAN_AGE == dt.timedelta(hours=2)
+        assert not S.freshness(doc(generated_at=T0 - dt.timedelta(hours=2, minutes=1)), T0)[0]
+
     def test_exactly_at_the_age_limit_is_still_fresh(self):
         at_limit = doc(generated_at=T0 - S.MAX_PLAN_AGE)
         assert S.freshness(at_limit, T0)[0]
@@ -208,7 +216,7 @@ class TestDecide:
 
 
 class TestDirectionRuleAgainstLiveSoc:
-    """The plan's trajectory was a forecast made up to three hours ago; the battery is where
+    """The plan's trajectory was a forecast made up to an hour ago; the battery is where
     it actually is."""
 
     def test_a_discharge_below_live_soc_proceeds(self):
@@ -223,11 +231,21 @@ class TestDirectionRuleAgainstLiveSoc:
         """The SoC register steps in 0.4 % and the measurement reads to 0.1 %, so a target
         within a hair of live SoC is a command to do nothing -- which the inverter accepts,
         leaving every monitor green while nothing happens."""
-        d = S.decide(doc(), T0, 20.5)
+        d = S.decide(doc(), T0, 20.3)
         assert d.command.mode == DispatchMode.FOLLOW
 
     def test_just_outside_the_deadband_proceeds(self):
-        assert S.decide(doc(), T0, 21.5).command.mode == DispatchMode.SOC_TARGET
+        assert S.decide(doc(), T0, 20.5).command.mode == DispatchMode.SOC_TARGET
+
+    def test_the_deadband_is_one_register_step_and_not_a_tolerance(self):
+        """1.0 % is 279 Wh on this pack -- three and a half minutes of a full-rate charge, so
+        a deadband that wide ends every charge slot early rather than suppressing a no-op.
+        Measured 2026-08-20: a 65.3 % target abandoned at 64.4 %, 5.5 minutes before the slot
+        ended, with 2.6 kW of PV exported for the rest of it."""
+        assert S.SOC_DEADBAND_PCT == 0.4
+        d = doc(slots=[{"start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:15:00Z",
+                        "action": "charge", "power_w": 4848, "target_soc": 65.3}])
+        assert S.decide(d, T0, 64.4).command.mode == DispatchMode.SOC_TARGET
 
     def test_a_charge_target_below_live_soc_holds_instead(self):
         d = doc(slots=[{"start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:15:00Z",
@@ -235,6 +253,74 @@ class TestDirectionRuleAgainstLiveSoc:
         decision = S.decide(d, T0, 62.0)
         assert decision.command.mode == DispatchMode.FOLLOW
         assert "not above live SoC" in decision.reason
+
+
+class TestAPlanHoldHarvestsRatherThanFreezes:
+    """A hold freezes the battery, so a hold while the sun beats the house exports the
+    difference. The plan decides holds on the forecast the archive shows to be least reliable
+    -- PV, ~2.3x low in the late afternoon -- so measured surplus overrides it. A release can
+    only absorb generation that already exists, so the override cannot spend money."""
+
+    HOLD = doc(slots=[{"start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:15:00Z",
+                       "action": "hold"}])
+
+    def test_surplus_releases_the_plans_own_hold(self):
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=2600.0)
+        assert d.kind == "release"
+        assert d.command is None
+        assert "2600 W" in d.reason
+
+    def test_no_surplus_holds_at_zero_watts(self):
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=-400.0)
+        assert d.kind == "command"
+        assert d.command.mode == DispatchMode.FOLLOW
+        assert d.command.power_w == 0
+        assert d.command.target_soc_pct is None
+
+    def test_an_unreadable_power_register_holds(self):
+        assert S.decide(self.HOLD, T0, 50.0, surplus_w=None).kind == "command"
+
+    def test_a_hold_needs_no_live_soc_to_be_released(self):
+        """The direction rule is what needs live SoC; a release has no target to check
+        against, so an unreadable SoC register must not cost the harvest."""
+        assert S.decide(self.HOLD, T0, None, surplus_w=2600.0).kind == "release"
+
+
+class TestAMetChargeTargetHarvestsRatherThanFreezes:
+    """A charge slot whose target the battery has already reached used to freeze it at 0 W,
+    which exports every watt of surplus PV for the rest of the slot. See
+    `slots._charge_target_reached`."""
+
+    CHARGE = doc(slots=[{"start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:15:00Z",
+                         "action": "charge", "power_w": 4848, "target_soc": 60.0}])
+
+    def test_surplus_generation_releases_to_self_consumption(self):
+        d = S.decide(self.CHARGE, T0, 62.0, surplus_w=2600.0)
+        assert d.kind == "release"
+        assert d.command is None
+        assert "2600 W" in d.reason
+
+    def test_no_surplus_still_freezes(self):
+        """Releasing with the house drawing more than it makes would spend the charge the
+        plan just paid for."""
+        d = S.decide(self.CHARGE, T0, 62.0, surplus_w=-800.0)
+        assert d.kind == "command"
+        assert d.command.mode == DispatchMode.FOLLOW
+        assert d.command.power_w == 0
+
+    def test_a_trickle_of_surplus_is_not_worth_a_release(self):
+        assert S.decide(self.CHARGE, T0, 62.0, surplus_w=150.0).kind == "command"
+
+    def test_an_unreadable_power_register_freezes(self):
+        """None is not zero and not a guess: no reading means the pre-existing behaviour."""
+        assert S.decide(self.CHARGE, T0, 62.0, surplus_w=None).kind == "command"
+
+    def test_surplus_does_not_rescue_a_discharge_target_already_met(self):
+        """The rule is about a battery that should be FULLER than it is. A discharge slot
+        whose target is met wants the battery held where it is."""
+        d = S.decide(doc(), T0, 19.0, surplus_w=2600.0)
+        assert d.kind == "command"
+        assert d.command.mode == DispatchMode.FOLLOW
 
 
 class TestClamp:
