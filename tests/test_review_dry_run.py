@@ -18,25 +18,14 @@ to gate going live. The classifier below is the fix, and these are the cases tha
 from __future__ import annotations
 
 import datetime as dt
-import importlib.util
-import pathlib
 
 import pytest
 
 import reliability
+from conftest import REPO, load_script
 
-REPO = pathlib.Path(__file__).resolve().parent.parent
-
-
-def _load(name: str, filename: str):
-    spec = importlib.util.spec_from_file_location(name, REPO / "scripts" / filename)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-
-review = _load("review_dry_run", "review-dry-run.py")
-deciding = _load("is_it_deciding", "is-it-deciding.py")
+review = load_script("review_dry_run", "review-dry-run.py")
+deciding = load_script("is_it_deciding", "is-it-deciding.py")
 
 BASE = dt.datetime(2026, 8, 18, 0, 0, tzinfo=dt.UTC)
 
@@ -68,6 +57,44 @@ def samples(*, hole_from: float | None = None, hole_to: float | None = None,
     return out
 
 
+def slot_rows(action: str | None = "hold", *, minutes: int = 5, **extra) -> list[dict]:
+    """`minutes` consecutive ticks all deciding the same slot action.
+
+    `action=None` writes NO `slot_action` field, which is the real shape of a tick outside
+    the plan's horizon -- `decision_runs` reads that as `self`, and that is the run the
+    divergence check skips.
+    """
+    out = []
+    for m in range(minutes):
+        row = {"_time": at(m), "action": "no dispatch", **extra}
+        if action is not None:
+            row["slot_action"] = action
+        out.append(row)
+    return out
+
+
+def flat(w: float, *, total: float = 40) -> list[tuple[dt.datetime, float]]:
+    """The collector's series holding a constant power.
+
+    THE SIGN IS THE COLLECTOR'S, not the dashboard's: `battery_power_w` is positive while
+    the battery DISCHARGES. `analyse` flips it once so both sides of the comparison are
+    charging-positive, and the tests below straddle that flip on purpose.
+    """
+    return [(at(m), w) for m in range(int(total))]
+
+
+def pcts(pct: float, *, total: float = 40) -> list[tuple[dt.datetime, float]]:
+    """A flat SoC series, in PERCENT -- `rendered`'s default, and its own unit.
+
+    It used to default to `samples()`, a power series in watts. That was invisible while
+    every run was a hold, because the floor check reads SoC only under a discharge; the
+    first discharge test would have read -500 "percent", fired `discharge_below_floor`, and
+    blamed the code. A fixture whose units are wrong only under the case you have not
+    written yet is worse than no fixture.
+    """
+    return [(at(m), pct) for m in range(int(total))]
+
+
 def classify(tick_rows, battery):
     """(faults, stalls) for a set of ticks against a collector series, as rendered."""
     found = rendered(tick_rows, battery)
@@ -78,7 +105,7 @@ def rendered(tick_rows, battery, soc=None):
     """{severity: [sentence]} -- the analysis run through the page's own renderer."""
     runs = reliability.decision_runs(tick_rows)
     found = reliability.by_severity(reliability.analyse(
-        tick_rows, runs, battery, samples() if soc is None else soc,
+        tick_rows, runs, battery, pcts(50.0) if soc is None else soc,
         reliability.DEFAULT_SOC_FLOOR))
     return {sev: [review.render(f) for f in fs] for sev, fs in found.items()}
 
@@ -266,3 +293,133 @@ class TestDegradedTicks:
     def test_a_clean_day_reports_nothing_degraded(self):
         found = rendered(ticks(gap_at=99, gap_minutes=0), samples())
         assert found["degraded"] == []
+
+
+class TestPlanAge:
+    """`plan_age_s`, and the stale-plan fault built on it.
+
+    The tags are not comparable as strings -- runs written before 2026-07-30 carry `+02:00`
+    where later ones carry `Z` -- which is why this goes through `plan.run_time` rather than
+    subtracting text. `TODO.md` item 4 is the same trap, still live in
+    `test_dispatch_goldens.py`.
+    """
+
+    def test_a_tick_that_named_no_plan_has_no_age(self):
+        # None rather than 0, and the distinction is load-bearing: `analyse` filters these
+        # out before the comparison, and `None > STALE_PLAN_S` is a TypeError, not a False.
+        assert reliability.plan_age_s({"_time": at(0)}) is None
+        assert reliability.plan_age_s({"_time": at(0), "plan_run": ""}) is None
+
+    def test_a_fresh_plan_is_not_stale(self):
+        found = rendered(slot_rows(plan_run="2026-08-17T23:30:00Z"), samples())
+        assert found["fault"] == []
+
+    def test_an_old_plan_is_a_fault_reporting_the_worst_age(self):
+        found = rendered(slot_rows(plan_run="2026-08-17T20:00:00Z"), samples())
+        assert len(found["fault"]) == 1
+        assert "5 tick(s) acted on a plan over 2 h old" in found["fault"][0]
+        # Four minutes past four hours, on the last of the five ticks.
+        assert "worst 4.1 h" in found["fault"][0]
+
+    def test_the_offset_spelling_is_read_as_an_instant_not_as_text(self):
+        """The archive's other spelling, chosen to straddle the threshold.
+
+        `23:30+02:00` is `21:30Z`, so these ticks acted on a plan 2.5 h old and are stale.
+        Read the tag as if the offset were not there and it is 30 minutes old and fine --
+        so this test flips outright if `run_time` is ever replaced by naive parsing.
+        """
+        found = rendered(slot_rows(plan_run="2026-08-17T23:30:00+02:00"), samples())
+        assert len(found["fault"]) == 1
+        assert "worst 2.6 h" in found["fault"][0]
+
+
+class TestDischargeBelowFloor:
+    """`slots.decide()` refuses a discharge below the floor, so one decided here is a
+    translator bug -- the only decision on the page that is a fault rather than a preview.
+    """
+
+    def test_a_discharge_under_the_floor_is_a_fault(self):
+        found = rendered(slot_rows("discharge"), flat(500.0), soc=pcts(8.0))
+        assert len(found["fault"]) == 1
+        assert "discharge decided at 8.0% SoC" in found["fault"][0]
+        assert "below the 10% floor" in found["fault"][0]
+
+    def test_a_discharge_above_the_floor_is_not(self):
+        found = rendered(slot_rows("discharge"), flat(500.0), soc=pcts(50.0))
+        assert found["fault"] == []
+
+    def test_only_a_discharge_is_measured_against_the_floor(self):
+        # Charging at 8% is not a fault, it is the whole point. A check that fired on any
+        # low-SoC run would flag every winter morning.
+        found = rendered(slot_rows("charge"), flat(-500.0), soc=pcts(8.0))
+        assert found["fault"] == []
+
+    def test_the_floor_is_the_callers_and_not_a_constant(self):
+        # `--soc-floor` exists because the inverter's own floor is configurable. Asserted
+        # against `analyse` directly: the sentence renders `DEFAULT_SOC_FLOOR` either way.
+        rows = slot_rows("discharge")
+        runs = reliability.decision_runs(rows)
+
+        def kinds(floor):
+            return [f.kind for f in reliability.analyse(
+                rows, runs, flat(500.0), pcts(8.0), floor)]
+
+        assert "discharge_below_floor" not in kinds(5.0)
+        assert "discharge_below_floor" in kinds(20.0)
+
+
+class TestDivergence:
+    """What going live would have CHANGED -- a preview, not a fault.
+
+    Every case here turns on the sign flip in `analyse`: the collector reports discharge as
+    positive and `setpoint_w` reports charge as positive, so the comparison is wrong by a
+    whole direction if that flip is dropped.
+    """
+
+    def test_a_hold_against_a_moving_battery_is_a_preview(self):
+        # The largest behaviour change the page reports, and the easiest to overlook,
+        # because "hold" sounds like "do nothing".
+        found = rendered(slot_rows("hold"), flat(-500.0), soc=pcts(50.0))
+        assert found["fault"] == []
+        assert len(found["preview"]) == 1
+        assert "frozen at 0 W" in found["preview"][0]
+
+    def test_a_hold_against_an_idle_battery_is_not(self):
+        found = rendered(slot_rows("hold"), flat(-10.0), soc=pcts(50.0))
+        assert found["preview"] == []
+
+    def test_a_charge_the_battery_was_already_doing_is_not_a_preview(self):
+        found = rendered(slot_rows("charge"), flat(-500.0), soc=pcts(50.0))
+        assert found["preview"] == []
+
+    def test_a_charge_against_a_discharging_battery_is(self):
+        """The sign convention, pinned end to end.
+
+        The collector says +500 (discharging); the page must say -500 W, having flipped it
+        into the charging-positive frame every other number on the dashboard uses. Drop the
+        flip and this reads `+500 W` against a decision to charge -- agreement, reported.
+        """
+        found = rendered(slot_rows("charge"), flat(500.0), soc=pcts(50.0))
+        assert len(found["preview"]) == 1
+        assert "-500 W" in found["preview"][0]
+
+    def test_a_discharge_the_battery_was_already_doing_is_not_a_preview(self):
+        found = rendered(slot_rows("discharge"), flat(500.0), soc=pcts(50.0))
+        assert found["preview"] == []
+
+    def test_self_is_skipped_because_it_is_a_deliberate_release(self):
+        # No `slot_action` at all, which is what a tick outside the horizon looks like. The
+        # battery running self-consumption under it is the decision being HONOURED, so there
+        # is nothing going live would change.
+        found = rendered(slot_rows(None), flat(-500.0), soc=pcts(50.0))
+        assert found["preview"] == []
+
+
+def test_by_severity_has_every_severity_even_with_nothing_to_report():
+    """The good day, which is the one nobody exercises.
+
+    A renderer picks its "nothing to report" branch on an empty list; a missing key would
+    make the clean run the only run that raises.
+    """
+    assert reliability.by_severity([]) == {s: [] for s in reliability.SEVERITIES}
+    assert set(reliability.SEVERITIES) == {"fault", "preview", "stall", "degraded"}
