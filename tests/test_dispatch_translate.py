@@ -251,6 +251,75 @@ def _run(query_api, path: Path, pings: Pings, **kwargs) -> int:
                  plan_url=PLAN_URL, slots_url=SLOTS_URL, **kwargs)
 
 
+class RecordingSlotPublisher:
+    """Stands in for `slot_publisher.SlotPublisher`, and can be told to fail."""
+
+    def __init__(self, ok=True):
+        self.ok, self.docs = ok, []
+
+    def publish(self, doc) -> bool:
+        self.docs.append(doc)
+        return self.ok
+
+
+class TestRunPublishesTheSlots:
+    """The copy Grafana can read. `slots.json` is on a volume inside the container, so
+    nothing else can see what the dispatcher is about to do -- least of all when the
+    container is down, which is when the question gets asked."""
+
+    def test_a_good_run_publishes_the_document_it_wrote(self, tmp_path, pings):
+        pub = RecordingSlotPublisher()
+        assert _run(api(NOW, 8), tmp_path / "slots.json", pings, slot_publisher=pub) == 0
+        assert len(pub.docs) == 1
+        # The same object that reached the disk, not a re-derivation of it: two paths to the
+        # same answer is how the file and the dashboard come to disagree.
+        assert pub.docs[0] == json.loads((tmp_path / "slots.json").read_text())
+
+    def test_a_publish_failure_does_not_fail_the_run(self, tmp_path, pings):
+        """`slots.json` is the control path and this is a copy for looking at. A dashboard
+        that cannot be written must not stop the battery being dispatched."""
+        path = tmp_path / "slots.json"
+        assert _run(api(NOW, 8), path, pings,
+                    slot_publisher=RecordingSlotPublisher(ok=False)) == 0
+        assert json.loads(path.read_text())["slots"]
+        assert pings.by_url(SLOTS_URL)[0][0] == "up"
+
+    def test_nothing_is_published_when_the_file_could_not_be_written(
+            self, tmp_path, pings, monkeypatch):
+        """Ordering, and it is deliberate. The publish sits after `atomic_write`, so a
+        dashboard can never show a horizon the dispatcher never received.
+
+        The failure is forced at `Path.replace` because `atomic_write` creates its parent
+        directory -- a missing path is not a write failure here, which is worth knowing
+        before writing a test that assumes it is."""
+        def boom(self, *a, **kw):
+            raise OSError("no space left on device")
+
+        monkeypatch.setattr(Path, "replace", boom)
+        pub = RecordingSlotPublisher()
+        assert _run(api(NOW, 8), tmp_path / "slots.json", pings, slot_publisher=pub) == 1
+        assert pub.docs == []
+
+    def test_an_unreadable_plan_publishes_nothing(self, tmp_path, pings):
+        pub = RecordingSlotPublisher()
+        assert _run(FakeQueryApi([], error=PlanFormatError("boom")),
+                    tmp_path / "slots.json", pings, slot_publisher=pub) == 1
+        assert pub.docs == []
+
+    def test_a_dry_run_publishes_nothing(self, tmp_path, pings):
+        """`--dry-run` means "write nothing", and a reader who trusted it while it quietly
+        rewrote a measurement would be right to feel misled."""
+        pub = RecordingSlotPublisher()
+        assert _run(api(NOW, 8), tmp_path / "slots.json", pings,
+                    slot_publisher=pub, dry_run=True) == 0
+        assert pub.docs == []
+
+    def test_no_publisher_is_the_normal_laptop_case(self, tmp_path, pings):
+        """Optional on purpose, unlike the query api: that is the only input the control path
+        has, this is observability."""
+        assert _run(api(NOW, 8), tmp_path / "slots.json", pings, slot_publisher=None) == 0
+
+
 class TestRun:
     def test_a_good_run_writes_the_file_and_pings_both_monitors(self, tmp_path, pings):
         path = tmp_path / "slots.json"
