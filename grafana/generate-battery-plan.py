@@ -378,13 +378,14 @@ panels = []
 # --- Row 1: six stats -------------------------------------------------------------------
 panels.append(stat(
     1, "Plan age",
-    "Time since the newest plan was made. The schedule runs every 3 hours, so anything past "
-    "4 hours means a run did not fire - which is otherwise silent, because a stale plan still "
-    "renders perfectly well.",
+    "Time since the newest plan was made. The schedule runs hourly, so orange at 90 minutes "
+    "means a run did not fire - which is otherwise silent, because a stale plan still renders "
+    "perfectly well. Red is 2 hours, which is where the dispatcher stops following the plan "
+    "at all and lets the battery fall back to self-consumption (slots.MAX_PLAN_AGE).",
     PLAN_AGE, "s", 0, 0, 4,
     [{"color": "green", "value": None},
-     {"color": "orange", "value": 12600},
-     {"color": "red", "value": 14400}]))
+     {"color": "orange", "value": 5400},
+     {"color": "red", "value": 7200}]))
 
 # The two live readings below are the only panels here that come from the battery rather than
 # from the plan: what it is doing right now, beside what the plan says it should be doing.
@@ -757,20 +758,44 @@ panels.append({
 # --- Panel: planned vs actual SoC -------------------------------------------------------
 panels.append(timeseries(
     5, "Planned SoC vs actual SoC",
-    "The plan running ahead of the measured line. Nothing executes the plan - the battery "
-    "follows its own self-consumption logic - so the gap between the two lines is the "
-    "question this whole project exists to answer, not a fault to be corrected.",
+    "Three lines on the same instant. 'planned' is the plan's SoC at the END of each "
+    "interval, shifted onto that end so it lines up with a measurement taken there; "
+    "'actual' is the last reading in each 5-minute window, not a quarter-hour average, so a "
+    "battery that stopped mid-slot shows as a flat stretch rather than a gentler slope. "
+    "Both are drawn straight between points because SoC ramps; the two step lines are the "
+    "ones that genuinely hold a value. Read the gaps: "
+    "commanded against planned is a dispatcher problem, actual against commanded is a "
+    "delivery one. A step-shaped gap of exactly one interval used to be a charting "
+    "artefact and no longer is.",
+    # BOTH SERIES ARE SHIFTED ONTO THE SAME INSTANT, and before 2026-08-20 neither was --
+    # which is why this chart showed the battery running a quarter-hour behind a plan it was
+    # in fact following. Two independent offsets, in the same direction:
+    #
+    #   `soc_wh` is the SoC at the END of its interval (see dispatch/plan.py) but the point is
+    #   stamped at the interval's START, so drawing it raw puts the plan 15 minutes early.
+    #   `timeShift` moves it to the instant it actually describes.
+    #
+    #   `aggregateWindow` stamps at the window's END, so a MEAN over 15 minutes lands the
+    #   average of 15:00-15:15 on 15:15 -- a further ~7 minutes of apparent lag, and it flattens
+    #   the steps a rising SoC actually makes. `last` is the SoC at that instant, which is what
+    #   the plan's number is too.
+    #
+    # The shift is a literal 15m rather than the plan's own cadence because Flux cannot derive
+    # a duration from the data. Plans before the 15-minute MTU (2025-10-01) were hourly and
+    # would need 1h; nothing writes those any more, and the dispatcher infers the real cadence
+    # from the data rather than trusting this (dispatch/plan.py:interval_minutes).
     [target(NEWEST + '''
 from(bucket: "planning")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
   |> filter(fn: (r) => r._measurement == "plan" and r.plan_run == newest and r._field == "soc_wh")
+  |> timeShift(duration: 15m)
   |> map(fn: (r) => ({ _time: r._time, "planned": r._value / float(v: ${capacity_wh}) * 100.0 }))
   |> yield(name: "planned")
 ''', "A"),
      target('''from(bucket: "alphaess")
   |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
   |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "soc_percent")
-  |> aggregateWindow(every: 15m, fn: mean, createEmpty: false)
+  |> aggregateWindow(every: 5m, fn: last, createEmpty: false)
   |> map(fn: (r) => ({ _time: r._time, "actual": r._value }))
   |> yield(name: "actual")
 ''', "B"),
@@ -812,9 +837,25 @@ from(bucket: "alphaess")
   |> yield(name: "commanded")
 ''', "D")],
     14, 9, "percent",
-    [series_override("planned", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}}]),
+    # LINEAR, against the panel's stepAfter default, and only on these two.
+    #
+    # A step is the honest shape for a value that is CONSTANT across an interval and jumps at
+    # its edge -- which is what `commanded` (a register, held until rewritten) and `reserve`
+    # (a floor, per interval) are. SoC is not that. It ramps continuously while the battery
+    # charges, and both of these lines are point measurements of that ramp at interval ends,
+    # so joining them straight is closer to the truth than a staircase that claims the SoC sat
+    # still for fifteen minutes and then teleported.
+    #
+    # It also stops the staircase reading as a lag, which is what it did before 2026-08-20:
+    # stepAfter holds a point's value FORWARD, so a plan point stamped at the interval start
+    # (and carrying the interval's END SoC, see the query comment above) drew a tread sitting
+    # a whole interval ahead of the battery. Shifting the series fixed where it sits; drawing
+    # it linear stops the remaining tread from re-suggesting the same thing.
+    [series_override("planned", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
+                                 {"id": "custom.lineInterpolation", "value": "linear"}]),
      series_override("actual", [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}},
-                                {"id": "custom.fillOpacity", "value": 0}]),
+                                {"id": "custom.fillOpacity", "value": 0},
+                                {"id": "custom.lineInterpolation", "value": "linear"}]),
      series_override("commanded", [{"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}},
                                    {"id": "custom.fillOpacity", "value": 0},
                                    {"id": "custom.lineStyle",
