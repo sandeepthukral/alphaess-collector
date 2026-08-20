@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -51,6 +52,43 @@ def doc(**kw) -> dict:
     }
 
 
+def block_registers(active=0, mode=None, power_w=0, soc_pct=0.0, duration_s=0) -> dict[int, int]:
+    """The nine DISPATCH_BLOCK words for a chosen decoded state, keyed by address."""
+    mode = R.DispatchMode.FOLLOW if mode is None else mode
+    regs: dict[int, int] = {R.REG_START: active, R.REG_MODE: mode}
+    for i, w in enumerate(R.encode_power(power_w)):
+        regs[R.REG_POWER + i] = w
+    regs[R.REG_SOC] = R.encode_soc(soc_pct)[0]
+    for i, w in enumerate(R.encode_int32(duration_s)):
+        regs[R.REG_TIME + i] = w
+    return regs
+
+
+def measurement_registers(live_soc_pct=80.0, block=None) -> dict[int, int]:
+    """A plausible, quiet house: the dispatch block plus SoC/grid/battery, released and at
+    rest, so a discharge decision's direction check (live SoC vs. target) has something to
+    compare against."""
+    regs = dict(block if block is not None else block_registers())
+    regs[R.REG_BATTERY_SOC] = round(live_soc_pct * 10)
+    regs[R.REG_GRID_POWER] = 0
+    regs[R.REG_GRID_POWER + 1] = 0
+    regs[R.REG_BATTERY_POWER] = 0
+    return regs
+
+
+def run_scripted_tick(tmp_path, monkeypatch, client, dry_run: bool, publisher,
+                      slots_doc: dict | None = None):
+    """`tick()` end-to-end against a `ScriptedClient`, mirroring `_tick` above but with a
+    client that can answer reads truthfully instead of only ever timing out."""
+    slots_path = tmp_path / "slots.json"
+    slots_path.write_text(json.dumps(slots_doc if slots_doc is not None else doc()))
+    monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+    inv = scheduler.Inverter(client, 0x55, dry_run=dry_run)
+    cache: dict = {"released": False, "publisher": publisher}
+    decision = asyncio.run(scheduler.tick(inv, slots_path, cache, T0))
+    return decision, cache
+
+
 class DeadClient:
     """A pymodbus client whose every call times out, exactly as the real one did."""
 
@@ -64,6 +102,39 @@ class DeadClient:
     async def write_registers(self, addr, values, **kw):
         self.calls += 1
         raise TIMEOUT
+
+
+class ScriptedClient:
+    """A pymodbus client backed by a plain register dict, for driving `tick()` end-to-end
+    against a CHOSEN inverter state -- as opposed to `DeadClient`, which can only exercise
+    the every-read-fails path.
+
+    `fail_addrs` raises the same timeout `DeadClient` does, but only for reads starting at
+    one of those addresses -- e.g. the block read and not the SoC read. `latch_writes=False`
+    is what stands in for a write that reaches the inverter but does not take: the write is
+    still recorded, but the register dict never changes, so a verify readback keeps reporting
+    the pre-write state.
+    """
+
+    def __init__(self, registers: dict[int, int], fail_addrs: frozenset[int] = frozenset(),
+                latch_writes: bool = True):
+        self.registers = dict(registers)
+        self.fail_addrs = fail_addrs
+        self.latch_writes = latch_writes
+        self.writes: list[tuple[int, list[int]]] = []
+
+    async def read_holding_registers(self, addr, count=1, **kw):
+        if addr in self.fail_addrs:
+            raise TIMEOUT
+        values = [self.registers.get(addr + i, 0) for i in range(count)]
+        return SimpleNamespace(isError=lambda: False, registers=values)
+
+    async def write_registers(self, addr, values, **kw):
+        self.writes.append((addr, list(values)))
+        if self.latch_writes:
+            for i, v in enumerate(values):
+                self.registers[addr + i] = v
+        return SimpleNamespace(isError=lambda: False)
 
 
 class RecordingPublisher:
@@ -188,10 +259,21 @@ class TestDegradedFields:
             "slot_start": int(dt.datetime(2026, 8, 1, 12, 0, tzinfo=UTC).timestamp()),
             "slot_action": "hold",
             "plan_run": "2026-08-01T09:00:00Z",
+            # What the dispatcher knew, which no failed read can take away. Defaults here
+            # because this call passes none of them; `tests/test_dispatch_state.py` covers
+            # them being carried through.
+            "decision_kind": "unknown",
+            "reason": "unspecified",
+            "live": 0,
         }
 
     def test_outside_a_slot_it_is_just_the_reason(self):
-        assert state_mod.build_degraded_fields() == {"read_error": "inverter unreadable"}
+        assert state_mod.build_degraded_fields() == {
+            "read_error": "inverter unreadable",
+            "decision_kind": "unknown",
+            "reason": "unspecified",
+            "live": 0,
+        }
 
     def test_its_fields_are_ones_the_review_page_pivots_on(self):
         """Not decoration: `review-dry-run.py` only sees a tick if one of these is present."""
@@ -199,3 +281,79 @@ class TestDegradedFields:
         fields = state_mod.build_degraded_fields(
             slot={"start": "2026-08-01T12:00:00Z", "action": "hold"}, plan_run="x")
         assert set(fields) & pivoted
+
+
+class TestTickPublishesTheWriteVerifyVerdict:
+    """`tick()` end-to-end, not `state.build_fields()` called by hand -- these pin the same
+    contract `TestDegradedFields` pins for the degraded shape, but for the live shape, and for
+    monitor #6's own scenario: a write that reaches the inverter and does not take."""
+
+    def test_a_write_that_never_lands_publishes_verified_zero(self, tmp_path, monkeypatch):
+        # `latch_writes=False`: the write is recorded but the register dict never moves, so
+        # the verify readback (and its one retry) keeps reporting the pre-write, released
+        # state -- exactly what "the block does not hold what was just written" looks like.
+        monkeypatch.setattr(scheduler, "VERIFY_RETRY_DELAY_S", 0)
+        client = ScriptedClient(measurement_registers(), latch_writes=False)
+        pub = RecordingPublisher()
+        decision, cache = run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False,
+                                            publisher=pub)
+        assert decision.kind == "command"
+        assert cache["write_verified"] is False
+        point = pub.points[0]
+        assert point["verified"] == 0
+
+    def test_a_write_that_lands_publishes_verified_one(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers(), latch_writes=True)
+        pub = RecordingPublisher()
+        decision, cache = run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False,
+                                            publisher=pub)
+        assert decision.kind == "command"
+        assert cache["write_verified"] is True
+        point = pub.points[0]
+        assert point["verified"] == 1
+        # The gap this closes: `live` was only ever asserted against `build_fields()` called
+        # directly, never derived by `tick()` itself from a real `inv.dry_run=False`.
+        assert point["live"] == 1
+
+    def test_a_release_tick_publishes_no_verified_field(self, tmp_path, monkeypatch):
+        # Nothing was commanded this tick, so there is nothing to confirm -- `verified` must
+        # be ABSENT, not `0`. A `0` here would read as "we tried and failed", which release
+        # never does.
+        client = ScriptedClient(measurement_registers(), latch_writes=True)
+        pub = RecordingPublisher()
+        release_doc = doc(slots=[
+            {"start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:15:00Z", "action": "self"},
+        ])
+        decision, cache = run_scripted_tick(tmp_path, monkeypatch, client, dry_run=True,
+                                            publisher=pub, slots_doc=release_doc)
+        assert decision.kind == "release"
+        assert cache["write_verified"] is None
+        point = pub.points[0]
+        assert "verified" not in point
+        # Dry run, so this must read 0 even though a live command elsewhere in this class
+        # reads 1 -- `live` is `not inv.dry_run`, not "did we write something".
+        assert point["live"] == 0
+
+
+class TestTickPublishesADegradedPointWhenOnlyTheBlockReadFails:
+    """The SoC read and the dispatch-block read are two separate registers, and the common
+    failure (per `state.build_degraded_fields`'s own docstring) is the second one alone.
+    Previously only exercised by calling `build_degraded_fields()` directly with a hand-built
+    `live_soc_pct`; this drives the same split through a real `tick()`."""
+
+    def test_soc_read_survives_a_failed_block_read(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers(live_soc_pct=80.0),
+                                fail_addrs=frozenset({R.REG_START}))
+        pub = RecordingPublisher()
+        decision, cache = run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False,
+                                            publisher=pub)
+        # The plan still decides on the SoC it did manage to read.
+        assert decision.kind == "command"
+        assert cache["write_verified"] is None
+        point = pub.points[0]
+        assert point["soc_pct"] == pytest.approx(80.0)
+        assert "read_error" in point
+        # The block could not be read, so nothing derived from it is published -- carrying
+        # any of these forward would show a command as live before it was ever confirmed.
+        for absent in ("dispatch_active", "action", "setpoint_w", "mode", "verified"):
+            assert absent not in point

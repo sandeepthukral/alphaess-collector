@@ -691,6 +691,29 @@ No extra Modbus traffic — this is publishing a read it already did.
 | `slot_start` | int, unix s | the slot being served | **only when serving one** | — |
 | `slot_action` | string | the slot being served | **only when serving one** | `"discharge"` |
 | `plan_run` | string | the plan that slot came from | **only when known** | `"2026-08-15T15:00:00Z"` |
+| `decision_kind` | string | `Decision.kind` | every tick | `"command"` |
+| `reason` | string | `Decision.reason`, capped at 200 | every tick | `"plan stale (4.2 h)"` |
+| `live` | int 0/1 | `not dry_run` | every tick | `1` |
+| `soc_pct` | float | the SoC read before deciding | **only when that read worked** | `41.2` |
+| `verified` | int 0/1 | did the write land | **only when something was commanded** | `1` |
+
+The last five are what the DISPATCHER knew, as opposed to what the inverter said, and that is
+why this table has a second half. Everything above them decodes a readback; everything from
+`decision_kind` down is computed before a register is touched, which is why the degraded point
+carries them too -- a Modbus outage is exactly when you want to know what the loop decided
+and why.
+
+`verified` is the one that changes what the dashboard can say. It is the write-then-readback
+verdict behind monitor #6, and until it was published, "every log line says commanded, the
+battery does nothing" -- the failure section 5 calls the one this design fears most -- could
+not be drawn on any panel. Its **absence is a third state and not a failure**: a release or an
+idle tick commands nothing, so a readback proves nothing, and monitor #6 is documented as
+staying up for exactly that case. Published as `0` it would accuse a healthy dispatcher on
+most ticks of most days.
+
+`live` is published rather than inferred because `dispatch_active == 0` is what a dry run
+looks like *and* what a healthy release looks like -- section 4.1 makes the release a decision
+like any other -- so the register alone cannot separate the two.
 
 Four things about that table are load-bearing:
 
