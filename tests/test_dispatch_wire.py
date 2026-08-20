@@ -499,6 +499,39 @@ class TestTickEndToEnd:
         assert payload["surplus_w"] is None
         assert decision.kind == "command", "no surplus reading means the hold must stand"
 
+    def test_an_unconfirmed_write_does_not_trigger_hijack_next_tick(self, tmp_path,
+                                                                     monkeypatch):
+        """OBSERVED 2026-08-20 17:34:58Z-17:35:59Z: a hold write failed verification (mode
+        never left 0), and the NEXT tick's hijack check compared the still-stuck block
+        against `last_written` and reported "the app is dispatching" -- when the actual
+        explanation was still our own write from a tick earlier, already alarmed on by
+        monitor #6 (WRITE NOT VERIFIED). A write that never verifies must not ALSO read as
+        a hijack next tick."""
+        monkeypatch.setattr(scheduler, "VERIFY_RETRY_DELAY_S", 0.0)
+        now = dt.datetime.now(UTC)
+        path = self._slots_file(tmp_path, now)
+
+        async def body(inv, _trace):
+            real_apply = inv.apply
+
+            async def apply_then_stick_wrong_mode(cmd):
+                # Something keeps resetting the mode register behind every write this
+                # process makes -- mode never lands as commanded, on either tick.
+                await real_apply(cmd)
+                await inv.write(R.REG_MODE, [0])
+
+            inv.apply = apply_then_stick_wrong_mode
+            cache: dict = {}
+            await scheduler.tick(inv, path, cache, now)
+            assert cache["write_verified"] is False, "the setup must reproduce the failure"
+            await scheduler.tick(inv, path, cache, now)
+            return cache["hijacked"]
+
+        hijacked = on_simulator(body, seed={R.REG_BATTERY_SOC: [800]})
+        assert not hijacked, (
+            "our own unverified write from the previous tick must not read as the app "
+            "dispatching")
+
     def test_a_hijack_is_detected_and_recorded(self, tmp_path):
         """The app writing the same registers. Detected before we overwrite the evidence."""
         now = dt.datetime.now(UTC)

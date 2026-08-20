@@ -367,6 +367,11 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     decision = S.decide(cache.get("doc"), now, live_soc, cache.get("error", ""), surplus_w)
 
     # 5. Hijack check, before we overwrite the evidence.
+    #
+    # `write_verified` still holds the PREVIOUS tick's value here -- step 8 below overwrites
+    # it for this tick. False means that tick's own write never confirmed landing, so a
+    # mismatch below is not necessarily someone else's doing.
+    prev_write_confirmed = cache.get("write_verified") is not False
     try:
         raw_before = await inv.read_raw_block()
         state = R.decode_block(raw_before)
@@ -375,7 +380,8 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         log.warning("dispatch block read failed: %s", e)
         state, read_error = None, str(e)
 
-    if state is not None and S.is_hijacked(state, cache.get("last_written")):
+    if state is not None and S.is_hijacked(state, cache.get("last_written"),
+                                            last_write_confirmed=prev_write_confirmed):
         log.warning("HIJACK: block active with mode=%s power=%+dW soc=%.1f%% that we did not "
                     "write -- the app is dispatching", state["mode"], state["power_w"],
                     state["target_soc_pct"])
