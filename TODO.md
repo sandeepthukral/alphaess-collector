@@ -64,13 +64,18 @@ generated table in the repo pins this with an `organize` transformation; that on
 Fixed on `alphaess-dispatch.json`, not on `alphaess-battery-plan.json`, because the plan
 dashboard needs item 1's version bump first.
 
-**5. Panel 8, "What to set in the app", should have gone at go-live.**
+**5. Panel 8, "What to set in the app", should have gone at go-live — on Battery Plan.**
 `DESIGN-dispatch.md` §7.4 makes deleting it a go-live step and explains why: it is the
 dashboard face of `app_bands.py`, which §8 retires, so leaving it up puts two contradictory
 instructions on one screen — a table telling you to type thresholds into the app, directly
 above panels showing the dispatcher driving the same registers itself. §7.4 time-boxed that
 overlap to the dry run. The dry run ended on 2026-08-18. Panel 7, "Planned Actions in app",
 is the same class.
+
+Both were on the **Overview** dashboard too, which neither §7.4 nor this item noticed, and
+that pair is gone as of 2026-08-20. What remains is Battery Plan's, and it is blocked on
+item 1: deleting a panel there without bumping `version` past 17 changes the file and not
+the dashboard, so the panels stay up and the deletion looks like it failed.
 
 **6. Monitor #1, `plan-run`, still does not exist.**
 `PLAN-repo-seams.md` Part 3, and the only change the dispatch feature makes to

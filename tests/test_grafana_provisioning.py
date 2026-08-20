@@ -193,13 +193,29 @@ def test_price_line_reads_the_plan_ahead_of_now():
         "the collector's stored price must be bounded at now(), or the two sources overlap")
 
 
-# The plan panels the main dashboard shows a second copy of, by title. They are copied
-# rather than shared because Grafana has no way to provision one panel into two dashboards.
-COPIED_PLAN_PANELS = [
-    "Planned SoC vs actual SoC",
-    "What to set in the app",
-    "Planned Actions in app",
-]
+# Panels the main dashboard shows a second copy of, keyed by the dashboard they were
+# copied FROM. They are copied rather than shared because Grafana has no way to provision
+# one panel into two dashboards.
+#
+# Both sources are generated, which is the whole risk: an edit to a generator lands in its
+# own dashboard automatically and in alphaess-dashboard.json only if someone remembers.
+# alphaess-dashboard.json is hand-maintained and has no generator to regenerate it, so
+# nothing but this test connects the copies.
+COPIED_PANELS = {
+    "alphaess-battery-plan.json": [
+        "Planned SoC vs actual SoC",
+    ],
+    "alphaess-dispatch.json": [
+        "Dispatcher",
+        "Decision",
+        "Doing",
+        "Command expires in",
+        "What the dispatcher will do next",
+    ],
+}
+
+# Every copied title, flat -- the range rule below applies to all of them equally.
+EVERY_COPIED_PANEL = [t for ts in COPIED_PANELS.values() for t in ts]
 
 
 def _overrides(panel):
@@ -224,32 +240,50 @@ def _panels_by_title(name):
     return dash, {p.get("title"): p for p in dash["panels"]}
 
 
-def test_copied_plan_panels_match_their_source():
+@pytest.mark.parametrize("source", sorted(COPIED_PANELS))
+def test_copied_panels_match_their_source(source):
     """The copies on the main dashboard must run the same queries as the originals.
 
-    Those queries are generated from grafana/generate-battery-plan.py, so a change there
-    lands in alphaess-battery-plan.json automatically and in alphaess-dashboard.json only
-    if someone remembers. Two dashboards then disagree about what the plan says, and both
-    look right. Mirror the change into grafana/alphaess-dashboard.json.
+    Those queries are generated -- from generate-battery-plan.py and generate-dispatch.py
+    -- so a change there lands in the source dashboard automatically and in
+    alphaess-dashboard.json only if someone remembers. Two dashboards then disagree about
+    what the battery is doing, and both look right. Mirror the change into
+    grafana/alphaess-dashboard.json.
+
+    This is what makes copying a dispatch panel onto Overview safe. The alternative
+    considered was pinning the DISPATCH_LAST constant across files, which would have
+    checked the query's opening lines and nothing else; comparing the whole target list
+    against the generated original checks all of it, including the parts a hand-edit is
+    most likely to get subtly wrong.
     """
     _, main = _panels_by_title("alphaess-dashboard.json")
-    _, plan = _panels_by_title("alphaess-battery-plan.json")
+    _, origin = _panels_by_title(source)
 
-    for title in COPIED_PLAN_PANELS:
+    for title in COPIED_PANELS[source]:
         assert title in main, f"{title} is missing from the main dashboard"
+        assert title in origin, f"{title} is missing from {source}"
         assert [t["query"] for t in main[title]["targets"]] == \
-               [t["query"] for t in plan[title]["targets"]], title
+               [t["query"] for t in origin[title]["targets"]], f"{title} ({source})"
         # Field overrides too, not just the queries: units, decimals and column names
         # decide what the numbers mean on screen, and a unit changed on one dashboard and
         # not the other is the same drift as a diverging query, and just as invisible.
         #
-        # Compared per field rather than whole, and only for fields both carry: the main
-        # dashboard's copy is laid out half-width beside the SoC chart and has column
-        # widths of its own, which are presentation and are allowed to differ.
-        assert _overrides(main[title]) == _overrides(plan[title]), title
+        # Compared per field rather than whole, and only for fields both carry: a copy on
+        # the main dashboard is laid out differently -- half-width, its own column widths
+        # -- and that is presentation, which is allowed to differ.
+        assert _overrides(main[title]) == _overrides(origin[title]), f"{title} ({source})"
 
 
-def test_copied_plan_panels_span_the_plan_horizon():
+def test_the_copy_list_is_not_empty():
+    """Guards the guard: an emptied list, or a source dashboard renamed, would make the
+    test above iterate nothing and pass."""
+    assert COPIED_PANELS
+    for source, titles in COPIED_PANELS.items():
+        assert (REPO / "grafana" / source).exists(), source
+        assert titles, source
+
+
+def test_copied_panels_span_the_plan_horizon():
     """The main dashboard's own time range must cover the plan's horizon.
 
     A panel time override cannot do this. `timeFrom` only ever ends at now, and Grafana
@@ -259,13 +293,18 @@ def test_copied_plan_panels_span_the_plan_horizon():
 
     So the dashboard carries the plan's range and the live panels are pinned back to 24h
     instead; test_live_panels_keep_their_own_window is the other half of this.
+
+    It covers the dispatch tiles too, where it is not vacuous for the reason it looks like
+    it might be: `What the dispatcher will do next` draws the slots AHEAD of now, so a
+    timeFrom override on it would leave a panel whose entire subject is the future
+    rendering a blank strip -- the same failure as 2026-08-08, on a different panel.
     """
     plan_dash, _ = _panels_by_title("alphaess-battery-plan.json")
     main_dash, main = _panels_by_title("alphaess-dashboard.json")
 
     assert main_dash["time"] == plan_dash["time"]
 
-    for title in COPIED_PLAN_PANELS:
+    for title in EVERY_COPIED_PANEL:
         panel = main[title]
         assert "timeFrom" not in panel and "timeShift" not in panel, (
             f"{title} must take the dashboard's range, not an override that ends at now")
