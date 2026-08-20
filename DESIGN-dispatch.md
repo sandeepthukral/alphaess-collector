@@ -868,6 +868,53 @@ only as long as the dry run does.
 - **`dispatch_state` goes in the `alphaess` bucket, not `planning`.** It is an observation of
   hardware, same class as `power_readings`, and the dashboard already reads both buckets.
 
+### 7.6 The slots themselves — `dispatch_slots`
+
+§7.1 publishes what the inverter is doing **now**. It says nothing about what the dispatcher
+is about to do, and `slots.json` — the document that knows — lives on a named volume inside
+the container. Grafana speaks only InfluxDB, so it cannot read that file; nor can you, at the
+moment it matters most, because "what would it be doing right now" is a question you ask when
+the container is *down*.
+
+The workaround shipped in the meantime is the thing to retire. The "What dispatch would do"
+table reimplements `translator.classify()` in Flux, floors and all — a second copy of the
+control logic in a second language, which nothing tests for agreement and which cannot see
+§4.1's runtime surplus release at all. It answers what the optimiser asked for, and calls it
+what dispatch would do.
+
+So `dispatch/translate.py` writes one point per slot to **`dispatch_slots`** in the `alphaess`
+bucket, after `slots.json` and never before it.
+
+| Field | Type | Written | Example |
+|---|---|---|---|
+| `action` | string | every slot | `"charge"` |
+| `end_s` | int, unix s | every slot | — |
+| `duration_s` | int | every slot | `3600` |
+| `power_w` | int, unsigned magnitude | **charge and discharge only** | `4629` |
+| `target_soc` | float | **charge and discharge only** | `82.0` |
+
+Tagged `plan_run` and `sys_sn`; timestamped at the slot's **start**, in the future, exactly
+like the `plan` points it derives from — which is why every query against it needs a `stop:`
+ahead of now.
+
+Four things are load-bearing:
+
+- **Timestamped at slot start, tagged by run.** Slot boundaries move between runs, so an
+  untagged write would strand an older run's slots at instants the newer run does not cover:
+  visible, plausible, and wrong. The `NEWEST` snippet the other dashboards already use handles
+  it, given the tag to filter on.
+- **Re-publishing is free.** The translator runs every five minutes while the planner runs
+  hourly, so most passes re-translate an unchanged plan: same tag, same timestamps, same
+  values, and Influx overwrites in place rather than accumulating twelve copies an hour.
+  Series growth follows the planner's cadence, which is the shape the `planning` bucket has
+  carried since July.
+- **`power_w` and `target_soc` are absent on `self` and `hold`**, mirroring
+  `Slot.__post_init__`, which treats a hold carrying either as an error. Zeros would read as
+  "charge at 0 W to 0 %" — a command this dispatcher can genuinely issue.
+- **A publish failure is not a translation failure.** `slots.json` is the control path and
+  this is a copy for looking at; monitor #3 still goes up, because the translation did
+  succeed. A dashboard that cannot be written must not stop the battery being dispatched.
+
 ---
 
 ## 8. The app conflict

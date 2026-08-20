@@ -38,6 +38,7 @@ import os
 import sys
 from pathlib import Path
 
+import slot_publisher as slot_pub
 from heartbeat import send_heartbeat
 from plan import (
     PlanFormatError,
@@ -195,7 +196,8 @@ def summarise(doc: dict, warnings: list) -> str:
 
 
 def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.datetime,
-        plan_url: str = "", slots_url: str = "", dry_run: bool = False) -> int:
+        plan_url: str = "", slots_url: str = "", dry_run: bool = False,
+        slot_publisher=None) -> int:
     """One translation, with both heartbeats. Returns a process exit code.
 
     The two monitors are pinged at different points on purpose, and only one of them is ever
@@ -242,6 +244,9 @@ def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.da
 
     if dry_run:
         log.info("[dry-run] would write %s: %s", slots_path, line)
+        if slot_publisher is not None:
+            log.info("[dry-run] would publish %d %s points",
+                     len(doc["slots"]), slot_pub.MEASUREMENT)
         return 0
 
     try:
@@ -252,6 +257,15 @@ def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.da
         return 1
 
     log.info("wrote %s: %s", slots_path, line)
+
+    # AFTER the file, and never in front of the return code. `slots.json` is what the
+    # dispatcher acts on; this is a copy for looking at, and the two must not share a fate.
+    # A publish failure has already logged itself once (see `SlotPublisher`), monitor #3 still
+    # goes up because the translation genuinely succeeded, and the dashboard is stale for as
+    # long as Influx is down -- which is a dashboard problem, which is what this is.
+    if slot_publisher is not None:
+        slot_publisher.publish(doc)
+
     send_heartbeat(slots_url, "up", line[:200])
     return 0
 
@@ -271,6 +285,31 @@ def build_query_api(url: str, token: str, org: str):
     return InfluxDBClient(url=url, token=token, org=org).query_api()
 
 
+def build_slot_publisher(url: str, token: str, org: str, bucket: str, sys_sn: str):
+    """The `dispatch_slots` publisher, or None when Influx is not configured for writing.
+
+    OPTIONAL, unlike `build_query_api` two functions up, and the asymmetry is the point: the
+    query api is the only input the control path has, so a missing token there is fatal. This
+    is a copy of the output for the dashboard to read, so a missing token here degrades what
+    you can see and nothing else. Same posture as `scheduler.build_publisher`.
+    """
+    if not (url and token):
+        log.info("no INFLUX_URL/INFLUX_TOKEN -- %s will not be published", slot_pub.MEASUREMENT)
+        return None
+    try:
+        from influxdb_client import InfluxDBClient
+        from influxdb_client.client.write_api import SYNCHRONOUS
+    except ImportError:
+        log.warning("influxdb-client not installed -- %s will not be published",
+                    slot_pub.MEASUREMENT)
+        return None
+
+    client = InfluxDBClient(url=url, token=token, org=org)
+    log.info("publishing %s to %s bucket %s", slot_pub.MEASUREMENT, url, bucket)
+    return slot_pub.SlotPublisher(
+        client.write_api(write_options=SYNCHRONOUS), bucket, sys_sn)
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--slots", default="slots.json")
@@ -282,6 +321,9 @@ def main():
     # this one in production.
     p.add_argument("--capacity-wh", type=capacity_wh,
                    default=os.environ.get("BATTERY_CAPACITY_WH") or str(DEFAULT_CAPACITY_WH))
+    p.add_argument("--influx-bucket", default=os.environ.get("INFLUX_BUCKET", "alphaess"),
+                   help="where dispatch_slots is written; NOT the plan bucket it reads")
+    p.add_argument("--sys-sn", default=os.environ.get("ALPHAESS_SYS_SN", ""))
     p.add_argument("--dry-run", action="store_true", help="Translate and report, write nothing")
     p.add_argument("-v", "--verbose", action="store_true")
     a = p.parse_args()
@@ -292,12 +334,19 @@ def main():
 
     # The token is read from the environment only -- never a flag, so it cannot end up in a
     # shell history or a `ps` listing on a shared NAS.
-    query_api = build_query_api(a.influx_url, os.environ.get("INFLUX_TOKEN", ""), a.influx_org)
+    token = os.environ.get("INFLUX_TOKEN", "")
+    query_api = build_query_api(a.influx_url, token, a.influx_org)
+    # `--bucket` is the PLANNING bucket, read-only. The slots go to the alphaess bucket, the
+    # one this repo owns and the one the dispatch token can write -- section 7.5's rule, that
+    # an observation of this stack belongs beside `power_readings` and not in another
+    # project's bucket.
     sys.exit(run(
         query_api, a.bucket, Path(a.slots), a.capacity_wh, dt.datetime.now(dt.UTC),
         plan_url=os.environ.get("PLAN_INFLUX_HEARTBEAT_URL", ""),
         slots_url=os.environ.get("SLOTS_WRITTEN_HEARTBEAT_URL", ""),
-        dry_run=a.dry_run))
+        dry_run=a.dry_run,
+        slot_publisher=build_slot_publisher(
+            a.influx_url, token, a.influx_org, a.influx_bucket, a.sys_sn)))
 
 
 if __name__ == "__main__":
