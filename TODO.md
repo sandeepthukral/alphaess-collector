@@ -56,6 +56,14 @@ before 2026-07-30 carry `+02:00` where later ones carry `Z`. Use it.
 
 ## Dispatch
 
+**4b. Battery Plan's decode table has no pinned column order.** Flux does not promise one and
+`union` of five `map`s does not produce one, so the columns arrive in whatever order the
+engine felt like — the Dispatch dashboard rendered the same query with `Means` first, which
+puts the thing you read last in front of the register you were looking for. Every other
+generated table in the repo pins this with an `organize` transformation; that one does not.
+Fixed on `alphaess-dispatch.json`, not on `alphaess-battery-plan.json`, because the plan
+dashboard needs item 1's version bump first.
+
 **5. Panel 8, "What to set in the app", should have gone at go-live.**
 `DESIGN-dispatch.md` §7.4 makes deleting it a go-live step and explains why: it is the
 dashboard face of `app_bands.py`, which §8 retires, so leaving it up puts two contradictory

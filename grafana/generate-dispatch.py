@@ -169,9 +169,7 @@ EXPIRES_IN = '''from(bucket: "alphaess")
 # naming an instant half an hour earlier. Without the filter the table would mix runs, because
 # slot boundaries move between them and an older run leaves slots at instants the newer one
 # does not cover -- visible, plausible, and wrong.
-SLOTS_BASE = '''import "date"
-
-newest = (from(bucket: "alphaess")
+SLOTS_BASE = '''newest = (from(bucket: "alphaess")
   |> range(start: -48h, stop: 72h)
   |> filter(fn: (r) => r._measurement == "dispatch_slots" and r._field == "action")
   |> keep(columns: ["plan_run"])
@@ -183,26 +181,32 @@ newest = (from(bucket: "alphaess")
   |> findColumn(fn: (key) => true, column: "tag"))[0]
 
 nowS = float(v: int(v: now())) / 1000000000.0
-horizonEnd = date.add(d: duration(v: "${horizon}h"), to: now())
 
-upcoming = from(bucket: "alphaess")
+// The whole of the newest run, elapsed slots included. Each panel narrows it differently.
+run = from(bucket: "alphaess")
   |> range(start: -48h, stop: 72h)
   |> filter(fn: (r) => r._measurement == "dispatch_slots" and r.plan_run == newest)
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> group()
   |> sort(columns: ["_time"])
-  |> filter(fn: (r) => float(v: r.end_s) > nowS and r._time < horizonEnd)
 '''
 
+# THE TIMELINE KEEPS ELAPSED SLOTS. The table below does not, and the difference is the job
+# each is doing: the table answers "what is next", so a slot that has already finished is
+# noise in it. The timeline answers "what does the plan look like", and dropping the elapsed
+# half would leave the left of the panel blank back to the start of the window -- which reads
+# as "nothing was planned" rather than "that already happened".
+#
 # THE TERMINATOR ROW IS NOT DECORATION. A state timeline draws each value from its own point
 # until the next one, so without a final row the last band runs to the right-hand edge of the
-# panel forever -- rendering a horizon that ends at 22:00 as one that never ends. The extra
-# row carries the last slot's `end_s` and a value with no colour mapping, so it reads as the
-# neutral gap it is.
+# panel forever -- rendering a horizon that ends at 22:00 as one that never ends. It carries
+# the last slot's `end_s` and a value with no colour mapping, so it reads as the neutral gap
+# it is. Taken from the whole run rather than the visible part, so it lands at the real end of
+# the plan even when the window is showing less than all of it.
 SLOT_BANDS = SLOTS_BASE + '''
-bands = upcoming
+bands = run
   |> map(fn: (r) => ({ _time: r._time, _value: r.action }))
-tail = upcoming
+tail = run
   |> tail(n: 1)
   |> map(fn: (r) => ({ _time: time(v: int(v: r.end_s) * 1000000000),
                        _value: "horizon end" }))
@@ -213,8 +217,11 @@ union(tables: [bands, tail])
   |> yield(name: "slots")
 '''
 
+# UPCOMING ONLY -- `end_s > nowS` keeps the slot that is running right now and drops the ones
+# that have finished, so the top row is always what the battery is doing at this moment.
 SLOT_TABLE = SLOTS_BASE + '''
-upcoming
+run
+  |> filter(fn: (r) => float(v: r.end_s) > nowS)
   |> map(fn: (r) => ({
       _time: r._time,
       action: r.action,
@@ -609,6 +616,10 @@ panels.append({
     },
     "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
     "id": 11,
+    # ITS OWN WINDOW, backward only. The dashboard runs to now+36h so the slot panels can
+    # draw the whole horizon, and this panel is a record of what already happened -- given
+    # the dashboard's range it would spend two thirds of its width on empty future.
+    "timeFrom": "12h",
     "options": {
         "legend": {"calcs": [], "displayMode": "list", "placement": "bottom",
                    "showLegend": True},
@@ -662,7 +673,7 @@ panels.append({
     },
     "pluginVersion": "11.6.0",
     "targets": [target(SLOT_BANDS)],
-    "title": "The next ${horizon} hours",
+    "title": "What the dispatcher will do next",
     "type": "state-timeline",
 })
 
@@ -769,7 +780,10 @@ panels.append({
              "properties": [{"id": "displayName", "value": "Means"}]},
         ],
     },
-    "gridPos": {"h": 6, "w": 24, "x": 0, "y": 30},
+    # h=8, not 6. Five registers plus a header does not fit in six rows of grid, and the two
+    # that fall off the bottom are 0x0886 and 0x0887 -- the SoC target and the dead man's
+    # switch, which are the two worth checking when a command looks wrong.
+    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 30},
     "id": 14,
     "options": {
         "cellHeight": "sm",
@@ -777,29 +791,24 @@ panels.append({
         "showHeader": True,
     },
     "pluginVersion": "11.6.0",
+    # FLUX DOES NOT PROMISE AN OUTPUT COLUMN ORDER, and `union` of five `map`s does not
+    # produce one either -- the table rendered Means first, so the column you read last came
+    # first and the register you were looking for came second. The other generated tables all
+    # pin this; the decode table was the one that did not.
+    "transformations": [{
+        "id": "organize",
+        "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "renameByName": {},
+            "indexByName": {"register": 0, "name": 1, "raw": 2, "means": 3},
+        },
+    }],
     "targets": [target(DECODE_TABLE)],
     "title": "Dispatch registers, decoded",
     "type": "table",
 })
 
-
-# The horizon the slot panels look ahead over. A CUSTOM variable rather than the time picker,
-# because the picker also drives "Commanded against actual", which looks BACKWARD -- one
-# control cannot serve both without one of the two always being wrong.
-HORIZON_VAR = {
-    "current": {"selected": True, "text": "36", "value": "36"},
-    "includeAll": False,
-    "label": "Look ahead",
-    "multi": False,
-    "name": "horizon",
-    "options": [
-        {"selected": False, "text": "12", "value": "12"},
-        {"selected": False, "text": "24", "value": "24"},
-        {"selected": True, "text": "36", "value": "36"},
-    ],
-    "query": "12,24,36",
-    "type": "custom",
-}
 
 dashboard = {
     "__inputs": [{
@@ -835,12 +844,19 @@ dashboard = {
     "refresh": "1m",
     "schemaVersion": 42,
     "tags": ["alphaess", "battery", "dispatch"],
-    "templating": {"list": [HORIZON_VAR]},
-    # Twelve hours back, six forward. Backward because the only panel the picker drives is
-    # "Commanded against actual", which is a record of what happened; the slot panels look
-    # ahead on their own variable. The small forward margin keeps the current slot's band from
-    # starting hard against the right-hand edge.
-    "time": {"from": "now-12h", "to": "now+6h"},
+    # No variables. The horizon the slot panels show is the time picker's, which is the
+    # control every other dashboard here already uses and the only one that moves the axis
+    # as well as the query.
+    "templating": {"list": []},
+    # TWELVE BACK, THIRTY-SIX FORWARD, and the forward half is the load-bearing part: every
+    # Grafana panel renders only inside the dashboard window, so a slot query returning the
+    # full horizon still draws nothing past the right-hand edge. The first cut of this
+    # dashboard stopped at now+6h and the timeline showed six hours under a title promising
+    # thirty-six -- the query was right and the axis was lying about it.
+    #
+    # "Commanded against actual" is the one panel this is wrong for, since it is a record of
+    # what already happened, so it carries its own backward-only window instead.
+    "time": {"from": "now-12h", "to": "now+36h"},
     "timepicker": {},
     "timezone": "browser",
     "title": "Dispatch",
@@ -852,7 +868,10 @@ dashboard = {
     # back to re-debug a query that was already correct. TODO.md item 1 is two live instances
     # of exactly this on the plan dashboard.
     # 1: first cut - verdict row, command row, commanded-against-actual, slots ahead, decode.
-    "version": 1,
+    # 2: window runs to now+36h so the slot panels can draw the whole horizon; the horizon
+    #    variable is gone, the chart keeps its own backward window, and the decode table gets
+    #    a pinned column order and room for all five registers.
+    "version": 2,
     "weekStart": "",
 }
 
