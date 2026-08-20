@@ -13,6 +13,7 @@ COPY translate.py .
 COPY slots.py .
 COPY state.py .
 COPY slot_publisher.py .
+COPY reliability.py .
 COPY scheduler.py .
 COPY entrypoint.sh .
 

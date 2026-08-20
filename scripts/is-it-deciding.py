@@ -39,20 +39,19 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# `dispatch/` too, and flat, which is how those modules import each other and how the
+# Dockerfile lays them out in /app -- so this script imports exactly what runs in production.
+sys.path.insert(0, str(REPO / "dispatch"))
 
+from reliability import FIELDS, GAP_S, STALE_PLAN_S, TICK_S  # noqa: E402
 from review_page import local, parse_ts  # noqa: E402
 
-# The dispatcher's loop interval, and the silence that means it stopped. Both deliberately
-# the same numbers `review-dry-run.py` uses -- the two scripts disagreeing about what counts
-# as a stalled loop would be worse than either of them being slightly wrong.
-TICK_S = 60
-GAP_S = 180
-# The translator runs every five minutes against an hourly planner; past this the plan is one
-# it should already have replaced. Tracks `slots.MAX_PLAN_AGE` -- two missed planner runs.
-# Monitor #3's window in DESIGN-dispatch.md section 6.1.
-STALE_PLAN_S = 2 * 3600
-
-FIELDS = ("slot_action", "action", "plan_run", "setpoint_w", "dispatch_active")
+# The loop interval, the silence that means it stopped, and the age past which a plan is one
+# the translator should already have replaced. Imported rather than declared: they used to be
+# written out here as well, with a comment saying they were "deliberately the same numbers
+# `review-dry-run.py` uses", which is a promise a comment cannot keep. Same for FIELDS, and
+# that one had already drifted -- `read_error` joined the list there and not here, so this
+# script showed a degraded tick as no tick at all.
 
 # What each decision means, in the words the dispatcher would use if asked. `self` is the
 # one that reads wrong at a glance: it is not "no decision", it is the deliberate RELEASE of
@@ -116,9 +115,20 @@ def report(state: dict | None) -> int:
               "the horizon")
 
     mode = "live" if live else "dry run"
-    tail = "" if live else "   <- dry run writes nothing, so this never changes"
-    print(f"  readback   {state.get('action')} / {state.get('setpoint_w')} W "
-          f"({mode}){tail}")
+    if state.get("read_error"):
+        # A degraded tick publishes its DECISION and no register readback at all --
+        # `state.py:129-141` is explicit that the honest report of an unreadable inverter is
+        # a missing field, not a stale one. Printing `state.get('action')` through this case
+        # rendered the literal `None / None W`, which reads as a broken script rather than
+        # an unreachable inverter. The decision line above is still true and is the line
+        # that answers the question this script is named after.
+        print(f"  readback   UNREADABLE -- {state['read_error']}")
+        print(f"             the loop decided anyway; the fail-safe is that it wrote "
+              f"nothing ({mode})")
+    else:
+        tail = "" if live else "   <- dry run writes nothing, so this never changes"
+        print(f"  readback   {state.get('action')} / {state.get('setpoint_w')} W "
+              f"({mode}){tail}")
 
     if state.get("plan_run"):
         plan_age = (now - parse_ts(str(state["plan_run"]))).total_seconds()

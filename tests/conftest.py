@@ -7,6 +7,8 @@ production rather than a repackaged copy.
 """
 
 import datetime as dt
+import importlib.util
+import pathlib
 
 import pytest
 
@@ -14,6 +16,23 @@ import pricing
 from pricing import Sample
 
 UTC = dt.UTC
+
+REPO = pathlib.Path(__file__).resolve().parent.parent
+
+
+def load_script(name: str, filename: str):
+    """Import one of the `scripts/` operator tools by path.
+
+    They are hyphenated, and `scripts/` is deliberately NOT on `pythonpath`: they are tools
+    run from the Mac, not modules the container imports, and putting them on the path would
+    let production code import one by accident. Here rather than in either test file
+    because both need it, and a second copy of the loader is the kind of duplication
+    `reliability.py` was extracted to stop.
+    """
+    spec = importlib.util.spec_from_file_location(name, REPO / "scripts" / filename)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def hourly_intervals(start: dt.datetime, hours: int, total: float = 0.10,
