@@ -450,6 +450,20 @@ class TestIsHijacked:
         cmd = Command(DispatchMode.SOC_TARGET, -4500, 20.0, 300)
         assert not S.is_hijacked(self.state(target_soc_pct=20.4), cmd)
 
+    def test_a_mismatch_after_an_unconfirmed_write_is_not_a_hijack(self):
+        """The write that produced `last_written` never verified landing (monitor #6 already
+        alarmed on it), so a mismatch here may just be our own straggling write, not another
+        process. OBSERVED 2026-08-20 17:35:59Z: a hold that failed verification a tick earlier
+        was still sitting half-applied and was misreported as the app dispatching."""
+        cmd = Command(DispatchMode.FOLLOW, 0, None, 300)
+        assert not S.is_hijacked(self.state(mode=0), cmd, last_write_confirmed=False)
+
+    def test_a_mismatch_after_a_confirmed_write_is_still_a_hijack(self):
+        """The default, and what makes the flag above safe: a write that DID verify still
+        catches something else driving the block on a later tick."""
+        cmd = Command(DispatchMode.FOLLOW, 0, None, 300)
+        assert S.is_hijacked(self.state(mode=0), cmd, last_write_confirmed=True)
+
 
 class TestFailsafeConstants:
     def test_the_duration_is_a_multiple_of_the_refresh_interval(self):

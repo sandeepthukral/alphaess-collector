@@ -379,15 +379,26 @@ def matches_command(state: dict, cmd: Command) -> bool:
     return True
 
 
-def is_hijacked(state: dict, last_written: Command | None) -> bool:
+def is_hijacked(state: dict, last_written: Command | None,
+                 last_write_confirmed: bool = True) -> bool:
     """Section 5 step 5: is something else driving the dispatch block?
 
     True when the block is active but does not match what this process last wrote. The
     AlphaESS app writes these same registers -- caught on 2026-08-15 16:11 holding
     `mode=2 dpwr=-5000W dsoc=100.0% dt=5580s`, a 93-minute grid force-charge.
+
+    `last_write_confirmed=False` means the PREVIOUS tick wrote `last_written` but its own
+    verify read (scheduler.py step 8, monitor #6) never confirmed it landed. A mismatch here
+    is then ambiguous -- it may be our own write still not ingested, not another process --
+    so it is not reported as a hijack. Monitor #6 already alarms on that write; this only
+    stops it from ALSO reading as "the app is dispatching" while its own failure is still
+    the live explanation. OBSERVED 2026-08-20 17:35:59Z: a hold that failed verification at
+    17:34:58 was still sitting half-applied a tick later and was misreported as a hijack.
     """
     if not state.get("dispatch_active"):
         return False
     if last_written is None:
         return True
-    return not matches_command(state, last_written)
+    if matches_command(state, last_written):
+        return False
+    return last_write_confirmed
