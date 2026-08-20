@@ -272,7 +272,7 @@ def monitor_pings(decision: S.Decision, cache: dict, live_soc: float | None,
         status = "up" if live_soc >= S.SOC_FLOOR_PCT else "down"
         pings.append(("soc-floor", status, f"SoC {live_soc:.1f}% (floor {S.SOC_FLOOR_PCT}%)"))
 
-    return [(name, status, msg[:200]) for name, status, msg in pings]
+    return [(name, status, msg[:state_mod.REASON_MAX]) for name, status, msg in pings]
 
 
 async def report(pings: list[tuple[str, str, str]]) -> None:
