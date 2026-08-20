@@ -13,7 +13,7 @@ import pytest
 
 import registers as R
 import state as state_mod
-from state import StatePublisher, build_fields, describe_action
+from state import StatePublisher, build_degraded_fields, build_fields, describe_action
 
 UTC = dt.UTC
 NOW = dt.datetime(2026, 8, 15, 18, 30, tzinfo=UTC)
@@ -150,6 +150,97 @@ class TestBuildFields:
                          plan_run="r")
         for key, value in f.items():
             assert isinstance(value, int | float | str), (key, type(value))
+
+
+class TestWhatTheDispatcherKnows:
+    """The four things the loop computed before touching a register, plus the verdict on its
+    own write. All of it went only to the log and to Kuma until now, which is why a command
+    that failed to land was invisible on every dashboard.
+
+    The shared helper is exercised through BOTH builders on purpose: the whole point of these
+    fields is that they survive an unreadable inverter, and a version that only populated the
+    healthy shape would fail exactly when it was wanted.
+    """
+
+    def test_the_decision_and_the_reason_travel_with_the_readback(self):
+        s, words = state_of()
+        f = build_fields(s, words, NOW, decision_kind="command",
+                         reason="discharge 4500 W to 20.0%")
+        assert f["decision_kind"] == "command"
+        assert f["reason"] == "discharge 4500 W to 20.0%"
+
+    def test_the_decision_and_the_reason_survive_an_unreadable_inverter(self):
+        f = build_degraded_fields(read_error="timed out", decision_kind="idle",
+                                  reason="live SoC unreadable")
+        assert f["decision_kind"] == "idle"
+        assert f["reason"] == "live SoC unreadable"
+
+    def test_live_is_published_rather_than_inferred(self):
+        """`dispatch_active == 0` is what a dry run looks like AND what a healthy release
+        looks like. Section 4.1 makes the release a decision like any other, so the register
+        alone cannot separate "writing nothing because we are observing" from "writing
+        nothing because the plan asked for it"."""
+        s, words = state_of(start=0)
+        assert build_fields(s, words, NOW, decision_kind="release", live=True)["live"] == 1
+        assert build_fields(s, words, NOW, decision_kind="release", live=False)["live"] == 0
+
+    def test_the_soc_the_decision_was_made_against_is_carried(self):
+        s, words = state_of()
+        assert build_fields(s, words, NOW, live_soc_pct=41.2)["soc_pct"] == 41.2
+
+    def test_an_unreadable_soc_publishes_no_soc_at_all(self):
+        """The honest report of a value that was not read is no field -- not a zero, which
+        would put the battery on the floor, and not the last one, which would be a guess."""
+        s, words = state_of()
+        assert "soc_pct" not in build_fields(s, words, NOW, live_soc_pct=None)
+
+    def test_a_degraded_point_still_carries_the_soc_when_that_read_worked(self):
+        """The commonest failure is the dispatch block alone: SoC and the block are two
+        separate reads. Dropping a value that WAS obtained because a different read failed
+        would throw away the one number the direction rule turned on."""
+        f = build_degraded_fields(read_error="block read failed", live_soc_pct=8.4)
+        assert f["soc_pct"] == 8.4
+
+    def test_a_landed_write_is_published_as_one(self):
+        s, words = state_of()
+        assert build_fields(s, words, NOW, write_verified=True)["verified"] == 1
+
+    def test_a_write_that_did_not_land_is_published_as_zero(self):
+        """Monitor #6's alarm, and until now the only place it existed. The log says
+        commanded; the battery is not."""
+        s, words = state_of()
+        assert build_fields(s, words, NOW, write_verified=False)["verified"] == 0
+
+    def test_nothing_to_verify_publishes_no_field(self):
+        """THE TRI-STATE, and the reason `verified` is conditional. A release or an idle tick
+        commands nothing, so a readback proves nothing -- exactly the case monitor #6 is
+        documented as staying UP for. Published as 0 it would accuse a healthy dispatcher of
+        a failed write on most ticks of most days."""
+        s, words = state_of()
+        assert "verified" not in build_fields(s, words, NOW, write_verified=None)
+        assert "verified" not in build_degraded_fields(read_error="x", write_verified=None)
+
+    def test_verified_is_an_int_so_a_stat_panel_can_threshold_it(self):
+        """Grafana's stat reduces `""` by default, which is numeric fields only -- a bool
+        would be dropped as silently as a string, forcing the `/.*/` path. 0/1 gets the
+        threshold steps this repo already uses everywhere for red and green."""
+        s, words = state_of()
+        f = build_fields(s, words, NOW, write_verified=True)
+        assert isinstance(f["verified"], int) and not isinstance(f["verified"], bool)
+
+    def test_a_long_reason_is_truncated(self):
+        """Free text assembled from exception strings. The same 200 the Kuma pings use, so
+        the sentence does not read differently depending on where you saw it."""
+        s, words = state_of()
+        f = build_fields(s, words, NOW, reason="x" * 500)
+        assert len(f["reason"]) == state_mod.REASON_MAX
+
+    def test_a_bare_call_still_names_the_decision(self):
+        """`reason` is unconditional, unlike everything else gated in this module, and the
+        distinction is the one the module turns on: the gated fields could not be READ, while
+        the loop always has a decision and always has a reason for it."""
+        assert build_degraded_fields()["reason"] == "unspecified"
+        assert build_degraded_fields()["decision_kind"] == "unknown"
 
 
 class FakeWriteApi:

@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 
 import registers as R
-from state import build_fields
+from state import build_degraded_fields, build_fields
 
 DASHBOARDS = Path(__file__).parent.parent / "grafana"
 MEASUREMENT = "dispatch_state"
@@ -38,12 +38,29 @@ def published_field_values() -> dict:
         R.decode_block(words), words, dt.datetime.now(dt.UTC),
         decision_kind="command",
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
-        plan_run="2026-08-15T15:00:00Z")
+        plan_run="2026-08-15T15:00:00Z",
+        reason="discharge 4500 W to 20.0%", live=True, live_soc_pct=41.2,
+        write_verified=True)
 
 
 def published_fields() -> set[str]:
     """Every field name `state.build_fields` can emit, for a fully populated command."""
     return set(published_field_values())
+
+
+def degraded_fields() -> set[str]:
+    """Every field name `state.build_degraded_fields` can emit.
+
+    A SECOND shape, not a subset of the first. A tick that decided but could not read the
+    inverter publishes `read_error` and the decision, and nothing about the hardware -- so
+    `read_error` is a field no fully-populated point ever carries, and a panel reading it was
+    failing the allowlist below for naming a field this repo does publish.
+    """
+    return set(build_degraded_fields(
+        slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
+        plan_run="2026-08-15T15:00:00Z", read_error="timed out",
+        decision_kind="idle", reason="live SoC unreadable", live=True,
+        live_soc_pct=41.2, write_verified=False))
 
 
 def conditional_fields() -> set[str]:
@@ -97,7 +114,7 @@ class TestFieldContract:
         query against an empty measurement. It fails only once real data arrives -- which is
         the first live dispatch run, the least convenient moment to discover it.
         """
-        known = published_fields() | FLUX_COLUMNS
+        known = published_fields() | degraded_fields() | FLUX_COLUMNS
         for dashboard, title, query in dispatch_queries():
             for column in set(re.findall(r"\br\.([A-Za-z_][A-Za-z0-9_]*)", query)):
                 assert column in known, (
@@ -106,7 +123,7 @@ class TestFieldContract:
 
     def test_every_field_filter_names_a_field_we_publish(self):
         """`_field == "..."` is the other way a name enters a query."""
-        known = published_fields()
+        known = published_fields() | degraded_fields()
         for dashboard, title, query in dispatch_queries():
             if MEASUREMENT not in query:
                 continue
@@ -125,17 +142,25 @@ class TestFieldContract:
 class TestConditionalFields:
     """The root cause behind three separate panel bugs, and the reason it is worth a class.
 
-    `state.py` writes `expires_at`, `slot_start`, `slot_action` and `plan_run` only when they
-    mean something. Every panel here was written as if all fields arrive on every tick. They
-    do not, and the gap is invisible in test and in a fresh deployment -- it opens the first
-    time the dispatcher releases a command in production, which is a normal thing that
-    happens several times a day.
+    `state.py` writes `expires_at`, `slot_start`, `slot_action`, `plan_run`, `verified` and
+    `soc_pct` only when they mean something. Every panel here was written as if all fields
+    arrive on every tick. They do not, and the gap is invisible in test and in a fresh
+    deployment -- it opens the first time the dispatcher releases a command in production,
+    which is a normal thing that happens several times a day.
     """
 
     def test_there_are_conditional_fields_to_guard(self):
         """Guards the guard: if `state.py` ever writes everything unconditionally these
-        tests would pass by being vacuous."""
-        assert conditional_fields() == {"expires_at", "slot_start", "slot_action", "plan_run"}
+        tests would pass by being vacuous.
+
+        `verified` and `soc_pct` joined the set when they were first published, without this
+        file being touched -- which is what `conditional_fields()` deriving the set rather
+        than listing it is for. Both need the same-instant `exists` treatment as `expires_at`:
+        `verified` is absent whenever nothing was commanded, which is the normal resting case
+        and must never render as a failed write.
+        """
+        assert conditional_fields() == {"expires_at", "slot_start", "slot_action", "plan_run",
+                                        "verified", "soc_pct"}
 
     def test_the_decode_table_reads_only_unconditionally_written_fields(self):
         """`last()` returns each field's newest point WITH ITS OWN TIMESTAMP, and `pivot`

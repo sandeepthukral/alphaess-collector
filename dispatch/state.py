@@ -32,6 +32,59 @@ MEASUREMENT = "dispatch_state"
 # dashboard's decode table. `raw_0880`..`raw_0888`.
 RAW_PREFIX = "raw_"
 
+# `reason` is free text built from exception strings and slot arithmetic, so it needs a cap.
+# The same 200 the Kuma pings use (`scheduler.monitor_pings`), for the same reason: these two
+# carry the same sentence to two places, and a reason that reads differently depending on
+# where you saw it is worse than one that is merely long.
+REASON_MAX = 200
+
+
+def _decision_fields(
+    decision_kind: str,
+    reason: str,
+    live: bool,
+    live_soc_pct: float | None,
+    write_verified: bool | None,
+) -> dict[str, int | float | str]:
+    """What the DISPATCHER knows about this tick, as opposed to what the inverter said.
+
+    Shared by both point shapes on purpose. Every value here is computed before a single
+    register is touched, so none of it is lost when the inverter cannot be read -- and a
+    Modbus outage is exactly when you want to know what the loop decided and why. That is the
+    same argument `build_degraded_fields` already makes for `slot_action` and `plan_run`,
+    applied to the four things that were previously only ever written to the log.
+
+    `live` is published rather than inferred. `dispatch_active == 0` is what a dry run looks
+    like and also what a healthy release looks like -- section 4.1 makes the release a
+    decision like any other -- so a dashboard reading the register alone cannot tell "writing
+    nothing because we are observing" from "writing nothing because the plan asked for it".
+
+    `verified` is an int, not a bool, and that is deliberate. Grafana's stat panel reduces
+    `""` by default, which means numeric fields only: a bool would be dropped exactly as a
+    string is, forcing the `/.*/` path and value mappings where 0/1 gets thresholds -- the
+    mechanism this repo already uses everywhere for red and green. `dispatch_active` sets the
+    precedent, publishing a truth value as the int the register holds.
+    """
+    fields: dict[str, int | float | str] = {
+        "decision_kind": str(decision_kind or "unknown"),
+        # Unconditional, unlike everything else gated in this module, and the distinction is
+        # the one the module turns on: the gated fields are ones that could not be READ, while
+        # the loop always has a decision and always has a reason for it. `Decision.reason` is
+        # never empty in production, so the fallback only covers a bare call.
+        "reason": str(reason or "unspecified")[:REASON_MAX],
+        "live": int(bool(live)),
+    }
+    # Both conditional, and for the same reason the rest of this module gates fields: the
+    # honest report of a value that was not read is no field at all. `verified` has three
+    # states and only two of them are a readback -- None means nothing was commanded this
+    # tick, so there was nothing to confirm, which is the normal resting case and must not
+    # render as a failure.
+    if live_soc_pct is not None:
+        fields["soc_pct"] = float(live_soc_pct)
+    if write_verified is not None:
+        fields["verified"] = int(bool(write_verified))
+    return fields
+
 
 def describe_action(state: dict, decision_kind: str = "") -> str:
     """A phrase a human can read without knowing the register map.
@@ -73,10 +126,19 @@ def build_fields(
     decision_kind: str = "",
     slot: dict | None = None,
     plan_run: str = "",
+    reason: str = "",
+    live: bool = False,
+    live_soc_pct: float | None = None,
+    write_verified: bool | None = None,
 ) -> dict:
     """One `dispatch_state` point's fields. Pure -- every value is a function of the inputs.
 
     `now` is passed in rather than read from the clock so `expires_at` is reproducible.
+
+    `write_verified` rather than `verified`, because `scheduler.tick` already binds
+    `verified` to the DECODED BLOCK. Two different things one letter apart, in the one place
+    that handles both; the field on the point is `verified`, matching the log line an
+    operator reads.
     """
     if len(raw_words) != R.DISPATCH_BLOCK[1]:
         raise ValueError(
@@ -94,6 +156,7 @@ def build_fields(
         "setpoint_w": int(state["power_w"]),
         "target_soc_pct": float(state["target_soc_pct"]),
         "duration_s": int(state["duration_s"]),
+        **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified),
     }
 
     # `expires_at` is when the dead man's switch runs out if nothing is written again. It is
@@ -124,6 +187,11 @@ def build_degraded_fields(
     slot: dict | None = None,
     plan_run: str = "",
     read_error: str = "",
+    decision_kind: str = "",
+    reason: str = "",
+    live: bool = False,
+    live_soc_pct: float | None = None,
+    write_verified: bool | None = None,
 ) -> dict:
     """One `dispatch_state` point for a tick that decided but could not read the inverter.
 
@@ -140,6 +208,12 @@ def build_degraded_fields(
     outage from rendering as a hole in the tick stream, indistinguishable from a loop that
     died. The `read_error` field is the reason, in the words the exception used.
 
+    `_decision_fields` is present for the same reason, and `soc_pct` is the one worth
+    pointing at: the SoC register and the dispatch block are two separate reads, and the
+    common failure is the second one alone. So a degraded point routinely knows the live SoC
+    the decision was made against, and dropping it because some other read failed would throw
+    away a value that was successfully obtained.
+
     Not merged into `build_fields()` with optional arguments: that function's contract is
     "every value is a function of a readback", and a version of it that sometimes has no
     readback would need a branch at every field. Two small functions, one of which cannot
@@ -147,6 +221,7 @@ def build_degraded_fields(
     """
     fields: dict[str, int | float | str] = {
         "read_error": read_error or "inverter unreadable",
+        **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified),
     }
     if slot:
         fields["slot_start"] = int(

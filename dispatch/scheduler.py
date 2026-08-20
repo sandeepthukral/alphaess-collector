@@ -496,19 +496,31 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     cache["raw_words"] = raw_words
     publisher = cache.get("publisher")
     plan_run = (cache.get("doc") or {}).get("plan_run", "")
+    # What the DISPATCHER knew this tick, as opposed to what the inverter said. Both point
+    # shapes get it, because none of it depends on a register having been readable -- see
+    # `state._decision_fields`. Until now these four went only to the log and to Kuma, so the
+    # dashboard could show a command and never show that it failed to land.
+    known = {
+        "decision_kind": decision.kind,
+        "reason": decision.reason,
+        "live": not inv.dry_run,
+        "live_soc_pct": live_soc,
+        # NOT the local `verified`, which is the decoded block. This is step 8's verdict on
+        # whether the write landed, and it is None whenever there was nothing to confirm.
+        "write_verified": cache.get("write_verified"),
+    }
     if publisher is not None:
         if verified is not None and raw_words is not None:
             publisher.publish(
                 state_mod.build_fields(
                     verified, raw_words, now,
-                    decision_kind=decision.kind, slot=decision.slot,
-                    plan_run=plan_run),
+                    slot=decision.slot, plan_run=plan_run, **known),
                 now=now)
         else:
             publisher.publish(
                 state_mod.build_degraded_fields(
                     slot=decision.slot, plan_run=plan_run,
-                    read_error=read_error or "no readback this tick"),
+                    read_error=read_error or "no readback this tick", **known),
                 now=now)
 
     write_heartbeat(decision, verified, live_soc, surplus_w)

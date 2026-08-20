@@ -188,10 +188,21 @@ class TestDegradedFields:
             "slot_start": int(dt.datetime(2026, 8, 1, 12, 0, tzinfo=UTC).timestamp()),
             "slot_action": "hold",
             "plan_run": "2026-08-01T09:00:00Z",
+            # What the dispatcher knew, which no failed read can take away. Defaults here
+            # because this call passes none of them; `tests/test_dispatch_state.py` covers
+            # them being carried through.
+            "decision_kind": "unknown",
+            "reason": "unspecified",
+            "live": 0,
         }
 
     def test_outside_a_slot_it_is_just_the_reason(self):
-        assert state_mod.build_degraded_fields() == {"read_error": "inverter unreadable"}
+        assert state_mod.build_degraded_fields() == {
+            "read_error": "inverter unreadable",
+            "decision_kind": "unknown",
+            "reason": "unspecified",
+            "live": 0,
+        }
 
     def test_its_fields_are_ones_the_review_page_pivots_on(self):
         """Not decoration: `review-dry-run.py` only sees a tick if one of these is present."""
