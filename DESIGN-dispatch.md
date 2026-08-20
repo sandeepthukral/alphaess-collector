@@ -562,6 +562,26 @@ deliver the planned energy within tolerance? This is the only check that catches
 monitor green but the battery is not following the plan", and it feeds the `dispatch-vs-plan`
 monitor in §6.
 
+**The judgement it needs already exists, in `dispatch/reliability.py`.** That module holds
+the thresholds (`TICK_S`, `GAP_S`, `COLLECTOR_GAP_S`, `MATCH_PAD_S`, `STALE_PLAN_S`,
+`IDLE_W`), the primitives (`decision_runs`, `find_gaps`, `longest_hole`, `mean_between`) and
+`analyse()`, which returns `Finding` records rather than sentences. It grew inside
+`scripts/review-dry-run.py` and was extracted so the nightly job cannot disagree with the
+page a reader opens to check it — a monitor saying last night was fine, linking to a page
+saying it was not, is worse than having neither.
+
+The split is analysis from rendering, not just a move of files. `findings()` used to build
+HTML, so it could only ever serve the page; the renderer now lives in the script and every
+branch of it reads numbers out of `Finding.detail` without re-deriving anything.
+
+**Why the fault-vs-stall attribution is Python and not Flux.** For each dispatch gap over
+`GAP_S`, `attribute_gap()` takes the longest hole in `power_readings.battery_power_w` over
+`[start − MATCH_PAD_S, end + MATCH_PAD_S]` and calls it a network stall at
+`COLLECTOR_GAP_S` or more. The padding is asymmetric in effect and load-bearing: measured
+strictly inside the gap, the real 02:14 stall of 2026-08-18 scored 123 s and would have been
+reported as a dispatch bug. That is a cross-series correlation with tested behaviour behind
+it, and it is the number the whole page turns on.
+
 ---
 
 ## 6. Monitoring

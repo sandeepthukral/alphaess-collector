@@ -48,39 +48,28 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# `dispatch/` too, and flat, which is how those modules import each other and how the
+# Dockerfile lays them out in /app -- so this script imports exactly what runs in production.
+sys.path.insert(0, str(REPO / "dispatch"))
 
 import review_page  # noqa: E402
+from reliability import (  # noqa: E402
+    DEFAULT_SOC_FLOOR,
+    FIELDS,
+    STALE_PLAN_S,
+    TICK_S,
+    analyse,
+    by_severity,
+    decision_runs,
+    mean_between,
+)
 from review_page import COLOURS, TZ_LABEL, hour_step, local  # noqa: E402
 
-# The dispatcher's own loop interval. A gap materially longer than this means the loop missed
-# a tick, which in dry run is otherwise invisible: `action` reads `no dispatch` either way.
-TICK_S = 60
-# Two missed ticks. One slow tick is a slow Modbus read, which is normal and not worth a
-# finding; three minutes of silence is the loop not running.
-GAP_S = 180
-# A hole in the COLLECTOR's own sampling, near a dispatch gap, that means both processes
-# stopped together rather than the dispatch loop dying on its own. The collector samples about
-# every 30 s and `q_series` averages into one-minute buckets, so consecutive points are
-# normally 60 s apart; 150 s is at least two missing buckets and cannot be jitter.
-COLLECTOR_GAP_S = 150
-# How far either side of the dispatch gap to look for that hole. THE TWO DO NOT ALIGN, and
-# expecting them to is the mistake this constant exists to fix: they poll at different rates,
-# over different transports, with different timeouts, so a network spell takes them out at
-# different moments and releases them at different moments. Measured strictly inside the
-# dispatch gap, the real 02:14 stall of 2026-08-18 scored 123 s -- under the threshold -- only
-# because the collector held on 110 s longer at the start and recovered 43 s later at the end.
-# Two minutes covers that skew without reaching into unrelated minutes.
-MATCH_PAD_S = 120
-# A plan older than this is one the translator should already have replaced -- it runs every
-# five minutes, against a planner that runs hourly. Tracks `slots.MAX_PLAN_AGE`, which is two
-# missed planner runs; see monitor #4 in DESIGN-dispatch.md section 6.1.
-STALE_PLAN_S = 2 * 3600
-# Below this, `slots.decide()` refuses a discharge (the direction guard). A discharge decided
-# here would be a translator bug, and is the one decision on this page that is a real fault.
-DEFAULT_SOC_FLOOR = 10.0
-# Battery power below this is noise, not a direction. The same floor the corpus review uses
-# for classifying an interval as doing something.
-IDLE_W = 50
+# The thresholds live in `dispatch/reliability.py` and are imported above, not restated
+# here. They were declared twice -- once in this file and once in `is-it-deciding.py` --
+# bound only by a comment saying they had to match, which is the arrangement
+# `review_page.py`'s own docstring argues against. Two scripts disagreeing about what counts
+# as a stalled loop is a worse failure than either number being slightly wrong.
 
 W, H_MAIN, H_PRICE, PAD_L, PAD_R, PAD_T = 1120, 250, 90, 52, 20, 14
 
@@ -150,165 +139,74 @@ def q_series(api, bucket, measurement, field, start, stop, every="1m"):
             for t in tables for rec in t.records if rec.get_value() is not None]
 
 
-def decision_runs(ticks: list[dict]) -> list[dict]:
-    """Collapse per-minute ticks into contiguous runs of the same decision.
+def _hhmm(t) -> str:
+    return f"{local(t):%H:%M}"
 
-    A day is ~1,440 ticks and perhaps 20 decisions. The runs are what a human reviews; the
-    ticks are what the gap check needs. Both are kept.
+
+def render(f) -> str:
+    """One finding as the sentence the page shows.
+
+    Rendering is HERE and the judgement is in `reliability.py`, which is the whole point of
+    the split: this function decides how alarming something LOOKS, and cannot accidentally
+    decide whether it IS a fault. Every branch reads the numbers out of `detail` -- nothing
+    is re-derived, so the page and the nightly rollup can never describe the same window
+    differently.
     """
-    runs: list[dict] = []
-    for t in ticks:
-        act = t.get("slot_action") or "self"
-        if runs and runs[-1]["action"] == act and \
-                (t["_time"] - runs[-1]["last"]).total_seconds() <= GAP_S:
-            runs[-1]["last"] = t["_time"]
-            runs[-1]["ticks"] += 1
-        else:
-            runs.append({"action": act, "start": t["_time"], "last": t["_time"], "ticks": 1,
-                         "plan_run": t.get("plan_run", "")})
-    for r in runs:
-        # The run owns the minute it last decided in, so the band reaches the next decision
-        # rather than stopping a tick short and leaving a hairline gap between every band.
-        r["end"] = r["last"] + dt.timedelta(seconds=TICK_S)
-    return runs
+    d = f.detail
 
-
-def mean_between(series, t0, t1):
-    vals = [v for t, v in series if t0 <= t < t1]
-    return sum(vals) / len(vals) if vals else None
-
-
-def find_gaps(ticks: list[dict]) -> list[tuple[dt.datetime, dt.datetime, float]]:
-    out = []
-    for a, b in zip(ticks, ticks[1:]):
-        gap = (b["_time"] - a["_time"]).total_seconds()
-        if gap > GAP_S:
-            out.append((a["_time"], b["_time"], gap))
-    return out
-
-
-def longest_hole(series, t0: dt.datetime, t1: dt.datetime) -> float:
-    """Seconds of the longest stretch inside [t0, t1] where `series` has no point.
-
-    The window edges count as boundaries, so a series that simply stops before `t0` and
-    resumes after `t1` reports the whole window rather than zero -- which is the answer that
-    matters, since that is exactly the shape of a collector that was also down.
-    """
-    edges = [t0] + [t for t, _ in series if t0 < t < t1] + [t1]
-    return max((b - a).total_seconds() for a, b in zip(edges, edges[1:]))
-
-
-def findings(ticks, runs, battery, soc,
-             soc_floor) -> tuple[list[str], list[str], list[str]]:
-    """(faults, previews). Two lists, because they are read completely differently.
-
-    A fault is something to fix before going live. A preview is a behaviour change going live
-    would cause -- the reason for doing it at all. Mixing them into one "warnings" list, as
-    the corpus review can afford to, would make a normal dry-run day look alarming.
-
-    A stall is the third kind and it is neither: the tick stream stopped because something
-    upstream of the whole stack stopped, and no change to `dispatch/` would prevent it. It is
-    separated rather than dropped because a silent omission is how you stop noticing that the
-    network is bad.
-    """
-    faults, previews, stalls = [], [], []
-
-    for t0, t1, gap in find_gaps(ticks):
-        # WHY THE COLLECTOR IS THE CONTROL. This page used to assert that a gap was "the loop
-        # not running", which it cannot know: the two processes reach entirely different
-        # things -- dispatch talks Modbus to the inverter over the LAN, the collector talks
-        # HTTPS to the AlphaESS cloud over the WAN -- so nothing short of something upstream
-        # of both stalls both. On 2026-08-17/18 all six gaps were of that kind, during a spell
-        # of bad home networking, and the page called every one of them a dispatch fault.
-        # Stating a cause with no evidence, on the most alarming item on the page, is the
-        # worst place to be confidently wrong.
-        pad = dt.timedelta(seconds=MATCH_PAD_S)
-        hole = longest_hole(battery, t0 - pad, t1 + pad)
-        where = f"{local(t0):%H:%M} &rarr; {local(t1):%H:%M}"
-        if not battery:
-            faults.append(
-                f"<b>{gap / 60:.0f} min with no decision</b>, {where}. The loop ticks every "
-                f"{TICK_S} s, so this is either the loop or the network &mdash; and there is "
-                f"no <code>power_readings</code> data in this window to tell them apart")
-        elif hole >= COLLECTOR_GAP_S:
-            stalls.append(
-                f"<b>{gap / 60:.0f} min</b>, {where}. The collector stopped sampling around "
-                f"the same time, for {hole / 60:.0f} min, and it reaches the AlphaESS cloud "
-                f"over the WAN while dispatch reaches the inverter over the LAN &mdash; so "
-                f"this is upstream of both, not the dispatch loop")
-        else:
-            faults.append(
-                f"<b>{gap / 60:.0f} min with no decision</b>, {where}. The collector kept "
+    if f.kind == "gap":
+        where = f"{_hhmm(d['start'])} &rarr; {_hhmm(d['end'])}"
+        mins = d["gap_s"] / 60
+        if d["cause"] == "unknown":
+            return (f"<b>{mins:.0f} min with no decision</b>, {where}. The loop ticks every "
+                    f"{TICK_S} s, so this is either the loop or the network &mdash; and "
+                    f"there is no <code>power_readings</code> data in this window to tell "
+                    f"them apart")
+        if d["cause"] == "network":
+            return (f"<b>{mins:.0f} min</b>, {where}. The collector stopped sampling around "
+                    f"the same time, for {d['hole_s'] / 60:.0f} min, and it reaches the "
+                    f"AlphaESS cloud over the WAN while dispatch reaches the inverter over "
+                    f"the LAN &mdash; so this is upstream of both, not the dispatch loop")
+        return (f"<b>{mins:.0f} min with no decision</b>, {where}. The collector kept "
                 f"sampling either side of it, so the network was up and <b>this one is the "
                 f"dispatch loop</b>. In dry run nothing else shows it &mdash; "
                 f"<code>action</code> reads <code>no dispatch</code> either way")
 
-    armed = [t for t in ticks if (t.get("action") or "") != "no dispatch"]
-    if armed:
-        kinds = ", ".join(sorted({str(t.get("action")) for t in armed}))
-        faults.append(
-            f"<b>{len(armed)} tick(s) found the dispatch block ARMED</b> ({kinds}). Dry run "
-            f"writes nothing, so this dispatcher did not do it: something else is driving the "
-            f"registers &mdash; the app&rsquo;s price control, or a leftover command. This is "
-            f"monitor #7&rsquo;s case and it blocks going live")
+    if f.kind == "armed":
+        return (f"<b>{d['ticks']} tick(s) found the dispatch block ARMED</b> "
+                f"({', '.join(html.escape(k) for k in d['kinds'])}). Dry run writes nothing, "
+                f"so this dispatcher did not do it: something else is driving the registers "
+                f"&mdash; the app&rsquo;s price control, or a leftover command. This is "
+                f"monitor #7&rsquo;s case and it blocks going live")
 
-    for r in runs:
-        if r["action"] != "discharge":
-            continue
-        window = [v for t, v in soc if r["start"] <= t < r["end"]]
-        lo = min(window) if window else None
-        if lo is not None and lo < soc_floor:
-            faults.append(
-                f"<b>discharge decided at {lo:.1f}% SoC</b>, below the {soc_floor:.0f}% floor, "
-                f"{local(r['start']):%H:%M}&ndash;{local(r['end']):%H:%M}. "
-                f"<code>slots.decide()</code>&rsquo;s direction guard should have refused this")
+    if f.kind == "discharge_below_floor":
+        return (f"<b>discharge decided at {d['soc_pct']:.1f}% SoC</b>, below the "
+                f"{d['floor_pct']:.0f}% floor, {_hhmm(d['start'])}&ndash;{_hhmm(d['end'])}. "
+                f"<code>slots.decide()</code>&rsquo;s direction guard should have refused "
+                f"this")
 
-    stale = [t for t in ticks if t.get("plan_run") and
-             (t["_time"] - review_page.parse_ts(str(t["plan_run"]))).total_seconds()
-             > STALE_PLAN_S]
-    if stale:
-        worst = max((t["_time"] - review_page.parse_ts(str(t["plan_run"]))).total_seconds()
-                    for t in stale)
-        faults.append(
-            f"<b>{len(stale)} tick(s) acted on a plan over "
-            f"{STALE_PLAN_S / 3600:.0f} h old</b>, worst {worst / 3600:.1f} h. The planner "
-            f"runs hourly, so this means it stopped &mdash; monitor #3")
+    if f.kind == "stale_plan":
+        return (f"<b>{d['ticks']} tick(s) acted on a plan over "
+                f"{STALE_PLAN_S / 3600:.0f} h old</b>, worst {d['worst_s'] / 3600:.1f} h. "
+                f"The planner runs hourly, so this means it stopped &mdash; monitor #3")
 
-    for r in runs:
-        # `self` is excluded on purpose and is not an oversight: section 4.1 makes it the
-        # deliberate RELEASE of dispatch, so the battery running self-consumption under it is
-        # the decision being honoured. There is nothing going live would change.
-        if r["action"] == "self":
-            continue
-        actual = mean_between(battery, r["start"], r["end"])
-        if actual is None:
-            continue
-        # `battery_power_w` is the collector's raw sign convention: positive means the battery
-        # is DISCHARGING. Flipped once here so both sides of the comparison are
-        # charging-positive, matching `setpoint_w` and every panel on the dashboard.
-        actual_cp = -actual
+    if f.kind == "blind":
+        errs = ", ".join(f"<code>{html.escape(e)}</code>" for e in d["errors"])
+        more = "" if d["distinct"] <= len(d["errors"]) else \
+            f" and {d['distinct'] - len(d['errors'])} other(s)"
+        return (f"<b>{d['ticks']} tick(s) could not read the inverter</b> ({errs}{more}). "
+                f"The loop was alive and deciding throughout &mdash; a degraded tick "
+                f"publishes its decision and no register readback, which is the fail-safe "
+                f"working. Before <code>read_error</code> was queried these ticks were not "
+                f"rows at all, and a run of them read as a gap")
 
-        if r["action"] == "hold":
-            # A hold freezes the battery at 0 W. Against a battery that was moving, that is
-            # the largest behaviour change on this page and the easiest to overlook, because
-            # "hold" sounds like "do nothing" -- it is not, it is Mode 3 actively holding the
-            # battery still while the house runs off the grid.
-            diverged = abs(actual_cp) >= IDLE_W
-            wanted = "frozen at 0 W"
-        else:
-            wanted_sign = 1 if r["action"] == "charge" else -1
-            diverged = (abs(actual_cp) < IDLE_W
-                        or (actual_cp > 0) != (wanted_sign > 0))
-            wanted = "charging" if wanted_sign > 0 else "discharging"
+    if f.kind == "divergence":
+        return (f"{_hhmm(d['start'])}&ndash;{_hhmm(d['end'])} decided "
+                f"<b>{d['action']}</b> ({d['wanted']}); the battery was actually doing "
+                f"{d['actual_w']:+.0f} W. Going live would have overridden self-consumption "
+                f"for {d['ticks']} min here")
 
-        if diverged:
-            previews.append(
-                f"{local(r['start']):%H:%M}&ndash;{local(r['end']):%H:%M} decided "
-                f"<b>{r['action']}</b> ({wanted}); the battery was actually doing "
-                f"{actual_cp:+.0f} W. Going live would have overridden self-consumption "
-                f"for {r['ticks']} min here")
-
-    return faults, previews, stalls
+    raise AssertionError(f"no renderer for finding kind {f.kind!r}")
 
 
 def svg_chart(runs, battery, soc, price, t0, t1) -> str:
@@ -485,9 +383,9 @@ def main() -> int:
           f"{local(t1):%H:%M} {TZ_LABEL}")
     with InfluxDBClient(url=a.url, token=token, org=a.org) as client:
         api = client.query_api()
-        ticks = q_pivot(api, a.bucket, "dispatch_state",
-                        ["slot_action", "action", "plan_run", "setpoint_w", "dispatch_active"],
-                        t0, t1)
+        # `reliability.FIELDS`, not a list written out here. `read_error` joined it and
+        # this call did not, which is how a degraded tick stayed invisible to the page.
+        ticks = q_pivot(api, a.bucket, "dispatch_state", list(FIELDS), t0, t1)
         battery = q_series(api, a.bucket, "power_readings", "battery_power_w", t0, t1)
         soc = q_series(api, a.bucket, "power_readings", "soc_percent", t0, t1)
         # `market_price`, not `total`. Two reasons, and the first one is the important one:
@@ -502,7 +400,11 @@ def main() -> int:
         sys.exit("no dispatch_state points in that window -- is the dispatcher running?")
 
     runs = decision_runs(ticks)
-    faults, previews, stalls = findings(ticks, runs, battery, soc, a.soc_floor)
+    found = by_severity(analyse(ticks, runs, battery, soc, a.soc_floor))
+    faults = [render(f) for f in found["fault"]]
+    previews = [render(f) for f in found["preview"]]
+    stalls = [render(f) for f in found["stall"]]
+    degraded = [render(f) for f in found["degraded"]]
     counts = Counter(r["action"] for r in runs)
     tick_counts = Counter((t.get("slot_action") or "self") for t in ticks)
     plan_runs = sorted({str(t["plan_run"]) for t in ticks if t.get("plan_run")})
@@ -533,6 +435,15 @@ def main() -> int:
         f"{len(stalls)} network stall(s) &mdash; nothing to fix here"
     ) + "</summary><ul class='stalls'>"
         + "".join(f"<li>{s}</li>" for s in stalls) + "</ul></details>") if stalls else ""
+    # Collapsed for the same reason as the stalls and NOT for the same reason as a fault:
+    # an unreachable inverter is not a dispatch bug, and the loop having kept deciding
+    # through it is the fail-safe working rather than damage to account for. It gets a block
+    # at all because the alternative is what it had before -- nothing, and the ticks
+    # misreported as a dead loop.
+    degraded_html = ("<details><summary>" + (
+        f"{len(degraded)} degraded tick block(s) &mdash; inverter unreadable, loop alive"
+    ) + "</summary><ul class='stalls'>"
+        + "".join(f"<li>{s}</li>" for s in degraded) + "</ul></details>") if degraded else ""
     preview_html = ("<div class='legend'><div class='leg'><b>What going live would have "
                     "changed</b></div>"
                     + "".join(f"<div class='leg note' style='margin:0;padding:0;border:0'>"
@@ -549,6 +460,7 @@ def main() -> int:
         legend=legend,
         faults=fault_html,
         stalls=stall_html,
+        degraded=degraded_html,
         previews=preview_html,
         rows="".join(rows),
         ticks=len(ticks),
@@ -568,7 +480,8 @@ def main() -> int:
     )
     out.write_text(page)
     print(f"{len(ticks)} ticks, {len(runs)} decisions, {len(faults)} faults, "
-          f"{len(stalls)} network stalls, {len(previews)} previews -> {out}")
+          f"{len(stalls)} network stalls, {len(degraded)} degraded, "
+          f"{len(previews)} previews -> {out}")
     return 0
 
 
@@ -596,6 +509,8 @@ HTML = """<title>Dry Run Decisions</title>
 {faults}
 
 {stalls}
+
+{degraded}
 
 <section>
   <div class="rh">

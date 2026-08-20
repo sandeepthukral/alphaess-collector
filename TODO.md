@@ -6,7 +6,8 @@ outlive a single branch but do not deserve a document of their own.
 It is **not** a worklist. `DISPATCH-GOLIVE.md` and `CODE-REVIEW.md` are worklists — they have
 a running order, a resume point, and boxes that get ticked in the same change as the work.
 This file has no order. Delete a line when it is done rather than ticking it; the git history
-is the record.
+is the record. The numbers are stable labels, not a sequence — a gap means that item is done,
+and renumbering would break every reference to it in a commit message or a PR.
 
 ---
 
@@ -21,27 +22,6 @@ It names the symptom too, which is the reason this is first on the list: *"a fix
 not to have worked, which sends you back to re-debug a query that was already correct."*
 Bump it, and add the two missing numbered lines to the log above it (the log already skips
 16 and 17).
-
-**2. `review-dry-run.py` reports an ordinary Modbus timeout as a hijack.**
-`scripts/review-dry-run.py:246`:
-
-```python
-armed = [t for t in ticks if (t.get("action") or "") != "no dispatch"]
-```
-
-A degraded point deliberately publishes no `action` at all — `dispatch/state.py:129-141` is
-explicit that the honest report of an unreadable inverter is a missing field, not a stale one.
-So `None` → `""` → `!= "no dispatch"` → counted as armed, and `kinds` on the next line renders
-the literal string `"None"`. The result is the most alarming finding on the page — *the
-dispatch block was ARMED by something that is not this dispatcher* — fired by the most
-ordinary fault there is. The predicate wants `exists action and action != "no dispatch"`.
-
-**3. `review-dry-run.py` never queries `read_error`.**
-It pivots on `slot_action`, `action`, `plan_run`, `setpoint_w`, `dispatch_active` — none of
-which a degraded tick writes when there is no active slot. Such a tick contributes no pivot
-row and is invisible to the review entirely: not a gap, not a fault, not a stall. Adding
-`read_error` to the field list closes it, and gives the page a third category it does not
-have today — the loop alive and deciding, with the inverter unreadable.
 
 **4. `tests/test_dispatch_goldens.py:330` string-sorts `plan_run`.**
 
