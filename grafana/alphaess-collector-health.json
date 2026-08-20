@@ -976,6 +976,10 @@
               {
                 "id": "decimals",
                 "value": 0
+              },
+              {
+                "id": "custom.width",
+                "value": 110
               }
             ]
           }
@@ -983,7 +987,7 @@
       },
       "gridPos": {
         "h": 10,
-        "w": 24,
+        "w": 8,
         "x": 0,
         "y": 21
       },
@@ -1040,6 +1044,6 @@
   "timezone": "browser",
   "title": "Collector Health",
   "uid": "alphaess-collector-health",
-  "version": 6,
+  "version": 7,
   "weekStart": ""
 }
