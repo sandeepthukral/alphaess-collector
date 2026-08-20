@@ -245,8 +245,9 @@ class TestArchiveWide:
     def test_overlapping_runs_resolve_to_one_interval_per_instant(self):
         """Section 3.3's newest-wins rule, exercised by ordinary data.
 
-        With runs every 3 h over ~30 h horizons, every instant is covered by roughly a dozen
-        runs -- so this needs no contrived fixture, only the archive.
+        Over ~30 h horizons every instant is covered by roughly a dozen runs at the 3-hourly
+        cadence, and by ~30 at the hourly one the planner moved to -- so this needs no
+        contrived fixture, only the archive.
         """
         every = [i for ivs, _meta in CORPUS for i in ivs]
         resolved = newest_by_interval(every)

@@ -23,15 +23,45 @@ from registers import Command, DispatchMode
 REFRESH_INTERVAL_S = 60
 DISPATCH_DURATION_S = 300
 
-# A plan older than this is not extrapolated. The planner runs every 3 h, so 4 h means one
-# run may be missed or late without the battery falling back; two misses and it does.
-MAX_PLAN_AGE = dt.timedelta(hours=4)
+# A plan older than this is not extrapolated. TWO MISSED RUNS, and the number follows the
+# planner's cadence rather than the clock: it runs HOURLY (confirmed 2026-08-20 -- `plan_run`
+# lands at :05 past every hour, unbroken over the preceding 30 h), so this is the same "one
+# run may be late without the battery falling back, two and it does" rule the original 4 h
+# encoded when the planner ran 3-hourly.
+#
+# The trade is not "strict vs lenient", it is which wrong answer to prefer. Too wide, and a
+# dead planner keeps the battery following a plan whose assumptions have expired -- the exact
+# failure `dispatch-vs-plan` cannot see, because every register still reads healthy. Too
+# narrow, and one late run drops the battery to plain self-consumption, which costs the
+# plan's arbitrage but cannot do anything unsafe. The second is the better failure, and it is
+# also the reversible one.
+MAX_PLAN_AGE = dt.timedelta(hours=2)
 
 # Live SoC has to differ from the target by at least this much for a Mode 2 command to do
 # anything. The SoC register steps in 0.4 % and the measurement register reads to 0.1 %, so a
 # target within a hair of the current value is a command to do nothing -- which the inverter
 # accepts, leaving every monitor green while nothing happens.
-SOC_DEADBAND_PCT = 1.0
+#
+# ONE REGISTER STEP, not the 1.0 % this started at. The deadband exists to catch a command
+# that cannot express itself; it is not a tolerance on the plan. At 27,900 Wh, 1.0 % is 279 Wh
+# and 3.5 minutes of a 4,850 W charge, so the old value ENDED EVERY CHARGE EARLY rather than
+# suppressing a no-op. MEASURED 2026-08-20: the 15:15 slot commanded 4,848 W to 65.3 %, and at
+# 13:24:35Z with the gauge reading 64.4 % the deadband downgraded it to a hold -- 5.5 minutes
+# before the slot ended, with 2.6 kW of PV going to the meter for the rest of it.
+SOC_DEADBAND_PCT = 0.4
+
+# Generation beyond the house load, above which a hold that would otherwise freeze the battery
+# is released to self-consumption instead. See `_charge_target_reached`.
+#
+# Derived from the two power registers rather than read from the grid meter alone, because
+# grid power MOVES WHEN WE ACT: release the battery, the surplus flows into it, the meter
+# reads ~0, and a rule keyed on the meter flips back to hold on the next tick -- a 60 s
+# oscillation between frozen and released. Generation-minus-load does not move, because
+# `load = pv + grid + battery` is an identity (positive grid = import, positive battery =
+# discharge), so `surplus = pv - load = -(grid + battery)` is invariant to what the battery
+# is doing. Verified against both states of the same afternoon: frozen, grid -2,628 W and
+# battery 0 gives 2,628 W; charging, grid +2,371 W and battery -4,823 W gives 2,452 W.
+SURPLUS_HARVEST_W = 200.0
 
 # The ceiling `clamp()` will not exceed whatever the inverter says about itself.
 #
@@ -152,16 +182,52 @@ def find_slot(doc: dict, now: dt.datetime) -> dict | None:
     return None
 
 
+def _charge_target_reached(slot: dict, target: float, live_soc_pct: float,
+                           surplus_w: float | None) -> Decision:
+    """A charge slot whose target the battery has already reached.
+
+    THE OLD ANSWER WAS A 0 W HOLD, AND IT GAVE AWAY SOLAR. A hold is Mode 3 at zero, which
+    freezes the battery for the rest of the slot; if the sun is producing more than the house
+    is using, every watt of that goes to the meter at the sell price. MEASURED 2026-08-20
+    13:24:35Z-13:30Z: frozen at 64.4 % against a 65.3 % target while PV made 3.0 kW against a
+    0.4 kW load, exporting 2.6 kW for five and a half minutes -- and the following slot then
+    bought from the grid to put the same energy back.
+
+    So when there IS surplus generation, release to self-consumption instead. That is the
+    same judgement `translator._can_harvest` makes on the plan: the battery absorbing free
+    solar is never the wrong answer on an interval the plan wanted CHARGED, and unlike a Mode 2
+    command it cannot be a no-op, because self-consumption has no target to have arrived at.
+
+    With no surplus -- night, or a house eating everything it makes -- hold is still right, and
+    is still what an unreadable power register falls back to. Releasing there would let the
+    battery cover the house load and spend the charge the plan just paid for.
+    """
+    reason = (f"charge target {target:.1f}% not above live SoC {live_soc_pct:.1f}% "
+              f"(+{SOC_DEADBAND_PCT}% deadband)")
+    if surplus_w is not None and surplus_w > SURPLUS_HARVEST_W:
+        return Decision(
+            "release",
+            f"{reason} -- releasing to self-consumption to soak up {surplus_w:.0f} W "
+            f"of surplus generation",
+            slot=slot)
+    return Decision(
+        "command", f"{reason} -- holding instead",
+        command=Command(DispatchMode.FOLLOW, 0, None, DISPATCH_DURATION_S), slot=slot)
+
+
 def decide(
     doc: dict | None,
     now: dt.datetime,
     live_soc_pct: float | None,
     load_error: str = "",
+    surplus_w: float | None = None,
 ) -> Decision:
     """Sections 5.2-5.6, as one pure function.
 
     `doc` is None when slots.json could not be read at all; `load_error` carries why.
     `live_soc_pct` is None when the SoC register could not be read this tick.
+    `surplus_w` is generation beyond the house load, `-(grid_w + battery_w)`, or None when
+    either register could not be read -- see SURPLUS_HARVEST_W.
     """
     if doc is None:
         return Decision("idle", load_error or "no slots loaded", fresh=False)
@@ -183,12 +249,41 @@ def decide(
         return Decision("release", "plan wants self-consumption", slot=slot)
 
     if action == "hold":
+        # THE PLAN'S OWN HOLD, OVERRIDDEN ONLY BY MEASURED SURPLUS. The plan holds when it
+        # forecasts the battery neither charging nor discharging, and freezing is right
+        # whenever it is protecting its inventory. But the forecast that decides this is the
+        # one the archive shows to be least reliable: PV runs ~2.3x low in the late afternoon
+        # (see `translator._can_harvest`), so a hold with a near-zero export forecast is
+        # routinely a hold with kilowatts actually spilling.
+        #
+        # MEASURED 2026-08-20: the 15:00 slot planned a 106 Wh export and exported ~675 Wh,
+        # and the 15:15 slot then BOUGHT 1 kWh from the grid to put the same energy back.
+        # Feed-in that quarter paid EUR 0.079/kWh; the buys the plan makes later that
+        # afternoon cost EUR 0.23-0.32/kWh all-in. Across the day 4.8 kWh left the meter with
+        # the battery frozen below 98 %.
+        #
+        # The override cannot cost money, which is what makes it safe to make against the
+        # optimiser: a release has no setpoint, so it can only absorb generation that already
+        # exists. The one asymmetry worth naming -- keeping headroom for a cheaper charge
+        # later -- does not arise on this tariff: the all-in buy price has not gone negative
+        # once in 45 days (the energy tax floors it), while the raw market price went negative
+        # in 137 quarter-hours, i.e. intervals where exporting COSTS money and absorbing is
+        # more right rather than less.
+        if surplus_w is not None and surplus_w > SURPLUS_HARVEST_W:
+            # If the sun goes behind a cloud a second after this, self-consumption covers the
+            # house from the battery until the next tick reverts to the freeze. That is one
+            # tick, 60 s, tens of Wh -- against the kWh/day above.
+            return Decision(
+                "release",
+                f"plan wants a hold, but {surplus_w:.0f} W of surplus generation is going to "
+                f"the meter -- releasing to self-consumption to soak it up",
+                slot=slot)
         return Decision(
             "command", "hold at 0 W",
             command=Command(DispatchMode.FOLLOW, 0, None, DISPATCH_DURATION_S), slot=slot)
 
     # charge / discharge -- re-check the direction rule against LIVE SoC, not planned SoC.
-    # The plan's trajectory was a forecast made up to three hours ago; the battery is where it
+    # The plan's trajectory was a forecast made up to an hour ago; the battery is where it
     # actually is. A Mode 2 command whose target sits the wrong side of the real SoC is a
     # silent no-op: accepted, ignored, every monitor green.
     target = float(slot["target_soc"])
@@ -198,11 +293,7 @@ def decide(
 
     if action == "charge":
         if target <= live_soc_pct + SOC_DEADBAND_PCT:
-            return Decision(
-                "command",
-                f"charge target {target:.1f}% not above live SoC {live_soc_pct:.1f}% "
-                f"(+{SOC_DEADBAND_PCT}% deadband) -- holding instead",
-                command=Command(DispatchMode.FOLLOW, 0, None, DISPATCH_DURATION_S), slot=slot)
+            return _charge_target_reached(slot, target, live_soc_pct, surplus_w)
         power = int(slot["power_w"])            # charging-positive
     else:
         if target >= live_soc_pct - SOC_DEADBAND_PCT:

@@ -9,9 +9,9 @@ corpus is what the tests and review charts use, so they never need the database.
 
 WHY INFLUX AND NOT THE PLAN FILES ON THE NAS. It is the production code path -- the same
 `plan.from_influx()` the dispatcher runs -- it needs no SSH, and only it carries the
-`plan_run` tag. With runs every 3 h over ~36 h horizons, each instant is covered by roughly a
-dozen runs, so section 3.3's newest-wins rule is exercised by ordinary data instead of a
-contrived fixture.
+`plan_run` tag. With ~36 h horizons each instant is covered by a dozen runs at the 3-hourly
+cadence the older archive was written at, and by ~36 since the planner went hourly, so section
+3.3's newest-wins rule is exercised by ordinary data instead of a contrived fixture.
 
 WHY EVERY RUN IS WRITTEN, BUT ONLY ~8 ARE MARKED. Two different jobs:
 

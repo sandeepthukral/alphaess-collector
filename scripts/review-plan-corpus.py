@@ -310,7 +310,7 @@ def plan_file_run(path: Path, capacity_wh: float) -> tuple[list, dict]:
 
     The corpus comes from InfluxDB because that is the production read path. A table file is
     the other thing the planner emits, and being able to drop one onto the page matters for
-    the newest plan of all: Influx has it only after the 3-hourly writer runs, while
+    the newest plan of all: Influx has it only after the hourly writer runs, while
     `plans/plan_YYYYMMDD_HH.txt` exists the moment the planner finishes.
 
     `plan_run` is taken from the filename rather than invented, so the tag on the page is the

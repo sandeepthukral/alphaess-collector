@@ -225,6 +225,62 @@ class TestTickEndToEnd:
         assert state["target_soc_pct"] == 20.0
         assert state["duration_s"] == S.DISPATCH_DURATION_S
 
+    def test_a_half_applied_readback_is_re_read_before_the_alarm(self, tmp_path, monkeypatch):
+        """The block does not update atomically: START is written last and lands first, so a
+        readback taken microseconds later can show `dispatch_active=1` beside a mode and power
+        the device has not ingested yet. Observed 2026-08-20 15:16:29Z on the first tick after
+        a rebuild. One re-read distinguishes that from an inverter refusing writes -- which is
+        what monitor #6 exists to say, and it can only keep saying it if it is not also said
+        on every deploy."""
+        monkeypatch.setattr(scheduler, "VERIFY_RETRY_DELAY_S", 0.0)
+        now = dt.datetime.now(UTC)
+        path = self._slots_file(tmp_path, now)
+
+        async def body(inv, _trace):
+            real = inv.read_raw_block
+            calls = []
+
+            async def flaky():
+                words = await real()
+                calls.append(1)
+                if len(calls) == 2:          # 1 = the hijack read, 2 = the verify read
+                    words = list(words)
+                    words[1], words[2] = 0, R.POWER_OFFSET   # power not ingested yet
+                    words[5] = 0                             # mode not ingested yet
+                return words
+
+            inv.read_raw_block = flaky
+            cache = {}
+            await scheduler.tick(inv, path, cache, now)
+            return cache, len(calls)
+
+        cache, reads = on_simulator(body, seed={R.REG_BATTERY_SOC: [800]})
+        assert cache["write_verified"] is True
+        assert reads == 3, "the verify read should have been retried exactly once"
+
+    def test_a_block_that_stays_wrong_still_fails_verification(self, tmp_path, monkeypatch):
+        """The retry must not turn monitor #6 off. A second read that still disagrees is an
+        inverter refusing the write, and that is the failure this design fears most."""
+        monkeypatch.setattr(scheduler, "VERIFY_RETRY_DELAY_S", 0.0)
+        now = dt.datetime.now(UTC)
+        path = self._slots_file(tmp_path, now)
+
+        async def body(inv, _trace):
+            real = inv.read_raw_block
+
+            async def wrong():
+                words = list(await real())
+                words[5] = 0
+                return words
+
+            inv.read_raw_block = wrong
+            cache = {}
+            await scheduler.tick(inv, path, cache, now)
+            return cache
+
+        cache = on_simulator(body, seed={R.REG_BATTERY_SOC: [800]})
+        assert cache["write_verified"] is False
+
     def test_a_self_slot_releases_dispatch(self, tmp_path):
         now = dt.datetime.now(UTC)
         path = self._slots_file(tmp_path, now, action="self")
@@ -402,6 +458,46 @@ class TestTickEndToEnd:
         verified, messages = on_simulator(body, seed={R.REG_BATTERY_SOC: [800]})
         assert verified is False
         assert any("WRITE NOT VERIFIED" in m for m in messages)
+
+    def test_surplus_is_read_as_negative_grid_plus_battery(self, tmp_path):
+        """The sign convention that makes the whole feature safe: `surplus = -(grid + battery)`
+        is invariant to what the battery is doing, unlike the grid meter alone. Verified
+        against the collector's independent cloud reading at 2026-08-20T14:27:24Z: grid
+        +3,099 W (importing), battery -4,795 W (charging), surplus -(3099 - 4795) = 1,696 W."""
+        now = dt.datetime.now(UTC)
+        path = self._slots_file(tmp_path, now, action="hold")
+
+        async def body(inv, _trace):
+            return await scheduler.tick(inv, path, {}, now)
+
+        decision = on_simulator(body, seed={
+            R.REG_BATTERY_SOC: [800],
+            R.REG_GRID_POWER: R.encode_int32(3099),
+            R.REG_BATTERY_POWER: [(-4795) & 0xFFFF],
+        })
+        payload = json.loads(scheduler.HEARTBEAT_PATH.read_text())
+        assert payload["surplus_w"] == 1696
+        # 1,696 W is above SURPLUS_HARVEST_W, so the plan's own hold releases to harvest it.
+        assert decision.kind == "release"
+
+    def test_an_implausible_reading_falls_back_to_no_surplus(self, tmp_path):
+        """A decode error on a register neither read by this process before 2026-08-20 must
+        not masquerade as a real value -- IMPLAUSIBLE_POWER_W catches it and the tick falls
+        back to the pre-existing freeze rather than trusting a nonsense surplus."""
+        now = dt.datetime.now(UTC)
+        path = self._slots_file(tmp_path, now, action="hold")
+
+        async def body(inv, _trace):
+            return await scheduler.tick(inv, path, {}, now)
+
+        decision = on_simulator(body, seed={
+            R.REG_BATTERY_SOC: [800],
+            R.REG_GRID_POWER: R.encode_int32(50000),  # past scheduler.IMPLAUSIBLE_POWER_W
+            R.REG_BATTERY_POWER: [0],
+        })
+        payload = json.loads(scheduler.HEARTBEAT_PATH.read_text())
+        assert payload["surplus_w"] is None
+        assert decision.kind == "command", "no surplus reading means the hold must stand"
 
     def test_a_hijack_is_detected_and_recorded(self, tmp_path):
         """The app writing the same registers. Detected before we overwrite the evidence."""

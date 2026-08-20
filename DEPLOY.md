@@ -1322,7 +1322,7 @@ first, and those queries are the substance of the dashboard rather than its layo
 | [`grafana/generate-battery-score.py`](grafana/generate-battery-score.py) | `alphaess-battery-score.json` | `plan_score` | back, over finished days |
 
 Both read the `planning` bucket, which the **battery-planning** repo writes: the planner
-writes `plan` every three hours, and `report_day.py` writes `plan_score` at 06:10 for the
+writes `plan` hourly, and `report_day.py` writes `plan_score` at 06:10 for the
 day that just ended. Neither is written by anything in this repo, so an empty dashboard
 here usually means a job did not run over there — the "Plan age" and "Score age" stats
 exist to say which.

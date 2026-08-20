@@ -81,7 +81,7 @@ Two consequences that shape everything below:
 ## 2. Components and where they live
 
 ```
-Marstek-planning.py            battery-planning, every 3h via DSM Task Scheduler
+Marstek-planning.py            battery-planning, hourly via DSM Task Scheduler
         |  writes measurement `plan` to InfluxDB bucket `planning`
         |    one point per 15-min interval, tagged plan_run
         v
@@ -199,13 +199,16 @@ one atomic file write, two Kuma pings (§6.1). Not a daemon, and **not** appende
 `plan-now.sh` — that script is in the other repo, and the whole point of reading from Influx
 is that this half no longer has to run there.
 
-**It runs hourly, not 3-hourly, and there is no offset.** An earlier draft ran it on the
+**It runs every five minutes, and there is no offset.** An earlier draft ran it on the
 planner's own cadence, offset ~10 minutes after the DSM schedule so it would read a fresh
-plan. That coupling is not worth its cost: a fixed 3-hourly loop inside a container that
+plan. That coupling is not worth its cost: a fixed-interval loop inside a container that
 restarts whenever it likes has no fixed phase relative to DSM, so the offset it was tuned for
 survives exactly until the first restart, after which the translator can sit a full cycle
-behind a plan that already landed. Running four times as often costs one Influx query an hour
-and removes the schedule dependency entirely.
+behind a plan that already landed. An hourly loop was the first answer and was still too
+coarse -- it sat a measured 46 minutes behind the planner, firing at :51 against a planner
+that writes at :05, which on 2026-08-19 discarded a floor-restoring buy the plan had asked
+for (dispatch/entrypoint.sh). Five minutes costs twelve Influx queries an hour and removes
+the schedule dependency entirely.
 
 If the planner is late, the translator re-reads the previous plan and the freshness gate (§5)
 decides whether it is still usable. That is the intended degradation, and it is now the only
@@ -444,7 +447,8 @@ EVERY 60 seconds:
 1. IF slots.json mtime changed: reload and validate.
 
 2. FRESHNESS GATE:
-      if generated_at older than ~4h, or horizon_end already passed
+      if generated_at older than 2h (two missed hourly planner runs),
+      or horizon_end already passed
       -> issue NO command, ping slots-fresh DOWN with the cause.
    The dead man's switch expires and the inverter falls back to
    self-consumption. Never extrapolate a stale plan.
@@ -452,7 +456,15 @@ EVERY 60 seconds:
 3. FIND the slot covering now. None -> no command (same fallback).
 
 4. READ live SoC (register 258, raw/10) and re-check the direction rule
-   against LIVE SoC, not planned SoC. Violation -> treat as hold.
+   against LIVE SoC, not planned SoC. Violation -> treat as hold, EXCEPT
+   for a charge whose target the battery has already reached while the
+   sun is beating the house: freezing there exports free solar, so that
+   one case releases to self-consumption instead. Surplus is read as
+   -(grid + battery) from registers 33 and 294, which does not move when
+   the battery starts absorbing it; the grid meter alone does, and a rule
+   keyed on it oscillates every 60 s. The deadband on the direction rule
+   is one register step (0.4 %), not a tolerance on the plan -- at 1.0 %
+   it ended every charge slot ~3.5 minutes early (measured 2026-08-20).
 
 5. DETECT HIJACK: if the block reads start=1 with a mode/power/soc this
    process did not write, the app (or something else) is dispatching.
@@ -468,6 +480,16 @@ EVERY 60 seconds:
    Encode: raw_power = 32000 + watts ; raw_soc = pct / 0.4
 
 7. WRITE the dispatch block, duration = 300 s (5x the refresh interval).
+
+8. VERIFY by reading the block back. On a mismatch, wait 500 ms and read
+   ONCE more before failing monitor #6: the block is not updated
+   atomically -- START is written last and lands first -- so a readback
+   taken microseconds after the write can show `dispatch_active=1`
+   beside a mode and power the inverter has not ingested yet (observed
+   2026-08-20 15:16:29Z, the first tick after a rebuild; the next tick
+   read back cleanly). A second disagreement is a real refusal and
+   fails as before. The retry is a read, so it can never change what the
+   battery is doing.
 
 **Two sign conventions, and step 6 is the boundary between them.** The register counts
 *discharge* positive. Everything above the register boundary — `slots.decide()`, §7.1's
@@ -576,7 +598,7 @@ Three principles:
 feature makes to that repo.** That repo has no heartbeat and no Kuma reference anywhere today;
 `plan-now.sh` exits 1 on failure and nothing watches it. It is a prerequisite, not a
 nice-to-have — the freshness gate means a silent planning failure degrades to "no dispatch at
-all" within four hours. Tracked as `PLAN-repo-seams.md` Part 3, its own PR over there. Port
+all" within two hours. Tracked as `PLAN-repo-seams.md` Part 3, its own PR over there. Port
 the shape of `send_heartbeat()` from `collector/collector.py:407`, including the rebuilt query
 string, which is the reason that function looks the way it does.
 

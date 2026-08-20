@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 
 import pytest
 
@@ -164,6 +165,16 @@ class TestTickSurvivesAnUnreadableInverter:
         point = pub.points[0]
         for absent in ("action", "setpoint_w", "dispatch_active", "mode", "raw_0880"):
             assert absent not in point
+
+    def test_a_failed_surplus_read_holds_rather_than_guessing(self, tmp_path, monkeypatch):
+        """None is not zero. A dead client can't read the grid/battery registers either, and
+        the fallback must be the pre-existing freeze, not a guessed surplus that could
+        spuriously release the battery."""
+        heartbeat = tmp_path / "hb.json"
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", heartbeat)
+        self._tick(tmp_path, RecordingPublisher())
+        payload = json.loads(heartbeat.read_text())
+        assert payload["surplus_w"] is None
 
 
 class TestDegradedFields:
