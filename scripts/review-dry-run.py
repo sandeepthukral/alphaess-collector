@@ -72,8 +72,9 @@ COLLECTOR_GAP_S = 150
 # Two minutes covers that skew without reaching into unrelated minutes.
 MATCH_PAD_S = 120
 # A plan older than this is one the translator should already have replaced -- it runs every
-# three hours. Matches monitor #4's window in DESIGN-dispatch.md section 6.1.
-STALE_PLAN_S = 4 * 3600
+# five minutes, against a planner that runs hourly. Tracks `slots.MAX_PLAN_AGE`, which is two
+# missed planner runs; see monitor #4 in DESIGN-dispatch.md section 6.1.
+STALE_PLAN_S = 2 * 3600
 # Below this, `slots.decide()` refuses a discharge (the direction guard). A discharge decided
 # here would be a translator bug, and is the one decision on this page that is a real fault.
 DEFAULT_SOC_FLOOR = 10.0
@@ -270,8 +271,8 @@ def findings(ticks, runs, battery, soc,
                     for t in stale)
         faults.append(
             f"<b>{len(stale)} tick(s) acted on a plan over "
-            f"{STALE_PLAN_S / 3600:.0f} h old</b>, worst {worst / 3600:.1f} h. The translator "
-            f"runs every 3 h, so this means it stopped &mdash; monitor #3")
+            f"{STALE_PLAN_S / 3600:.0f} h old</b>, worst {worst / 3600:.1f} h. The planner "
+            f"runs hourly, so this means it stopped &mdash; monitor #3")
 
     for r in runs:
         # `self` is excluded on purpose and is not an oversight: section 4.1 makes it the

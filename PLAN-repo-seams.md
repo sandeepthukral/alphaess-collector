@@ -31,7 +31,7 @@ queries in `grafana/alphaess-battery-plan.json`. The `slots.json` seam was bridg
 that no longer existed.
 
 `slots.json` survives as an *internal* artefact. It is still worth having: a crash-surviving,
-inspectable file decouples the 3-hourly translator from the 60 s control loop. It is no longer
+inspectable file decouples the translator from the 60 s control loop. It is no longer
 a cross-repo contract, so it does not need the versioning ceremony that went with that.
 
 ---

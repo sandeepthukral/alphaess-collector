@@ -124,7 +124,7 @@ class TestTranslate:
     def test_a_plan_down_to_its_last_interval_blames_the_planner_too(self):
         """The adjacent boundary to the lone-interval case, and it arrives by a different
         road: the window holds a translatable plan, but all of it except the final interval
-        has already elapsed. That is a planner three hours overdue, and the message has to say
+        has already elapsed. That is a planner hours overdue, and the message has to say
         so rather than reporting the cadence it can no longer infer from one interval."""
         lapsing = records(NOW - dt.timedelta(hours=1), 5)  # only the last still ends after NOW
         with pytest.raises(PlanFormatError, match="planner has not run since"):

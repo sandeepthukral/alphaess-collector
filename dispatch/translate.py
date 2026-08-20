@@ -1,4 +1,5 @@
-"""The 3-hourly translator job. DESIGN-dispatch.md sections 4 and 6.1.
+"""The translator job: every 5 minutes, against an hourly planner. DESIGN-dispatch.md
+sections 4 and 6.1.
 
 Reads the planner's output from InfluxDB, turns it into `slots.json`, and reports to the two
 Kuma monitors that watch this half of the system:

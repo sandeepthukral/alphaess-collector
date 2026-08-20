@@ -47,9 +47,10 @@ from review_page import local, parse_ts  # noqa: E402
 # as a stalled loop would be worse than either of them being slightly wrong.
 TICK_S = 60
 GAP_S = 180
-# The translator runs every three hours; past this the plan is one it should already have
-# replaced. Monitor #3's window in DESIGN-dispatch.md section 6.1.
-STALE_PLAN_S = 4 * 3600
+# The translator runs every five minutes against an hourly planner; past this the plan is one
+# it should already have replaced. Tracks `slots.MAX_PLAN_AGE` -- two missed planner runs.
+# Monitor #3's window in DESIGN-dispatch.md section 6.1.
+STALE_PLAN_S = 2 * 3600
 
 FIELDS = ("slot_action", "action", "plan_run", "setpoint_w", "dispatch_active")
 
