@@ -103,18 +103,52 @@ def test_the_token_has_no_fallback():
     assert "${INFLUX_TOKEN_DISPATCH:?" in (REPO / "docker-compose.yml").read_text()
 
 
-@pytest.mark.parametrize("module", ["corpus.py", "test_mode1_negative.py"])
+# Kept OUT of the image on purpose, and the only two that are. `corpus.py` reads archived
+# household plan data; `test_mode1_negative.py` opens its own Modbus connection, which would
+# steal the dispatcher's single one if it were ever run in here by mistake.
+NOT_IN_THE_IMAGE = ("corpus.py", "test_mode1_negative.py")
+
+
+def shipped_modules() -> list[str]:
+    """Every module that must reach the image, DERIVED rather than listed.
+
+    It used to be a literal list, and the list is what failed: `slot_publisher.py` was added
+    in #113, nobody remembered the Dockerfile, and the suite stayed green because the test
+    only ever checked the eight names already written down. The container then died on
+    `ModuleNotFoundError` at the first translation of the deploy -- the one place with no test
+    and no CI coverage, since `compose-boot` boots Grafana and every unit test imports from
+    `dispatch/` on `pythonpath` rather than from the built image.
+
+    Derived from the directory, a new module is in this test the moment it exists. That is the
+    same reasoning `test_dispatch_dashboard.conditional_fields()` gives for computing its set:
+    a guard you have to remember to update is a guard that eventually is not one.
+    """
+    return sorted(p.name for p in (REPO / "dispatch").glob("*.py")
+                  if p.name not in NOT_IN_THE_IMAGE)
+
+
+@pytest.mark.parametrize("module", NOT_IN_THE_IMAGE)
 def test_the_image_excludes_what_must_not_run_in_it(module):
     """`corpus.py` reads archived household plan data; `test_mode1_negative.py` opens its own
     Modbus connection, which would steal the dispatcher's."""
     assert f"COPY {module}" not in DOCKERFILE
+    assert (REPO / "dispatch" / module).exists(), (
+        f"{module} is on the exclusion list but does not exist -- a rename would quietly "
+        f"turn this guard off and let the file back into the image under its new name")
 
 
-@pytest.mark.parametrize("module", [
-    "registers.py", "heartbeat.py", "plan.py", "translator.py", "translate.py",
-    "slots.py", "state.py", "scheduler.py"])
+@pytest.mark.parametrize("module", shipped_modules())
 def test_the_image_carries_every_module_it_imports(module):
-    assert f"COPY {module}" in DOCKERFILE
+    assert f"COPY {module}" in DOCKERFILE, (
+        f"dispatch/{module} is not COPYed into the image. The container will build fine and "
+        f"then die on ModuleNotFoundError the first time something imports it -- add a COPY "
+        f"line to dispatch/Dockerfile, or add it to NOT_IN_THE_IMAGE and say why")
+
+
+def test_there_are_modules_to_check():
+    """Guards the guard: a moved directory would make the parametrised test vacuous rather
+    than failing, which is the one way a derived set is worse than a literal one."""
+    assert len(shipped_modules()) >= 8
 
 
 def test_the_healthcheck_never_opens_a_modbus_connection():
