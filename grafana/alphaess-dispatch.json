@@ -1042,6 +1042,7 @@
           "refId": "C"
         }
       ],
+      "timeFrom": "12h",
       "title": "Commanded against actual",
       "type": "timeseries"
     },
@@ -1137,11 +1138,11 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"date\"\n\nnewest = (from(bucket: \"alphaess\")\n  |> range(start: -48h, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_slots\" and r._field == \"action\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nnowS = float(v: int(v: now())) / 1000000000.0\nhorizonEnd = date.add(d: duration(v: \"${horizon}h\"), to: now())\n\nupcoming = from(bucket: \"alphaess\")\n  |> range(start: -48h, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_slots\" and r.plan_run == newest)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> filter(fn: (r) => float(v: r.end_s) > nowS and r._time < horizonEnd)\n\nbands = upcoming\n  |> map(fn: (r) => ({ _time: r._time, _value: r.action }))\ntail = upcoming\n  |> tail(n: 1)\n  |> map(fn: (r) => ({ _time: time(v: int(v: r.end_s) * 1000000000),\n                       _value: \"horizon end\" }))\n\nunion(tables: [bands, tail])\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> yield(name: \"slots\")\n",
+          "query": "newest = (from(bucket: \"alphaess\")\n  |> range(start: -48h, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_slots\" and r._field == \"action\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nnowS = float(v: int(v: now())) / 1000000000.0\n\n// The whole of the newest run, elapsed slots included. Each panel narrows it differently.\nrun = from(bucket: \"alphaess\")\n  |> range(start: -48h, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_slots\" and r.plan_run == newest)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> sort(columns: [\"_time\"])\n\nbands = run\n  |> map(fn: (r) => ({ _time: r._time, _value: r.action }))\ntail = run\n  |> tail(n: 1)\n  |> map(fn: (r) => ({ _time: time(v: int(v: r.end_s) * 1000000000),\n                       _value: \"horizon end\" }))\n\nunion(tables: [bands, tail])\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> yield(name: \"slots\")\n",
           "refId": "A"
         }
       ],
-      "title": "The next ${horizon} hours",
+      "title": "What the dispatcher will do next",
       "type": "state-timeline"
     },
     {
@@ -1345,7 +1346,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"date\"\n\nnewest = (from(bucket: \"alphaess\")\n  |> range(start: -48h, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_slots\" and r._field == \"action\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nnowS = float(v: int(v: now())) / 1000000000.0\nhorizonEnd = date.add(d: duration(v: \"${horizon}h\"), to: now())\n\nupcoming = from(bucket: \"alphaess\")\n  |> range(start: -48h, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_slots\" and r.plan_run == newest)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> filter(fn: (r) => float(v: r.end_s) > nowS and r._time < horizonEnd)\n\nupcoming\n  |> map(fn: (r) => ({\n      _time: r._time,\n      action: r.action,\n      minutes: r.duration_s / 60,\n      power_w: r.power_w,\n      target_soc: r.target_soc,\n    }))\n  |> yield(name: \"slot table\")\n",
+          "query": "newest = (from(bucket: \"alphaess\")\n  |> range(start: -48h, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_slots\" and r._field == \"action\")\n  |> keep(columns: [\"plan_run\"])\n  |> group()\n  |> distinct(column: \"plan_run\")\n  |> map(fn: (r) => ({ tag: r._value, t: time(v: r._value) }))\n  |> sort(columns: [\"t\"], desc: true)\n  |> limit(n: 1)\n  |> findColumn(fn: (key) => true, column: \"tag\"))[0]\n\nnowS = float(v: int(v: now())) / 1000000000.0\n\n// The whole of the newest run, elapsed slots included. Each panel narrows it differently.\nrun = from(bucket: \"alphaess\")\n  |> range(start: -48h, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_slots\" and r.plan_run == newest)\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> sort(columns: [\"_time\"])\n\nrun\n  |> filter(fn: (r) => float(v: r.end_s) > nowS)\n  |> map(fn: (r) => ({\n      _time: r._time,\n      action: r.action,\n      minutes: r.duration_s / 60,\n      power_w: r.power_w,\n      target_soc: r.target_soc,\n    }))\n  |> yield(name: \"slot table\")\n",
           "refId": "A"
         }
       ],
@@ -1463,7 +1464,7 @@
         ]
       },
       "gridPos": {
-        "h": 6,
+        "h": 8,
         "w": 24,
         "x": 0,
         "y": 30
@@ -1493,6 +1494,22 @@
         }
       ],
       "title": "Dispatch registers, decoded",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "indexByName": {
+              "means": 3,
+              "name": 1,
+              "raw": 2,
+              "register": 0
+            },
+            "renameByName": {}
+          }
+        }
+      ],
       "type": "table"
     }
   ],
@@ -1505,47 +1522,16 @@
     "dispatch"
   ],
   "templating": {
-    "list": [
-      {
-        "current": {
-          "selected": true,
-          "text": "36",
-          "value": "36"
-        },
-        "includeAll": false,
-        "label": "Look ahead",
-        "multi": false,
-        "name": "horizon",
-        "options": [
-          {
-            "selected": false,
-            "text": "12",
-            "value": "12"
-          },
-          {
-            "selected": false,
-            "text": "24",
-            "value": "24"
-          },
-          {
-            "selected": true,
-            "text": "36",
-            "value": "36"
-          }
-        ],
-        "query": "12,24,36",
-        "type": "custom"
-      }
-    ]
+    "list": []
   },
   "time": {
     "from": "now-12h",
-    "to": "now+6h"
+    "to": "now+36h"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "Dispatch",
   "uid": "alphaess-dispatch",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }
