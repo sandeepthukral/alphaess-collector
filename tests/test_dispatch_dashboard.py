@@ -168,11 +168,17 @@ class TestConditionalFields:
         written yields two rows at two instants, and the table's union renders every register
         twice -- one populated copy, one blank -- until the stale field ages out of the
         window. Five minutes of that after every single release."""
-        table = next(q for dash, title, q in dispatch_queries() if "pivot" in q and "union" in q)
-        for field in conditional_fields():
-            assert f'"{field}"' not in table, (
-                f"the decode table pulls {field!r} into its pivot; that field stops being "
-                f"written on release and will split the table into two rows")
+        tables = [(dash, q) for dash, title, q in dispatch_queries()
+                  if "pivot" in q and "union" in q]
+        # EVERY decode table, not the first one. `next()` took whichever query sorted first by
+        # filename, so a copy of this table on a second dashboard was silently unguarded --
+        # and the copy is exactly where a divergence would hide.
+        assert tables, "no decode table found -- this guard would pass vacuously"
+        for dash, table in tables:
+            for field in conditional_fields():
+                assert f'"{field}"' not in table, (
+                    f"{dash}: the decode table pulls {field!r} into its pivot; that field "
+                    f"stops being written on release and will split the table into two rows")
 
     def test_the_expiry_countdown_cannot_run_off_a_stale_expires_at(self):
         """`expires_at` outlives the command that set it by up to the query window, so a
@@ -182,9 +188,58 @@ class TestConditionalFields:
         The gate has to be a same-instant test rather than a plain `dispatch_active` check,
         because the case the panel EXISTS for -- a loop that dies mid-command -- leaves both
         fields stale together and must still show the drain."""
-        q = next(q for dash, title, q in dispatch_queries() if "expires_at" in q)
-        assert "exists" in q, "the countdown does not check whether expires_at is still live"
-        assert "dispatch_active" in q, "the countdown is not gated on a command being live"
+        found = [(dash, q) for dash, title, q in dispatch_queries() if "expires_at" in q]
+        assert found, "no expiry countdown found -- this guard would pass vacuously"
+        for dash, q in found:
+            assert "exists" in q, (
+                f"{dash}: the countdown does not check whether expires_at is still live")
+            assert "dispatch_active" in q, (
+                f"{dash}: the countdown is not gated on a command being live")
+
+
+class TestTheGeneratorsAgree:
+    """Two generators now build dispatch panels, and they share no module.
+
+    That duplication is the house style -- `generate-battery-score.py:29` states it: "the
+    string is duplicated because these two scripts share no module, and tests pin every
+    dashboard to the same query for exactly that reason". This is that test. Without it the
+    `-5m` staleness window could be tightened on one dashboard and left on the other, and the
+    two would then disagree about when a command stops being current -- silently, because
+    each dashboard would still look internally consistent.
+    """
+
+    # Non-greedy, across newlines, either quote style: the point is to compare what the
+    # generators actually assign, not to assume how they spell it.
+    PATTERN = re.compile(r"DISPATCH_LAST = ('{3}|\"{3})(.*?)\1", re.DOTALL)
+
+    @classmethod
+    def blocks(cls) -> dict[str, str]:
+        out = {}
+        for g in sorted((Path(__file__).parent.parent / "grafana").glob("generate-*.py")):
+            m = cls.PATTERN.search(g.read_text())
+            if m:
+                out[g.name] = m.group(2)
+        return out
+
+    def test_more_than_one_generator_builds_dispatch_panels(self):
+        """Guards the guard: with a single generator this would pass by having nothing to
+        compare, which is the failure mode of every test that iterates a discovered set."""
+        assert len(self.blocks()) >= 2, (
+            "fewer than two generators define DISPATCH_LAST -- either one was renamed or the "
+            "pattern above no longer matches how they spell it")
+
+    def test_the_dispatch_query_constant_is_identical_everywhere(self):
+        found = self.blocks()
+        assert len(set(found.values())) == 1, (
+            "DISPATCH_LAST differs between generators:\n"
+            + "\n".join(f"--- {n}\n{b}" for n, b in found.items()))
+
+    def test_that_constant_still_carries_the_short_window(self):
+        """The reason the constant exists at all. A dead dispatcher does not clear
+        `dispatch_state`; it leaves its last point sitting there forever, so a wide `last()`
+        renders a command that expired an hour ago as the current state of the battery."""
+        for name, block in self.blocks().items():
+            assert "range(start: -5m)" in block, name
 
 
 class TestStalenessGuards:
