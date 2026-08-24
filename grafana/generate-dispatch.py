@@ -591,7 +591,7 @@ panels.append(stat(
     "The setpoint the dispatcher just wrote, charging-positive. Repeats 'Commanded against "
     "actual' below as a single number, for the phone-in-the-kitchen glance that chart is too "
     "wide for.",
-    DISPATCH_LAST % "setpoint_w", "watt", 0, 0, 8,
+    DISPATCH_LAST % "setpoint_w", "watt", 2, 0, 8,
     [{"color": "text", "value": None}],
     y=8, no_value="silent"))
 
@@ -601,7 +601,7 @@ panels.append(stat(
     "to the same charging-positive convention as 'Commanded now' beside it -- not the "
     "collector's reading, so the two land on one point and never need a cross-series join to "
     "agree.",
-    DISPATCH_LAST % "actual_battery_w", "watt", 0, 8, 8,
+    DISPATCH_LAST % "actual_battery_w", "watt", 2, 8, 8,
     [{"color": "text", "value": None}],
     y=8, no_value="unreadable"))
 
