@@ -121,6 +121,55 @@ class TestPowerAndTarget:
                              iv(discharge=900, exp=900, soc=13000, minute=15)], CAPACITY)
         assert slots[0].power_w == 3600             # round(900 * 4), unchanged
 
+    def test_discharge_power_w_is_inert_on_a_charge_interval(self):
+        """discharge_power_w should never coexist with a real charge interval -- the planner
+        only sets it on discharge intervals -- but the override is gated on
+        `action == "discharge"`, not merely "the field is set", specifically so a stray or
+        malformed value on a charge interval cannot do anything."""
+        slots, _ = to_slots([iv(charge=900, imp=900, soc=15000, minute=0,
+                                discharge_power_w=5000),
+                             iv(charge=900, imp=900, soc=16000, minute=15)], CAPACITY)
+        assert slots[0].action == "charge"
+        assert slots[0].power_w == 3600            # round(900 * 4) -- the override is ignored
+
+    def test_discharge_power_w_of_zero_is_downgraded_like_any_other_zero(self):
+        """Boundary: 0.0 is not None, so it reaches the override branch and becomes
+        power_w == 0 -- which the existing rounds-to-zero guard downgrades to hold, the same
+        as a discharge_wh so small it rounds to 0 W."""
+        slots, warnings = to_slots([iv(discharge=900, exp=900, soc=13950, minute=0,
+                                       discharge_power_w=0.0),
+                                    iv(discharge=900, exp=900, soc=13000, minute=15)], CAPACITY)
+        assert slots[0].action == "hold"
+        assert slots[0].power_w is None
+        assert "setpoint override of 0 W" in warnings[0]
+
+    def test_a_negative_discharge_power_w_is_downgraded_not_sign_flipped(self):
+        """The guard that actually matters: slots.py:decide() negates a discharge slot's
+        power_w to get the wire's charging-positive Command -- `power = -int(slot["power_w"])`.
+        A negative override reaching that line unchecked would silently become a POSITIVE
+        (charging) command during what the plan intended as a discharge. The rounds-to-zero-
+        or-below guard (power_w <= 0) catches this too, before it ever becomes a Slot."""
+        slots, warnings = to_slots([iv(discharge=900, exp=900, soc=13950, minute=0,
+                                       discharge_power_w=-100.0),
+                                    iv(discharge=900, exp=900, soc=13000, minute=15)], CAPACITY)
+        assert slots[0].action == "hold"
+        assert slots[0].power_w is None
+        assert "setpoint override of -100 W" in warnings[0]
+
+    def test_an_oversized_discharge_power_w_passes_through_to_slots_uncapped(self):
+        """to_slots() does not itself bound the magnitude -- that is slots.py's clamp()
+        (HARD_MAX_POWER_W), exercised end-to-end in test_dispatch_slots.py's TestClamp,
+        which does not care whether a Command's power_w originated from discharge_wh or from
+        this override. This just documents that to_slots() passes an oversized override
+        through rather than silently dropping or truncating it -- clamp() is the one place
+        that bound is enforced, and it is enforced on every Command regardless of origin."""
+        slots, warnings = to_slots([iv(discharge=900, exp=900, soc=13950, minute=0,
+                                       discharge_power_w=50000.0),
+                                    iv(discharge=900, exp=900, soc=13000, minute=15)], CAPACITY)
+        assert slots[0].action == "discharge"
+        assert slots[0].power_w == 50000
+        assert warnings == []
+
     def test_discharge_power_w_does_not_leak_into_a_downgraded_slot(self):
         """A discharge whose target doesn't actually lower SoC is downgraded to hold
         (TestDirectionRule) regardless of what discharge_power_w says -- the override

@@ -276,10 +276,18 @@ def to_slots(
                     action, power_w, target_soc = downgrade, None, None
 
             if power_w is not None and power_w <= 0:
+                # Catches both the ordinary rounds-to-zero case AND a non-positive
+                # discharge_power_w override -- see the comment above. The latter is the
+                # guard that keeps a malformed or negative override from reaching
+                # `slots.py:decide()`, which negates `power_w` for a discharge command: a
+                # negative override would otherwise flip the sign and turn a discharge into
+                # a charge on the wire, silently.
                 downgrade = "hold"
-                warnings.append(
-                    f"{_iso(iv.start)}: {action} of {wh:.0f} Wh rounds to {power_w} W "
-                    f"-- downgraded to {downgrade}")
+                reason = (
+                    f"{action} setpoint override of {power_w} W"
+                    if action == "discharge" and iv.discharge_power_w is not None
+                    else f"{action} of {wh:.0f} Wh rounds to {power_w} W")
+                warnings.append(f"{_iso(iv.start)}: {reason} -- downgraded to {downgrade}")
                 action, power_w, target_soc = downgrade, None, None
 
         slots.append(Slot(iv.start, iv.start + span, action, power_w, target_soc))
