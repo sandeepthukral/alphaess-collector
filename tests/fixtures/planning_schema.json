@@ -38,6 +38,7 @@
    ],
    "optional_fields": [
     "cost_eur",
+    "discharge_power_w",
     "price_buy",
     "price_market",
     "price_sell",

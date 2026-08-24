@@ -83,6 +83,12 @@ class PlanInterval:
     price_sell: float = 0.0
     cost_eur: float = 0.0
     pv_forecast_wh: float = 0.0
+    # The wire setpoint the planner wants sent for this interval, when it differs from what
+    # discharge_wh alone would derive -- see Marstek-planning.py's maxRequestedDischargeSpeed
+    # comment. None (the common case) means "derive it from discharge_wh as usual"; to_slots()
+    # is the only reader. Never set from charge_wh -- see DESIGN-dispatch.md/CLAUDE.md on why
+    # charge is not split this way (yet).
+    discharge_power_w: float | None = None
 
     def __post_init__(self):
         if self.start.tzinfo is None:
@@ -261,6 +267,9 @@ def from_influx(
                 price_sell=float(v.get("price_sell") or 0.0),
                 cost_eur=float(v.get("cost_eur") or 0.0),
                 pv_forecast_wh=float(v.get("pv_forecast_wh") or 0.0),
+                discharge_power_w=(
+                    float(v["discharge_power_w"]) if v.get("discharge_power_w") is not None
+                    else None),
             ))
 
     if not out:

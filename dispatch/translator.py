@@ -215,7 +215,16 @@ def to_slots(
 
         if action in ("charge", "discharge"):
             wh = iv.charge_wh if action == "charge" else iv.discharge_wh
-            power_w = round(wh * per_hour)
+            # discharge_power_w overrides the derived setpoint when the plan supplies one --
+            # Marstek-planning.py sets it on intervals planned at the discharge ceiling, where
+            # the wire setpoint needs to run above what discharge_wh alone would derive (see
+            # its maxRequestedDischargeSpeed comment) to actually reach that ceiling. wh/soc_wh
+            # stay untouched either way -- this only changes what goes on the wire, not the
+            # plan's own energy or SoC accounting.
+            if action == "discharge" and iv.discharge_power_w is not None:
+                power_w = round(iv.discharge_power_w)
+            else:
+                power_w = round(wh * per_hour)
 
             # Section 3.2: the target is THIS interval's own soc_wh, not the next point's.
             target_soc = round(100.0 * iv.soc_wh / capacity_wh, 1)

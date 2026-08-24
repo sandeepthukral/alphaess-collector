@@ -108,9 +108,19 @@ flowchart TD
 ```
 
 `dispatch/translator.py:156-189` (classify) and `:90-153` (`_can_harvest` — the at-capacity
-PV-surplus override). `to_slots()` (`:192-278`) then converts the action to `power_w`/
+PV-surplus override). `to_slots()` (`:192-287`) then converts the action to `power_w`/
 `target_soc` and downgrades charge/discharge to hold if the target doesn't actually move away
 from the interval's own start-of-interval SoC.
+
+On a `discharge` action, `power_w` normally derives from `discharge_wh × 60/minutes`, but
+`to_slots()` (`:217-226`) uses `iv.discharge_power_w` instead whenever the plan supplies one.
+`Marstek-planning.py` sets that field only on intervals it planned at the discharge ceiling
+(`maxDischargeSpeed`), to a setpoint (`maxRequestedDischargeSpeed`, currently 5000 W) above
+what `discharge_wh` alone implies — the inverter delivers roughly 300 W less than a sustained
+discharge setpoint asks for (investigated 2026-08-24), so reaching the true achievable ceiling
+requires commanding above it. `discharge_wh`/`soc_wh` themselves are never touched — only the
+wire setpoint for that one interval changes. Not done for `charge`: measured charge sessions
+already meet or exceed their setpoint, so there is nothing to compensate for (yet).
 
 ## File map
 
