@@ -16,6 +16,7 @@ from plan import (
     PLANNER_TZ,
     PlanFormatError,
     PlanInterval,
+    from_influx,
     from_table,
     interval_minutes,
     newest_by_interval,
@@ -278,3 +279,66 @@ class TestTagsWithNoOffset:
             charge_wh=0, discharge_wh=0, import_wh=0, export_wh=0, plan_run=self.NAIVE)
         with pytest.raises(PlanFormatError, match="no UTC offset"):
             newest_by_interval([iv])
+
+
+class _FakeRecord:
+    def __init__(self, time: dt.datetime, values: dict):
+        self._time, self.values = time, values
+
+    def get_time(self):
+        return self._time
+
+
+class _FakeTable:
+    def __init__(self, records):
+        self.records = records
+
+
+class _FakeQueryApi:
+    """Enough of `influxdb_client`'s query API for `from_influx` -- see
+    `test_dispatch_translate.py`'s identical fake, kept local here because this file tests
+    `plan.from_influx` directly rather than through `translate.translate`."""
+
+    def __init__(self, records):
+        self.records = records
+
+    def query(self, flux):
+        return [_FakeTable(self.records)]
+
+
+REQUIRED = {
+    "soc_wh": 14000.0, "charge_wh": 0.0, "discharge_wh": 900.0,
+    "import_wh": 0.0, "export_wh": 900.0,
+}
+
+
+class TestFromInfluxDischargePowerW:
+    """`PlanInterval.discharge_power_w`, parsed by `from_influx` -- the field
+    `Marstek-planning.py` publishes only on intervals it planned at the discharge ceiling
+    (see DISPATCH-FLOW.md). It is optional, unlike `REQUIRED_FIELDS`, so absence must not
+    raise, and Influx returning the field with a `None`/null value must read the same as the
+    field being absent altogether -- both are "the planner has nothing to override with"."""
+
+    START = dt.datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+
+    def _one(self, **overrides):
+        values = {"plan_run": "2026-08-01T09:00:00Z", **REQUIRED, **overrides}
+        api = _FakeQueryApi([_FakeRecord(self.START, values)])
+        [iv] = from_influx(api, "planning", self.START, self.START + dt.timedelta(minutes=15))
+        return iv
+
+    def test_present_is_parsed_as_a_float(self):
+        iv = self._one(discharge_power_w=5000)
+        assert iv.discharge_power_w == 5000.0
+        assert isinstance(iv.discharge_power_w, float)
+
+    def test_absent_is_none(self):
+        """The common case: most intervals do not carry this field at all."""
+        iv = self._one()
+        assert iv.discharge_power_w is None
+
+    def test_explicit_null_is_none(self):
+        """Influx/the client library can hand back the field present but valued None --
+        `v.get(...)` returning None must not become `float(None)` and raise."""
+        iv = self._one(discharge_power_w=None)
+        assert iv.discharge_power_w is None

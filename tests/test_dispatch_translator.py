@@ -32,11 +32,13 @@ CAPACITY = 27900.0
 
 
 def iv(*, charge=0.0, discharge=0.0, imp=0.0, exp=0.0, soc=14000.0,
-       pv=0.0, minute=0, run="2026-08-01T09:00:00Z") -> PlanInterval:
+       pv=0.0, minute=0, run="2026-08-01T09:00:00Z",
+       discharge_power_w=None) -> PlanInterval:
     return PlanInterval(
         start=dt.datetime(2026, 8, 1, 12, minute, tzinfo=UTC),
         soc_wh=soc, charge_wh=charge, discharge_wh=discharge,
-        import_wh=imp, export_wh=exp, plan_run=run, pv_forecast_wh=pv)
+        import_wh=imp, export_wh=exp, plan_run=run, pv_forecast_wh=pv,
+        discharge_power_w=discharge_power_w)
 
 
 class TestClassify:
@@ -100,6 +102,85 @@ class TestPowerAndTarget:
         slots, _ = to_slots([iv(discharge=900, exp=900, soc=13950, minute=0),
                              iv(discharge=900, exp=900, soc=13000, minute=15)], CAPACITY)
         assert slots[0].target_soc == 50.0        # 13950 / 27900
+
+    def test_discharge_power_w_overrides_the_derived_setpoint(self):
+        """DISPATCH-FLOW.md's discharge-ceiling override: when the plan supplies
+        discharge_power_w, that goes on the wire instead of discharge_wh * 60/minutes --
+        Marstek-planning.py sets it above what discharge_wh implies specifically so the
+        wire command clears the inverter's regulation floor."""
+        slots, _ = to_slots([iv(discharge=900, exp=900, soc=13950, minute=0,
+                                discharge_power_w=5000),
+                             iv(discharge=900, exp=900, soc=13000, minute=15)], CAPACITY)
+        assert slots[0].power_w == 5000            # not round(900 * 4) == 3600
+        assert slots[0].target_soc == 50.0          # soc_wh untouched by the override
+
+    def test_discharge_power_w_is_ignored_when_absent(self):
+        """The common case -- and the charge case, which never carries this field --
+        is untouched: derive power_w from discharge_wh/charge_wh exactly as before."""
+        slots, _ = to_slots([iv(discharge=900, exp=900, soc=13950, minute=0),
+                             iv(discharge=900, exp=900, soc=13000, minute=15)], CAPACITY)
+        assert slots[0].power_w == 3600             # round(900 * 4), unchanged
+
+    def test_discharge_power_w_is_inert_on_a_charge_interval(self):
+        """discharge_power_w should never coexist with a real charge interval -- the planner
+        only sets it on discharge intervals -- but the override is gated on
+        `action == "discharge"`, not merely "the field is set", specifically so a stray or
+        malformed value on a charge interval cannot do anything."""
+        slots, _ = to_slots([iv(charge=900, imp=900, soc=15000, minute=0,
+                                discharge_power_w=5000),
+                             iv(charge=900, imp=900, soc=16000, minute=15)], CAPACITY)
+        assert slots[0].action == "charge"
+        assert slots[0].power_w == 3600            # round(900 * 4) -- the override is ignored
+
+    def test_discharge_power_w_of_zero_is_downgraded_like_any_other_zero(self):
+        """Boundary: 0.0 is not None, so it reaches the override branch and becomes
+        power_w == 0 -- which the existing rounds-to-zero guard downgrades to hold, the same
+        as a discharge_wh so small it rounds to 0 W."""
+        slots, warnings = to_slots([iv(discharge=900, exp=900, soc=13950, minute=0,
+                                       discharge_power_w=0.0),
+                                    iv(discharge=900, exp=900, soc=13000, minute=15)], CAPACITY)
+        assert slots[0].action == "hold"
+        assert slots[0].power_w is None
+        assert "setpoint override of 0 W" in warnings[0]
+
+    def test_a_negative_discharge_power_w_is_downgraded_not_sign_flipped(self):
+        """The guard that actually matters: slots.py:decide() negates a discharge slot's
+        power_w to get the wire's charging-positive Command -- `power = -int(slot["power_w"])`.
+        A negative override reaching that line unchecked would silently become a POSITIVE
+        (charging) command during what the plan intended as a discharge. The rounds-to-zero-
+        or-below guard (power_w <= 0) catches this too, before it ever becomes a Slot."""
+        slots, warnings = to_slots([iv(discharge=900, exp=900, soc=13950, minute=0,
+                                       discharge_power_w=-100.0),
+                                    iv(discharge=900, exp=900, soc=13000, minute=15)], CAPACITY)
+        assert slots[0].action == "hold"
+        assert slots[0].power_w is None
+        assert "setpoint override of -100 W" in warnings[0]
+
+    def test_an_oversized_discharge_power_w_passes_through_to_slots_uncapped(self):
+        """to_slots() does not itself bound the magnitude -- that is slots.py's clamp()
+        (HARD_MAX_POWER_W), exercised end-to-end in test_dispatch_slots.py's TestClamp,
+        which does not care whether a Command's power_w originated from discharge_wh or from
+        this override. This just documents that to_slots() passes an oversized override
+        through rather than silently dropping or truncating it -- clamp() is the one place
+        that bound is enforced, and it is enforced on every Command regardless of origin."""
+        slots, warnings = to_slots([iv(discharge=900, exp=900, soc=13950, minute=0,
+                                       discharge_power_w=50000.0),
+                                    iv(discharge=900, exp=900, soc=13000, minute=15)], CAPACITY)
+        assert slots[0].action == "discharge"
+        assert slots[0].power_w == 50000
+        assert warnings == []
+
+    def test_discharge_power_w_does_not_leak_into_a_downgraded_slot(self):
+        """A discharge whose target doesn't actually lower SoC is downgraded to hold
+        (TestDirectionRule) regardless of what discharge_power_w says -- the override
+        must not resurrect a power_w the direction rule already refused."""
+        slots, warnings = to_slots([
+            iv(soc=14000, minute=0),
+            iv(discharge=900, exp=900, soc=15000, minute=15, discharge_power_w=5000),
+        ], CAPACITY)
+        assert [s.action for s in slots] == ["hold"]
+        assert slots[0].power_w is None
+        assert "not below" in warnings[0]
 
 
 class TestDirectionRule:
