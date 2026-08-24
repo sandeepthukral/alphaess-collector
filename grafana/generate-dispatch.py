@@ -366,13 +366,20 @@ def target(query, ref="A"):
 
 
 def stat(id_, title, desc, query, unit, decimals, x, w, steps, color_mode="value",
-         y=0, mappings=None, no_value=None, string_value=False):
+         y=0, mappings=None, no_value=None, string_value=False, justify_mode="auto",
+         value_size=None):
     """A stat panel. Same signature as the plan generator's, so call sites read the same.
 
     `string_value` is not cosmetic. Grafana treats an empty `reduceOptions.fields` as AUTO,
     and auto means NUMERIC FIELDS ONLY -- a string field is discarded before any mapping is
     consulted and the panel renders `noValue` forever. `/.*/` fixes that and then requires the
     query to return exactly ONE column, which is what `DISPATCH_LAST_VALUE` is for.
+
+    `value_size` pins the value's font size instead of Grafana's auto-fit. Auto-fit sizes for
+    the WORST CASE it has ever rendered, so a tile whose value is sometimes a long sentence
+    (see 'Why' below) shrinks to fit that sentence even on a tick where the text is short --
+    unreadably small either way. A pinned size trades that off deliberately: long text wraps
+    instead of shrinking further.
     """
     defaults = {
         "color": {"mode": "thresholds"},
@@ -383,27 +390,30 @@ def stat(id_, title, desc, query, unit, decimals, x, w, steps, color_mode="value
     }
     if no_value is not None:
         defaults["noValue"] = no_value
+    options = {
+        "colorMode": color_mode,
+        "graphMode": "none",
+        "justifyMode": justify_mode,
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+            "calcs": ["lastNotNull"],
+            "fields": "/.*/" if string_value else "",
+            "values": False,
+        },
+        "showPercentChange": False,
+        "textMode": "auto",
+        "wideLayout": True,
+    }
+    if value_size is not None:
+        options["text"] = {"valueSize": value_size}
     return {
         "datasource": DS,
         "description": desc,
         "fieldConfig": {"defaults": defaults, "overrides": []},
         "gridPos": {"h": 4, "w": w, "x": x, "y": y},
         "id": id_,
-        "options": {
-            "colorMode": color_mode,
-            "graphMode": "none",
-            "justifyMode": "auto",
-            "orientation": "auto",
-            "percentChangeColorMode": "standard",
-            "reduceOptions": {
-                "calcs": ["lastNotNull"],
-                "fields": "/.*/" if string_value else "",
-                "values": False,
-            },
-            "showPercentChange": False,
-            "textMode": "auto",
-            "wideLayout": True,
-        },
+        "options": options,
         "pluginVersion": "11.6.0",
         "targets": [target(query)],
         "title": title,
@@ -552,7 +562,8 @@ panels.append(stat(
     "field was published it existed only in the container log.",
     DISPATCH_LAST_VALUE % "reason", "none", None, 9, 7,
     [{"color": "text", "value": None}],
-    y=4, no_value="no reason given", string_value=True))
+    y=4, no_value="no reason given", string_value=True,
+    justify_mode="left", value_size=16))
 
 panels.append(stat(
     9, "SoC now",
@@ -591,7 +602,7 @@ panels.append(stat(
     "The setpoint the dispatcher just wrote, charging-positive. Repeats 'Commanded against "
     "actual' below as a single number, for the phone-in-the-kitchen glance that chart is too "
     "wide for.",
-    DISPATCH_LAST % "setpoint_w", "watt", 0, 0, 8,
+    DISPATCH_LAST % "setpoint_w", "watt", 2, 0, 8,
     [{"color": "text", "value": None}],
     y=8, no_value="silent"))
 
@@ -601,7 +612,7 @@ panels.append(stat(
     "to the same charging-positive convention as 'Commanded now' beside it -- not the "
     "collector's reading, so the two land on one point and never need a cross-series join to "
     "agree.",
-    DISPATCH_LAST % "actual_battery_w", "watt", 0, 8, 8,
+    DISPATCH_LAST % "actual_battery_w", "watt", 2, 8, 8,
     [{"color": "text", "value": None}],
     y=8, no_value="unreadable"))
 
@@ -952,7 +963,11 @@ dashboard = {
     #    a pinned column order and room for all five registers.
     # 3: Row B2 -- Commanded now / Actual now / Shortfall, reading the new `actual_battery_w`
     #    field. Rows C, D and E all move down 4 to make room.
-    "version": 3,
+    # 4: 'Actual now' shows 2 decimals instead of 0, to stop it disagreeing with the plan
+    #    dashboard's 'Battery Power' tile by nothing but rounding (4.8 kW showing as "5").
+    # 5: 'Why' is left-justified with a pinned value size instead of auto-fit, which shrank
+    #    its longer reason sentences to near-unreadable size.
+    "version": 5,
     "weekStart": "",
 }
 

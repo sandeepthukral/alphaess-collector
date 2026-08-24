@@ -659,7 +659,7 @@
       "options": {
         "colorMode": "value",
         "graphMode": "none",
-        "justifyMode": "auto",
+        "justifyMode": "left",
         "orientation": "auto",
         "percentChangeColorMode": "standard",
         "reduceOptions": {
@@ -670,6 +670,9 @@
           "values": false
         },
         "showPercentChange": false,
+        "text": {
+          "valueSize": 16
+        },
         "textMode": "auto",
         "wideLayout": true
       },
@@ -836,7 +839,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "decimals": 0,
+          "decimals": 2,
           "mappings": [],
           "noValue": "silent",
           "thresholds": {
@@ -901,7 +904,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "decimals": 0,
+          "decimals": 2,
           "mappings": [],
           "noValue": "unreadable",
           "thresholds": {
@@ -1735,6 +1738,6 @@
   "timezone": "browser",
   "title": "Dispatch",
   "uid": "alphaess-dispatch",
-  "version": 3,
+  "version": 5,
   "weekStart": ""
 }
