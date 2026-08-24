@@ -135,6 +135,19 @@ services:
         condition: service_healthy
     networks:
       - alphaess-net
+    # Without this the container inherits the NAS's own resolver, and that is
+    # what actually broke on 2026-08-24: two outages of 25 and 45 minutes,
+    # plus half a dozen one-minute blips through the same evening, every one
+    # of them `NameResolutionError` on openapi.alphaess.com -- DNS failing to
+    # resolve, not AlphaESS's API timing out or refusing. `diagnose_network()`
+    # in collector.py already has a name for this case, "local-dns", and would
+    # have returned it for both outages. Pinned to the same resolver
+    # DIAGNOSTIC_URL above already trusts for a DNS-independent reachability
+    # probe, plus a second provider so one resolver having a bad day does not
+    # reproduce the exact failure this is meant to fix.
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
 
   awtrix-pusher:
     build: ./awtrix-pusher
