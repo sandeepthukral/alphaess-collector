@@ -64,15 +64,20 @@ def block_registers(active=0, mode=None, power_w=0, soc_pct=0.0, duration_s=0) -
     return regs
 
 
-def measurement_registers(live_soc_pct=80.0, block=None) -> dict[int, int]:
+def measurement_registers(live_soc_pct=80.0, block=None, battery_power_w=0) -> dict[int, int]:
     """A plausible, quiet house: the dispatch block plus SoC/grid/battery, released and at
     rest, so a discharge decision's direction check (live SoC vs. target) has something to
-    compare against."""
+    compare against.
+
+    `battery_power_w` is discharge-positive raw register convention, same as
+    `REG_BATTERY_POWER` itself -- a caller wanting a discharge reading passes a positive
+    number here, the same sign the real register would hold.
+    """
     regs = dict(block if block is not None else block_registers())
     regs[R.REG_BATTERY_SOC] = round(live_soc_pct * 10)
     regs[R.REG_GRID_POWER] = 0
     regs[R.REG_GRID_POWER + 1] = 0
-    regs[R.REG_BATTERY_POWER] = 0
+    regs[R.REG_BATTERY_POWER] = int(battery_power_w) & 0xFFFF
     return regs
 
 
@@ -357,3 +362,72 @@ class TestTickPublishesADegradedPointWhenOnlyTheBlockReadFails:
         # any of these forward would show a command as live before it was ever confirmed.
         for absent in ("dispatch_active", "action", "setpoint_w", "mode", "verified"):
             assert absent not in point
+
+
+class TestActualBatteryReading:
+    """`REG_BATTERY_POWER`, read every tick for the surplus rule (step 4) and now published
+    alongside `setpoint_w` -- the finding that prompted it: MEASURED 2026-08-24, a commanded
+    4,700 W discharge settling at ~4,400 W for a full session, invisible anywhere but an ad
+    hoc Influx query until this field existed."""
+
+    def test_it_is_published_charging_positive(self, tmp_path, monkeypatch):
+        # 3,200 W discharging, in the REGISTER's discharge-positive convention.
+        client = ScriptedClient(measurement_registers(battery_power_w=3200))
+        pub = RecordingPublisher()
+        run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False, publisher=pub)
+        assert pub.points[0]["actual_battery_w"] == -3200.0
+
+    def test_it_survives_a_failed_block_read(self, tmp_path, monkeypatch):
+        """The dispatch block and the battery-power register are two separate reads, same
+        argument `TestTickPublishesADegradedPointWhenOnlyTheBlockReadFails` makes for SoC."""
+        client = ScriptedClient(measurement_registers(battery_power_w=3200),
+                                fail_addrs=frozenset({R.REG_START}))
+        pub = RecordingPublisher()
+        run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False, publisher=pub)
+        point = pub.points[0]
+        assert point["actual_battery_w"] == -3200.0
+        assert "read_error" in point
+
+
+class TestMagnitudeShortfall:
+    """`slots.SHORTFALL_PCT` / `SHORTFALL_MIN_W`, checked against the PREVIOUS tick's command
+    -- `batt_w` read this tick reflects up to a tick's worth of settling under
+    `cache["last_written"]`, not the command this tick is about to issue."""
+
+    def _two_ticks(self, tmp_path, monkeypatch, battery_power_w, dry_run=False):
+        slots_path = tmp_path / "slots.json"
+        slots_path.write_text(json.dumps(doc()))
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+        client = ScriptedClient(measurement_registers(battery_power_w=battery_power_w))
+        inv = scheduler.Inverter(client, 0x55, dry_run=dry_run)
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        # First tick establishes `cache["last_written"]` -- doc()'s slot commands 4,500 W
+        # discharge. The reading this same tick sees is whatever the house was doing before
+        # any command existed, so only the SECOND tick's comparison means anything.
+        asyncio.run(scheduler.tick(inv, slots_path, cache, T0))
+        asyncio.run(scheduler.tick(inv, slots_path, cache, T0 + dt.timedelta(seconds=60)))
+        return cache
+
+    def test_a_large_shortfall_is_logged_once_on_entry(self, tmp_path, monkeypatch, caplog):
+        # 4,500 W commanded, 4,000 W delivered: 500 W and 11% short, over both thresholds.
+        with caplog.at_level("WARNING", logger="dispatch"):
+            cache = self._two_ticks(tmp_path, monkeypatch, battery_power_w=4000)
+        assert cache["shorted"] is True
+        shortfalls = [r for r in caplog.records if "magnitude shortfall" in r.message]
+        assert len(shortfalls) == 1, "should log once on entry, not once per tick"
+
+    def test_delivery_within_tolerance_is_not_flagged(self, tmp_path, monkeypatch, caplog):
+        # 4,500 commanded, 4,400 delivered: 100 W and 2.2% short -- under SHORTFALL_PCT (5%).
+        with caplog.at_level("WARNING", logger="dispatch"):
+            cache = self._two_ticks(tmp_path, monkeypatch, battery_power_w=4400)
+        assert cache["shorted"] is False
+        assert not any("magnitude shortfall" in r.message for r in caplog.records)
+
+    def test_dry_run_never_flags_a_shortfall(self, tmp_path, monkeypatch, caplog):
+        """`cache['last_written']` is set in dry run too, from a command `Inverter.write`
+        never actually sent -- comparing it to real battery power would score ordinary
+        self-consumption against a command nobody issued."""
+        with caplog.at_level("WARNING", logger="dispatch"):
+            cache = self._two_ticks(tmp_path, monkeypatch, battery_power_w=0, dry_run=True)
+        assert cache["shorted"] is False
+        assert not any("magnitude shortfall" in r.message for r in caplog.records)

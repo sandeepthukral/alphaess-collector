@@ -76,6 +76,19 @@ SURPLUS_HARVEST_W = 200.0
 # silently, and far below what the registers claim.
 HARD_MAX_POWER_W = 5000
 
+# The threshold for flagging a command that landed on the registers (`verified`) while the
+# battery is not delivering at the magnitude asked. MEASURED 2026-08-24: a commanded 4,700 W
+# discharge under Mode 2 settled at 4,400-4,480 W for the full length of a 149-minute session,
+# flat across 97%->61% SoC -- not a taper, and nowhere near HARD_MAX_POWER_W, so `clamp()`
+# never touched it. The same period's charge sessions met or slightly exceeded their own
+# setpoint (commanded 4,848 W, measured -4,966 W), so the shortfall is specific to sustained
+# discharge -- an inverter regulation asymmetry, not anything `dispatch/` writes.
+#
+# The absolute floor matters as much as the percentage: at the 320 W bottom tier, 5% is 16 W,
+# comfortably inside ordinary AC ripple, and would fire on every ordinary tick at that tier.
+SHORTFALL_PCT = 0.05
+SHORTFALL_MIN_W = 200
+
 # The safety backstop behind monitor #8 (`soc-floor`, section 6.1). Not a control input --
 # nothing here refuses a command because of it, because the direction rule and the plan's own
 # reserve already do that. It exists to answer "did the battery end up somewhere it should

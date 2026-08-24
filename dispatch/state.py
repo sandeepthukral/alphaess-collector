@@ -45,6 +45,7 @@ def _decision_fields(
     live: bool,
     live_soc_pct: float | None,
     write_verified: bool | None,
+    actual_battery_w: float | None = None,
 ) -> dict[str, int | float | str]:
     """What the DISPATCHER knows about this tick, as opposed to what the inverter said.
 
@@ -83,6 +84,12 @@ def _decision_fields(
         fields["soc_pct"] = float(live_soc_pct)
     if write_verified is not None:
         fields["verified"] = int(bool(write_verified))
+    # `registers.REG_BATTERY_POWER`, read in the SAME Modbus round-trip as the surplus check
+    # (`scheduler.py` step 4) -- a separate register from the dispatch block, so this survives
+    # exactly the failure `soc_pct` does. Charging-positive already, matching `setpoint_w`, so
+    # the two can be compared on the same point without a sign flip or a cross-series join.
+    if actual_battery_w is not None:
+        fields["actual_battery_w"] = float(actual_battery_w)
     return fields
 
 
@@ -130,6 +137,7 @@ def build_fields(
     live: bool = False,
     live_soc_pct: float | None = None,
     write_verified: bool | None = None,
+    actual_battery_w: float | None = None,
 ) -> dict:
     """One `dispatch_state` point's fields. Pure -- every value is a function of the inputs.
 
@@ -156,7 +164,8 @@ def build_fields(
         "setpoint_w": int(state["power_w"]),
         "target_soc_pct": float(state["target_soc_pct"]),
         "duration_s": int(state["duration_s"]),
-        **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified),
+        **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
+                          actual_battery_w),
     }
 
     # `expires_at` is when the dead man's switch runs out if nothing is written again. It is
@@ -192,6 +201,7 @@ def build_degraded_fields(
     live: bool = False,
     live_soc_pct: float | None = None,
     write_verified: bool | None = None,
+    actual_battery_w: float | None = None,
 ) -> dict:
     """One `dispatch_state` point for a tick that decided but could not read the inverter.
 
@@ -212,7 +222,9 @@ def build_degraded_fields(
     pointing at: the SoC register and the dispatch block are two separate reads, and the
     common failure is the second one alone. So a degraded point routinely knows the live SoC
     the decision was made against, and dropping it because some other read failed would throw
-    away a value that was successfully obtained.
+    away a value that was successfully obtained. `actual_battery_w` is a third, separate read
+    for the same reason -- the dispatch block can fail while the battery-power register still
+    answers.
 
     Not merged into `build_fields()` with optional arguments: that function's contract is
     "every value is a function of a readback", and a version of it that sometimes has no
@@ -221,7 +233,8 @@ def build_degraded_fields(
     """
     fields: dict[str, int | float | str] = {
         "read_error": read_error or "inverter unreadable",
-        **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified),
+        **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
+                          actual_battery_w),
     }
     if slot:
         fields["slot_start"] = int(

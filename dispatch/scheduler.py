@@ -360,9 +360,48 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
             log.warning("implausible power reading (grid=%+dW battery=%+dW) -- ignoring the "
                         "surplus rule this tick", grid_w, batt_w)
             surplus_w = None
+            batt_w = None
     except OSError as e:
         log.warning("surplus read failed: %s -- a met charge target will hold, not release", e)
-        surplus_w = None
+        surplus_w, batt_w = None, None
+
+    # Charging-positive, matching `setpoint_w` -- REG_BATTERY_POWER is discharge-positive.
+    # `None`, not 0, when the read failed or looked implausible: 0 would publish "the battery
+    # is idle" for "unknown", which is exactly the lie `soc_pct` was made conditional to avoid.
+    actual_battery_w = -batt_w if batt_w is not None else None
+
+    # Shortfall against the PREVIOUS tick's command. `batt_w` just read reflects up to TICK_S
+    # seconds of settling under `cache["last_written"]` -- the command THIS tick is about to
+    # replace, not the one it is about to issue.
+    #
+    # GATED ON LIVE. In dry run `cache["last_written"]` is still set to the command a decision
+    # chose, even though `Inverter.write` never sent it -- so comparing it to real battery
+    # power would score ordinary self-consumption against a command nobody issued, exactly the
+    # trap `review-dry-run.py`'s docstring warns about ("because nothing is commanded, the
+    # battery ... will disagree with the decisions constantly").
+    #
+    # ONE LOG LINE PER TRANSITION, not one per tick. MEASURED 2026-08-24: a sustained discharge
+    # session held ~5-7% under its setpoint for 149 minutes straight -- at 60 s a tick that is
+    # 149 near-identical WARNINGs, the same problem `StatePublisher._failing` exists to avoid.
+    shorted = False
+    if not inv.dry_run and actual_battery_w is not None:
+        prev_cmd = cache.get("last_written")
+        if prev_cmd is not None and prev_cmd.mode == R.DispatchMode.SOC_TARGET \
+                and prev_cmd.power_w != 0:
+            shortfall_w = abs(prev_cmd.power_w) - abs(actual_battery_w)
+            shorted = (shortfall_w >= S.SHORTFALL_MIN_W
+                       and shortfall_w / abs(prev_cmd.power_w) >= S.SHORTFALL_PCT)
+
+    was_shorted = cache.get("shorted", False)
+    if shorted and not was_shorted:
+        log.warning(
+            "magnitude shortfall: commanded %+dW, battery delivering %+.0fW (%.0f%% short) -- "
+            "registers verified, so this is the inverter under-delivering, not an unlanded "
+            "write", prev_cmd.power_w, actual_battery_w,
+            100 * shortfall_w / abs(prev_cmd.power_w))
+    elif was_shorted and not shorted:
+        log.info("magnitude shortfall cleared")
+    cache["shorted"] = shorted
 
     decision = S.decide(cache.get("doc"), now, live_soc, cache.get("error", ""), surplus_w)
 
@@ -508,6 +547,9 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         # NOT the local `verified`, which is the decoded block. This is step 8's verdict on
         # whether the write landed, and it is None whenever there was nothing to confirm.
         "write_verified": cache.get("write_verified"),
+        # Read at step 4, from a register the dispatch block does not touch -- present even on
+        # a tick that could not read the block at all, same argument as `live_soc_pct` above.
+        "actual_battery_w": actual_battery_w,
     }
     if publisher is not None:
         if verified is not None and raw_words is not None:
