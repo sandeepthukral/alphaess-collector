@@ -836,7 +836,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "decimals": 0,
+          "decimals": 2,
           "mappings": [],
           "noValue": "silent",
           "thresholds": {
@@ -901,7 +901,7 @@
           "color": {
             "mode": "thresholds"
           },
-          "decimals": 0,
+          "decimals": 2,
           "mappings": [],
           "noValue": "unreadable",
           "thresholds": {
@@ -1735,6 +1735,6 @@
   "timezone": "browser",
   "title": "Dispatch",
   "uid": "alphaess-dispatch",
-  "version": 3,
+  "version": 4,
   "weekStart": ""
 }

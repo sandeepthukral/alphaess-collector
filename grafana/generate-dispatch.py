@@ -952,7 +952,7 @@ dashboard = {
     #    a pinned column order and room for all five registers.
     # 3: Row B2 -- Commanded now / Actual now / Shortfall, reading the new `actual_battery_w`
     #    field. Rows C, D and E all move down 4 to make room.
-    "version": 3,
+    "version": 4,
     "weekStart": "",
 }
 
