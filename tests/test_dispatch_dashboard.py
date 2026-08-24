@@ -45,7 +45,7 @@ def published_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z",
         reason="discharge 4500 W to 20.0%", live=True, live_soc_pct=41.2,
-        write_verified=True)
+        write_verified=True, actual_battery_w=-4300.0)
 
 
 def published_fields() -> set[str]:
@@ -65,7 +65,7 @@ def degraded_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z", read_error="timed out",
         decision_kind="idle", reason="live SoC unreadable", live=True,
-        live_soc_pct=41.2, write_verified=False)
+        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0)
 
 
 def degraded_fields() -> set[str]:
@@ -215,7 +215,7 @@ class TestConditionalFields:
         and must never render as a failed write.
         """
         assert conditional_fields() == {"expires_at", "slot_start", "slot_action", "plan_run",
-                                        "verified", "soc_pct"}
+                                        "verified", "soc_pct", "actual_battery_w"}
 
     def test_the_decode_table_reads_only_unconditionally_written_fields(self):
         """`last()` returns each field's newest point WITH ITS OWN TIMESTAMP, and `pivot`

@@ -269,6 +269,40 @@ SOC_ACTUAL = '''from(bucket: "alphaess")
   |> yield(name: "soc")
 '''
 
+# --- Shortfall: commanded magnitude against the SAME-TICK battery reading ----------------
+#
+# MEASURED 2026-08-24: a commanded 4,700 W discharge under Mode 2 settled at 4,400-4,480 W for
+# the full length of a 149-minute session, flat across 97%->61% SoC -- 6-7% under, and not
+# anything `slots.clamp()` did. Charge over the same period met or slightly exceeded its own
+# setpoint, so the shortfall is specific to sustained discharge: an inverter regulation
+# asymmetry, invisible everywhere but an ad hoc Influx query until `actual_battery_w` existed.
+#
+# UNLIKE THE PANEL BELOW, this needs no window and no cross-series join: `setpoint_w` and
+# `actual_battery_w` are two fields of the SAME POINT, both written from the same tick's
+# readbacks (`scheduler.py` step 4 for the battery register, step 8 for the block), so `last()`
+# plus `pivot` lands them on one row without the skew "Commanded against actual" has to allow
+# for between this process's clock and the collector's.
+#
+# `%`, NOT `W`. The household changes the planner's `maxDischargeSpeed` from time to time, and
+# a percentage keeps meaning the same thing across that change where a fixed watt threshold
+# would not. Filtered to commands over 50 W so a hold (setpoint 0) never divides by zero.
+SHORTFALL = '''mag = (v) => if v < 0.0 then -v else v
+
+from(bucket: "alphaess")
+  |> range(start: -5m)
+  |> filter(fn: (r) => r._measurement == "dispatch_state"
+                   and (r._field == "setpoint_w" or r._field == "actual_battery_w"))
+  |> last()
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> group()
+  |> filter(fn: (r) => exists r.setpoint_w and exists r.actual_battery_w
+                   and mag(v: float(v: r.setpoint_w)) > 50.0)
+  |> map(fn: (r) => ({ _time: r._time, _value:
+       100.0 * (mag(v: float(v: r.setpoint_w)) - mag(v: float(v: r.actual_battery_w)))
+       / mag(v: float(v: r.setpoint_w)) }))
+  |> keep(columns: ["_value"])
+'''
+
 # --- The register decode table -----------------------------------------------------------
 #
 # Carried over from `generate-battery-plan.py` unchanged. The raw column is the point: it is
@@ -543,7 +577,52 @@ panels.append(stat(
     y=4, no_value="no command"))
 
 # =========================================================================================
-# Row C, y=8 -- did it land?
+# Row B2, y=8 -- not just landed, but at the commanded MAGNITUDE
+# =========================================================================================
+#
+# `Verified` on Row A proves the REGISTERS took the value; `actual_battery_w` -- read in the
+# same Modbus round-trip as the surplus check, not from the collector -- proves the BATTERY
+# did too. MEASURED 2026-08-24: a commanded 4,700 W discharge settled at ~4,400 W for a full
+# 149-minute session with `verified` green the whole time. That gap is what these three tiles
+# exist to catch, and none of Row A can see it.
+
+panels.append(stat(
+    15, "Commanded now",
+    "The setpoint the dispatcher just wrote, charging-positive. Repeats 'Commanded against "
+    "actual' below as a single number, for the phone-in-the-kitchen glance that chart is too "
+    "wide for.",
+    DISPATCH_LAST % "setpoint_w", "watt", 0, 0, 8,
+    [{"color": "text", "value": None}],
+    y=8, no_value="silent"))
+
+panels.append(stat(
+    16, "Actual now",
+    "REG_BATTERY_POWER, read in the same Modbus round-trip as the surplus check and flipped "
+    "to the same charging-positive convention as 'Commanded now' beside it -- not the "
+    "collector's reading, so the two land on one point and never need a cross-series join to "
+    "agree.",
+    DISPATCH_LAST % "actual_battery_w", "watt", 0, 8, 8,
+    [{"color": "text", "value": None}],
+    y=8, no_value="unreadable"))
+
+panels.append(stat(
+    17, "Shortfall",
+    "How far short of the commanded MAGNITUDE the battery is actually running, as a "
+    "percentage so it keeps meaning the same thing if the planner's tuned discharge speed "
+    "changes. MEASURED 2026-08-24: sustained discharge at 4,700 W settled 6-7% under for a "
+    "full 149-minute session while every other tile on this page stayed green. Negative "
+    "means the battery is exceeding its setpoint, which charge sessions do routinely and is "
+    "not a fault. 'no command' is the resting state: hold and self both write a setpoint "
+    "under 50 W, which this ignores rather than divide by.",
+    SHORTFALL, "percent", 1, 16, 8,
+    # Matches `slots.SHORTFALL_PCT` (5%) and twice it for red -- keep the two in sync by hand,
+    # the same trade `generate-battery-score.py:29` makes for every constant shared this way.
+    [{"color": "green", "value": None}, {"color": "orange", "value": 5.0},
+     {"color": "red", "value": 10.0}],
+    y=8, no_value="no command"))
+
+# =========================================================================================
+# Row C, y=12 -- did it land?
 # =========================================================================================
 #
 # BOTH WATT SERIES SHARE THE LEFT AXIS, so they must agree on unit AND axisLabel --
@@ -614,7 +693,7 @@ panels.append({
                 {"id": "custom.axisLabel", "value": "SoC %"}]),
         ],
     },
-    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
     "id": 11,
     # ITS OWN WINDOW, backward only. The dashboard runs to now+36h so the slot panels can
     # draw the whole horizon, and this panel is a record of what already happened -- given
@@ -632,7 +711,7 @@ panels.append({
 })
 
 # =========================================================================================
-# Row D, y=16 and y=20 -- what is coming
+# Row D, y=20 and y=24 -- what is coming
 # =========================================================================================
 panels.append({
     "datasource": DS,
@@ -661,7 +740,7 @@ panels.append({
         },
         "overrides": [],
     },
-    "gridPos": {"h": 4, "w": 24, "x": 0, "y": 16},
+    "gridPos": {"h": 4, "w": 24, "x": 0, "y": 20},
     "id": 12,
     "options": {
         "alignValue": "left",
@@ -721,7 +800,7 @@ panels.append({
                             {"id": "decimals", "value": 1}]},
         ],
     },
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 20},
+    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 24},
     "id": 13,
     "options": {
         "cellHeight": "sm",
@@ -748,7 +827,7 @@ panels.append({
 })
 
 # =========================================================================================
-# Row E, y=30 -- the registers themselves
+# Row E, y=34 -- the registers themselves
 # =========================================================================================
 panels.append({
     "datasource": DS,
@@ -783,7 +862,7 @@ panels.append({
     # h=8, not 6. Five registers plus a header does not fit in six rows of grid, and the two
     # that fall off the bottom are 0x0886 and 0x0887 -- the SoC target and the dead man's
     # switch, which are the two worth checking when a command looks wrong.
-    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 30},
+    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 34},
     "id": 14,
     "options": {
         "cellHeight": "sm",
@@ -871,7 +950,9 @@ dashboard = {
     # 2: window runs to now+36h so the slot panels can draw the whole horizon; the horizon
     #    variable is gone, the chart keeps its own backward window, and the decode table gets
     #    a pinned column order and room for all five registers.
-    "version": 2,
+    # 3: Row B2 -- Commanded now / Actual now / Shortfall, reading the new `actual_battery_w`
+    #    field. Rows C, D and E all move down 4 to make room.
+    "version": 3,
     "weekStart": "",
 }
 

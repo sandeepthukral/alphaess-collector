@@ -201,6 +201,25 @@ class TestWhatTheDispatcherKnows:
         f = build_degraded_fields(read_error="block read failed", live_soc_pct=8.4)
         assert f["soc_pct"] == 8.4
 
+    def test_the_actual_battery_reading_is_carried(self):
+        """`registers.REG_BATTERY_POWER`, charging-positive to match `setpoint_w` -- the two
+        are meant to sit on the same point and be compared without a sign flip."""
+        s, words = state_of()
+        assert build_fields(s, words, NOW, actual_battery_w=-4453.0)["actual_battery_w"] \
+            == -4453.0
+
+    def test_an_unreadable_battery_power_publishes_no_field_at_all(self):
+        """Same argument as `soc_pct`: the honest report of a value that was not read is no
+        field, not a zero that would read as the battery sitting idle."""
+        s, words = state_of()
+        assert "actual_battery_w" not in build_fields(s, words, NOW, actual_battery_w=None)
+
+    def test_a_degraded_point_still_carries_the_battery_reading_when_that_read_worked(self):
+        """The dispatch block and the battery-power register are two separate reads; the
+        commoner failure is the block alone."""
+        f = build_degraded_fields(read_error="block read failed", actual_battery_w=-312.0)
+        assert f["actual_battery_w"] == -312.0
+
     def test_a_landed_write_is_published_as_one(self):
         s, words = state_of()
         assert build_fields(s, words, NOW, write_verified=True)["verified"] == 1

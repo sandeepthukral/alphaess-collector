@@ -716,12 +716,27 @@ No extra Modbus traffic — this is publishing a read it already did.
 | `live` | int 0/1 | `not dry_run` | every tick | `1` |
 | `soc_pct` | float | the SoC read before deciding | **only when that read worked** | `41.2` |
 | `verified` | int 0/1 | did the write land | **only when something was commanded** | `1` |
+| `actual_battery_w` | float, signed | `REG_BATTERY_POWER`, **sign-flipped** | **only when that read worked** | `−4400` |
 
-The last five are what the DISPATCHER knew, as opposed to what the inverter said, and that is
+The last six are what the DISPATCHER knew, as opposed to what the inverter said, and that is
 why this table has a second half. Everything above them decodes a readback; everything from
 `decision_kind` down is computed before a register is touched, which is why the degraded point
 carries them too -- a Modbus outage is exactly when you want to know what the loop decided
 and why.
+
+**`actual_battery_w` is a third register, separate from the dispatch block and from SoC.**
+`verified` proves the REGISTERS took a command; it says nothing about whether the battery
+moved by the amount asked. MEASURED 2026-08-24: a commanded 4,700 W discharge under Mode 2
+settled at 4,400-4,480 W for the full length of a 149-minute session -- 6-7% under, flat
+across 97%→61% SoC, so not a taper -- while `verified` stayed green the entire time. Charge
+over the same period met or slightly exceeded its own setpoint, so the shortfall is specific
+to sustained discharge: an inverter regulation asymmetry, not anything this dispatcher writes.
+Read in the same Modbus round-trip as the surplus check (§5's step 4), so it survives a failed
+dispatch-block read the same way `soc_pct` does, and it lands on the same point as
+`setpoint_w` -- no cross-series join needed to compare them, unlike the collector's
+`battery_power_w`. `dispatch/slots.py`'s `SHORTFALL_PCT`/`SHORTFALL_MIN_W` gate one log line
+per transition into and out of a sustained shortfall, and the Dispatch dashboard's "Shortfall"
+tile reads the same two fields.
 
 `verified` is the one that changes what the dashboard can say. It is the write-then-readback
 verdict behind monitor #6, and until it was published, "every log line says commanded, the
