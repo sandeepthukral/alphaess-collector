@@ -51,7 +51,9 @@ flowchart LR
 ```
 
 `pi` (import price) = `interval.total`. `pe` (export price, 2026 saldering) =
-`market_price + market_price_tax − sourcing_markup + energy_tax`.
+`market_price + market_price_tax + energy_tax` — the market price with the taxes refunded, and
+no sourcing markup on either side of it. The markup is charged for sourcing energy, so it does
+not arise on energy that was not sourced; `pi − pe` is therefore exactly one markup, not two.
 
 ## Quality gate: `gate()`
 

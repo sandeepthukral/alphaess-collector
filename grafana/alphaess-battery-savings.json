@@ -1034,10 +1034,10 @@
     "list": [
       {
         "current": {
-          "text": "3",
-          "value": "3"
+          "text": "4",
+          "value": "4"
         },
-        "description": "daily_cost model_version to read. Bump in pricing.py when the model changes; set the same value here so old and new rows are not double-counted. 3 = added load_kwh (total house consumption) for the real-€/kWh panels; 2 = price-coverage gate (days are stored only when their prices are complete); 1 = pre-gate rows, kept for comparison.",
+        "description": "daily_cost model_version to read. Bump in pricing.py when the model changes; set the same value here so old and new rows are not double-counted. 4 = export price no longer deducts the sourcing markup (3 and earlier under-credited every exported kWh by ~0.01815 €/kWh); 3 = added load_kwh (total house consumption) for the real-€/kWh panels; 2 = price-coverage gate (days are stored only when their prices are complete); 1 = pre-gate rows, kept for comparison.",
         "hide": 0,
         "label": "Model version",
         "name": "model_version",
@@ -1053,12 +1053,17 @@
             "value": "2"
           },
           {
-            "selected": true,
+            "selected": false,
             "text": "3",
             "value": "3"
+          },
+          {
+            "selected": true,
+            "text": "4",
+            "value": "4"
           }
         ],
-        "query": "1,2,3",
+        "query": "1,2,3,4",
         "skipUrlSync": false,
         "type": "custom"
       }
