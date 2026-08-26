@@ -193,12 +193,19 @@ saving_i      = cost_cf_i − cost_actual_i
 - `p_import_i` = Frank's all-in `total` for the slot.
 - `p_export_i` (salded, 2026) — **implemented as option (b)**; still to be pinned
   against a real teruglevering bill line after 2026-07-26:
-  - (a) Frank's `feedIn` price field directly, **or**
-  - (b) **(implemented)** `marketPrice + marketPriceTax − sourcingMarkupPrice +
-    energyTaxPrice` — commodity credited per-slot with the markup deducted,
-    energy tax refunded under saldering, BTW kept.
-  - We **exclude the ~15% teruglever bonus** (it applies to specific cases only),
-    which is why option (b) is the default — it keeps the bonus out.
+  - (a) Frank's `feedIn` price field directly — **not available**: the field
+    fails validation on the public GraphQL endpoint and introspection is
+    disabled, so the API gives the four components and nothing about what they
+    pay you.
+  - (b) `marketPrice + marketPriceTax − sourcingMarkupPrice + energyTaxPrice` —
+    implemented until 2026-08-26 and **wrong**. Deducting the markup claims
+    Frank levies a feed-in fee of the same size. Nothing supports that.
+  - (c) **(implemented)** `marketPrice + marketPriceTax + energyTaxPrice` — the
+    markup is simply absent. Frank: "Wanneer je stroom teruglevert, ontvang je
+    daarom de marktprijs die op dat moment geldt", with the energy tax and BTW
+    refunded. The markup is charged for sourcing energy on your behalf; on
+    export there is nothing to source.
+  - We **exclude the ~15% teruglever bonus** (it applies to specific cases only).
 
 ### The surprise this model will show
 
@@ -351,7 +358,15 @@ day; there is no with/without split in the day set.
 
 ## Open items / risks
 
-1. **Export price (a) vs (b)** — pin against a real teruglevering bill line.
+1. ~~**Export price (a) vs (b)** — pin against a real teruglevering bill line.~~
+   **Closed 2026-08-26**: neither. Option (c) — the markup is absent, not
+   deducted. Found by reconciling the Battery Savings dashboard against
+   `report_day.py`'s own savings line, which disagreed by ~8% for a week and by
+   exactly `2 × sourcing_markup × exported_kWh` per day, to the cent. The
+   planner priced export at the full import price (one markup too high) and this
+   model at import minus two markups (one too low); the truth sat between them.
+   A bill line is still worth checking for the teruglever bonus, which both
+   sides exclude.
 2. **Sign-convention verification** — run `collector.py --once`; confirm
    `pv+grid+battery−load ≈ 0` on real samples before trusting euros.
 3. **Frank API backfill depth** — confirm how far back `marketPricesElectricity`

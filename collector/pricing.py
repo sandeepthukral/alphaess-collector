@@ -59,6 +59,15 @@ DAILY_MEASUREMENT = "daily_cost"
 #    Keep the dashboard's `model_version` variable in step
 #    (grafana/alphaess-battery-savings.json).
 #
+# 4: export_price() no longer deducts the sourcing markup. The markup is what
+#    Frank charges to source energy; on export there is nothing to source, so it
+#    is absent rather than deducted, and version 3 credited every exported kWh
+#    0.01815 €/kWh too little. This IS an arithmetic change - every stored day
+#    computes differently - so unlike `computed_at_unix` below it takes a bump,
+#    and every v3 row needs a backfill before the dashboard reads true again.
+#    Keep the dashboard's `model_version` variable in step
+#    (grafana/alphaess-battery-savings.json).
+#
 # `computed_at_unix` was added to the stored row after 3 without bumping to 4,
 # which is a deliberate exception to the rule above rather than an oversight.
 # It records when the job ran and takes no part in the arithmetic, so a v3 row
@@ -67,7 +76,7 @@ DAILY_MEASUREMENT = "daily_cost"
 # dashboard until a full backfill had run -- a real cost, for a field no panel
 # reads. The staleness monitor tolerates its absence on older rows by design:
 # max() simply ignores them.
-MODEL_VERSION = "3"
+MODEL_VERSION = "4"
 
 # Defined before the settings below, which log through it while being parsed.
 log = logging.getLogger("pricing")
@@ -245,12 +254,23 @@ def import_price(iv: dict) -> float:
 def export_price(iv: dict) -> float:
     """Salded feed-in price for 2026 (€/kWh).
 
-    Option (b) from DESIGN-battery-savings.md: commodity credited per-slot with
-    the sourcing markup deducted, energy tax refunded under saldering, BTW kept.
-    The ~15% teruglever bonus is intentionally excluded. Components are already
-    BTW-inclusive. Pin against a real teruglevering bill line post-2026-07-26.
+    The sourcing markup is simply ABSENT on export - neither credited nor
+    charged. Frank states it plainly: "Wanneer je stroom teruglevert, ontvang je
+    daarom de marktprijs die op dat moment geldt", with the energy tax and BTW
+    refunded under saldering. You are paid the market price plus the taxes back;
+    the markup is what Frank charges to source energy on your behalf, and it
+    does not arise on energy they did not source.
+
+    This was option (b) - `... - sourcing_markup` - which is a different and
+    stronger claim: that Frank also levies a feed-in fee the same size as the
+    markup. Nothing supports that, and it under-credited every export by
+    0.01815 €/kWh, ~8% of the reported weekly saving. See DESIGN-battery-
+    savings.md open item 1, now closed.
+
+    The ~15% teruglever bonus is still intentionally excluded. Components are
+    already BTW-inclusive.
     """
-    return iv["market_price"] + iv["market_price_tax"] - iv["sourcing_markup"] + iv["energy_tax"]
+    return iv["market_price"] + iv["market_price_tax"] + iv["energy_tax"]
 
 
 def compute_day(samples: list[Sample], intervals: list[dict], day: dt.date) -> dict:

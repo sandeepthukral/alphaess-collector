@@ -144,12 +144,22 @@ def test_import_price_is_the_all_in_total():
     assert import_price(iv) == 0.31
 
 
-def test_export_price_deducts_the_sourcing_markup():
-    """Pins the saldering choice from DESIGN-battery-savings.md (option b):
-    commodity credited, markup deducted, energy tax refunded, BTW kept."""
+def test_export_price_omits_the_sourcing_markup_without_deducting_it():
+    """Frank pays the market price with the taxes refunded under saldering. The
+    markup is charged for SOURCING energy, so it is absent on export - not
+    subtracted, which would claim a feed-in fee of the same size that nobody
+    levies. The two readings differ by 0.01815 EUR/kWh on real prices."""
     iv = hourly_intervals(T0, 1, market=0.04, tax=0.01, markup=0.02,
                           energy_tax=0.03)[0]
-    assert export_price(iv) == pytest.approx(0.04 + 0.01 - 0.02 + 0.03)
+    assert export_price(iv) == pytest.approx(0.04 + 0.01 + 0.03)
+
+
+def test_import_and_export_differ_by_exactly_one_markup():
+    """The relationship the whole model turns on, stated once so a change to
+    either price has to face it."""
+    iv = hourly_intervals(T0, 1, market=0.04, tax=0.01, markup=0.02,
+                          energy_tax=0.03, total=0.10)[0]
+    assert import_price(iv) - export_price(iv) == pytest.approx(0.02)
 
 
 # --------------------------------------------------------------------------
