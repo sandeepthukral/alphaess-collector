@@ -663,93 +663,6 @@ panels.append(stat(
     y=4, no_value="no command"))
 
 
-# --- Panels: battery cell temperature ----------------------------------------------------
-#
-# FLEET MIN AND FLEET MAX, NOT PER-PACK. 0x010B-0x0110 report the coldest cell and the hottest
-# cell across all three packs, each tagged with the pack it came from -- see
-# `dispatch/registers.py`. Nothing here can be titled "Pack 2 temp": that would claim three
-# independent series the register block does not provide, and per-pack needs the extended
-# register set nobody here has probed.
-#
-# Read by the dispatcher on the same tick and published on the same `dispatch_state` point as
-# everything in the row above, so these cost no extra Modbus round trip -- section 7.1's
-# argument, applied to one more register block.
-TEMP_HISTORY = '''from(bucket: "alphaess")
-  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
-  |> filter(fn: (r) => r._measurement == "dispatch_state"
-                   and (r._field == "min_cell_temp_c" or r._field == "max_cell_temp_c"))
-  |> yield(name: "cell temps")
-'''
-
-# STARTING POINTS, NOT A SPEC. The SMILE-G3 datasheet gives a -10 to 50 C operating range with
-# derating near both edges, so amber at 35 and red at 45 leaves room to notice a climb before
-# the inverter starts derating on its own. Retune once there is a season of real data; the
-# same hand-tuned trade `generate-dispatch.py`'s Shortfall tile makes with SHORTFALL_PCT.
-MAX_TEMP_STEPS = [{"color": "green", "value": None},
-                  {"color": "orange", "value": 35.0},
-                  {"color": "red", "value": 45.0}]
-
-# THE MIN TILE GETS ITS OWN LADDER, because its whole argument is that COLD is what matters
-# there: a lithium pack near freezing refuses or derates a charge, and the hot-side steps
-# above would render -20 C in the same comfortable green as 20 C. Blue below 5 leaves a band
-# of warning before the datasheet's -10 C floor. The top two steps are kept identical to the
-# max tile's so the two tiles never disagree about what "hot" looks like -- the min cell can
-# only be hot if the whole pack is.
-MIN_TEMP_STEPS = [{"color": "blue", "value": None},
-                  {"color": "green", "value": 5.0},
-                  {"color": "orange", "value": 35.0},
-                  {"color": "red", "value": 45.0}]
-
-panels.append(stat(
-    27, "Min cell temp",
-    "The COLDEST cell in the whole battery, across all three packs -- not one pack's average "
-    "and not a per-pack reading, which these registers cannot provide. Low matters as much as "
-    "high: a lithium pack below freezing refuses or derates a charge, so a planned overnight "
-    "charge that quietly under-delivers in January is a question this tile answers. Read with "
-    "'Max cell temp' beside it - the SPREAD between them is its own signal, a wide gap meaning "
-    "one pack is working much harder than its neighbours.",
-    DISPATCH_LAST % "min_cell_temp_c", "celsius", 1, 0, 12,
-    MIN_TEMP_STEPS, y=8, no_value="unreadable"))
-
-panels.append(stat(
-    28, "Max cell temp",
-    "The HOTTEST cell in the whole battery, across all three packs. This is the one that "
-    "decides whether the inverter starts derating: a sustained 4.7 kW discharge is also the "
-    "hardest thermal load the pack sees, so a shortfall that appears only on long sessions is "
-    "worth checking against this tile before blaming the dispatcher. 'unreadable' is a failed "
-    "or implausible register read, not a cold battery -- dispatch/registers.py refuses to "
-    "publish a temperature it cannot vouch for rather than publishing a wrong one.",
-    DISPATCH_LAST % "max_cell_temp_c", "celsius", 1, 12, 12,
-    MAX_TEMP_STEPS, y=8, no_value="unreadable"))
-
-panels.append(timeseries(
-    29, "Battery cell temperature (min/max)",
-    "Seven days of the coldest and hottest cell. The two tiles above say where the battery is "
-    "now; this says what it has been doing, which is the only way to tell a warm afternoon "
-    "from a pack that has been climbing all week. The band between the lines is the spread "
-    "across the fleet - it widens under load and closes overnight, and a spread that stops "
-    "closing is worth looking into.",
-    [target(TEMP_HISTORY)],
-    12, 8, "celsius",
-    # Linear against the panel's stepAfter default, and no fill: temperature ramps, it does
-    # not hold a commanded value until rewritten the way the register series on panel 5 do.
-    [series_override("min_cell_temp_c",
-                     [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
-                      {"id": "custom.lineInterpolation", "value": "linear"},
-                      {"id": "displayName", "value": "min cell"}]),
-     series_override("max_cell_temp_c",
-                     [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}},
-                      {"id": "custom.lineInterpolation", "value": "linear"},
-                      {"id": "displayName", "value": "max cell"}])],
-    fill=0))
-
-# ITS OWN WINDOW, and it needs one. This dashboard's range is now-6h to now+36h, sized for the
-# planning horizon; a temperature history drawn against it spends most of its width on a
-# future it knows nothing about. `timeFrom` pins this one panel to the last seven days
-# regardless of the picker -- the same override the Overview dashboard's live panels carry,
-# and the panel's own zoom still works for "just today".
-panels[-1]["timeFrom"] = "7d"
-
 # --- Panel: planned vs actual SoC -------------------------------------------------------
 panels.append(timeseries(
     5, "Planned SoC vs actual SoC",
@@ -831,7 +744,7 @@ from(bucket: "alphaess")
        else debug.null(type: "float") }))
   |> yield(name: "commanded")
 ''', "D")],
-    20, 9, "percent",
+    8, 9, "percent",
     # LINEAR, against the panel's stepAfter default, and only on these two.
     #
     # A step is the honest shape for a value that is CONSTANT across an interval and jumps at
@@ -889,7 +802,7 @@ from(bucket: "planning")
      target(PRICE_LINE, "B"),
      target(threshold_line("sell", "sell above"), "C"),
      target(threshold_line("buy", "buy below"), "D")],
-    29, 9, "kwatth",
+    17, 9, "kwatth",
     [series_override("charge", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
                                 {"id": "custom.drawStyle", "value": "bars"}]),
      series_override("discharge", [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
@@ -1037,7 +950,7 @@ panels.append({
                             {"id": "custom.width", "value": 90}]},
         ],
     },
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 38},
+    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 26},
     "id": 11,
     "options": {
         "cellHeight": "sm",
@@ -1119,7 +1032,7 @@ panels.append({
                             {"id": "custom.width", "value": 70}]},
         ],
     },
-    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 48},
+    "gridPos": {"h": 10, "w": 12, "x": 0, "y": 36},
     "id": 8,
     "options": {
         "cellHeight": "sm",
@@ -1192,7 +1105,7 @@ panels.append({
                             {"id": "custom.width", "value": 90}]},
         ],
     },
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 56},
+    "gridPos": {"h": 10, "w": 12, "x": 12, "y": 36},
     "id": 7,
     "options": {
         "cellHeight": "sm",
@@ -1344,7 +1257,7 @@ panels.append({
              "properties": [{"id": "displayName", "value": "Means"}]},
         ],
     },
-    "gridPos": {"h": 6, "w": 24, "x": 0, "y": 66},
+    "gridPos": {"h": 6, "w": 24, "x": 0, "y": 46},
     "id": 24,
     "options": {
         "cellHeight": "sm",
@@ -1435,9 +1348,12 @@ dashboard = {
     #     unchanged, so /d/alphaess-battery-plan and every link to it still resolve.
     # 15: both tables get explicit column widths and a short time format, for reading on a
     #     phone; "Planned actions" renamed to "Planned Actions in app".
-    # 18: battery cell temperature - two stats (27, 28) and a 7-day chart (29) at y=8..20.
-    #     The register decode table (24) moves from y=8 to the bottom; panels 5, 6, 11, 8
-    #     and 7 all move down 6 rows.
+    # 18: the register decode table (24) moves from y=8 to the bottom of the board - it is a
+    #     debugging tool and it sat above the two charts this dashboard exists for. "What to
+    #     set in the app" (8) and "Planned Actions in app" (7) become one half-width row
+    #     instead of two full-width ones; 8 grows to h=10 so the row has a flat bottom. Every
+    #     panel from 5 down moves up. The battery cell temperature panels live on the
+    #     Overview dashboard, not here.
     "version": 18,
     "weekStart": "",
 }

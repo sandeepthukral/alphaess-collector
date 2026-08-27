@@ -924,296 +924,6 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "The COLDEST cell in the whole battery, across all three packs -- not one pack's average and not a per-pack reading, which these registers cannot provide. Low matters as much as high: a lithium pack below freezing refuses or derates a charge, so a planned overnight charge that quietly under-delivers in January is a question this tile answers. Read with 'Max cell temp' beside it - the SPREAD between them is its own signal, a wide gap meaning one pack is working much harder than its neighbours.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "decimals": 1,
-          "mappings": [],
-          "noValue": "unreadable",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "blue",
-                "value": null
-              },
-              {
-                "color": "green",
-                "value": 5.0
-              },
-              {
-                "color": "orange",
-                "value": 35.0
-              },
-              {
-                "color": "red",
-                "value": 45.0
-              }
-            ]
-          },
-          "unit": "celsius"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 12,
-        "x": 0,
-        "y": 8
-      },
-      "id": 27,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"min_cell_temp_c\")\n  |> last()\n",
-          "refId": "A"
-        }
-      ],
-      "title": "Min cell temp",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "description": "The HOTTEST cell in the whole battery, across all three packs. This is the one that decides whether the inverter starts derating: a sustained 4.7 kW discharge is also the hardest thermal load the pack sees, so a shortfall that appears only on long sessions is worth checking against this tile before blaming the dispatcher. 'unreadable' is a failed or implausible register read, not a cold battery -- dispatch/registers.py refuses to publish a temperature it cannot vouch for rather than publishing a wrong one.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "decimals": 1,
-          "mappings": [],
-          "noValue": "unreadable",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "orange",
-                "value": 35.0
-              },
-              {
-                "color": "red",
-                "value": 45.0
-              }
-            ]
-          },
-          "unit": "celsius"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 12,
-        "x": 12,
-        "y": 8
-      },
-      "id": 28,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"max_cell_temp_c\")\n  |> last()\n",
-          "refId": "A"
-        }
-      ],
-      "title": "Max cell temp",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "description": "Seven days of the coldest and hottest cell. The two tiles above say where the battery is now; this says what it has been doing, which is the only way to tell a warm afternoon from a pack that has been climbing all week. The band between the lines is the spread across the fleet - it widens under load and closes overnight, and a spread that stops closing is worth looking into.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "stepAfter",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "celsius"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "min_cell_temp_c"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "blue",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.lineInterpolation",
-                "value": "linear"
-              },
-              {
-                "id": "displayName",
-                "value": "min cell"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "max_cell_temp_c"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.lineInterpolation",
-                "value": "linear"
-              },
-              {
-                "id": "displayName",
-                "value": "max cell"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 24,
-        "x": 0,
-        "y": 12
-      },
-      "id": 29,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"min_cell_temp_c\" or r._field == \"max_cell_temp_c\"))\n  |> yield(name: \"cell temps\")\n",
-          "refId": "A"
-        }
-      ],
-      "timeFrom": "7d",
-      "title": "Battery cell temperature (min/max)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
       "description": "Three lines on the same instant. 'planned' is the plan's SoC at the END of each interval, shifted onto that end so it lines up with a measurement taken there; 'actual' is the last reading in each 5-minute window, not a quarter-hour average, so a battery that stopped mid-slot shows as a flat stretch rather than a gentler slope. Both are drawn straight between points because SoC ramps; the two step lines are the ones that genuinely hold a value. Read the gaps: commanded against planned is a dispatcher problem, actual against commanded is a delivery one. A step-shaped gap of exactly one interval used to be a charting artefact and no longer is.",
       "fieldConfig": {
         "defaults": {
@@ -1372,7 +1082,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 20
+        "y": 8
       },
       "id": 5,
       "options": {
@@ -1648,7 +1358,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 29
+        "y": 17
       },
       "id": 6,
       "options": {
@@ -1867,7 +1577,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 26
       },
       "id": 11,
       "options": {
@@ -2066,10 +1776,10 @@
         ]
       },
       "gridPos": {
-        "h": 8,
-        "w": 24,
+        "h": 10,
+        "w": 12,
         "x": 0,
-        "y": 48
+        "y": 36
       },
       "id": 8,
       "options": {
@@ -2249,9 +1959,9 @@
       },
       "gridPos": {
         "h": 10,
-        "w": 24,
-        "x": 0,
-        "y": 56
+        "w": 12,
+        "x": 12,
+        "y": 36
       },
       "id": 7,
       "options": {
@@ -2388,7 +2098,7 @@
         "h": 6,
         "w": 24,
         "x": 0,
-        "y": 66
+        "y": 46
       },
       "id": 24,
       "options": {
