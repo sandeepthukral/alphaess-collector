@@ -662,114 +662,82 @@ panels.append(stat(
      {"color": "green", "value": 60}],
     y=4, no_value="no command"))
 
-# --- Panel: the register decode table ---------------------------------------------------
-#
-# The literal answer to "human-readable instead of register values" -- but the raw column
-# stays. Half the value of this table is being able to check a decode against the spec
-# without leaving the dashboard, and every encoding in section 5.2 was got wrong by somebody
-# first: the community's 0.392 %/bit claim is in the wild precisely because nobody could see
-# both columns at once.
-#
-# Built as a union of one-row streams rather than with findRecord, so that a stale window
-# yields an empty table and Grafana's own "No data" rather than a Flux error. The 32-bit
-# values are recombined here because the point stores the words verbatim, one field each.
-# THE FIELD LIST IS EXPLICIT, and every name on it is one state.py writes on EVERY tick.
-# That is a correctness requirement, not tidiness. `last()` returns the newest point per
-# field, each carrying its own timestamp, and `pivot` keys rows by that timestamp -- so the
-# moment one conditional field (`expires_at`, `slot_start`, `slot_action`, `plan_run`) goes
-# stale while the rest keep being written, the pivot emits TWO rows at two different instants
-# and the union below renders the whole table twice: one populated copy and one blank, for
-# the five minutes until the stale field falls out of the window. Adding a conditional field
-# to this list brings that straight back. tests/test_dispatch_dashboard.py pins it.
-DECODE_TABLE = '''base = from(bucket: "alphaess")
-  |> range(start: -5m)
-  |> filter(fn: (r) => r._measurement == "dispatch_state")
-  |> filter(fn: (r) => r._field == "dispatch_active" or r._field == "setpoint_w"
-                    or r._field == "action" or r._field == "mode_name"
-                    or r._field == "target_soc_pct" or r._field == "duration_s"
-                    or r._field =~ /^raw_08[0-9a-f][0-9a-f]$/)
-  |> last()
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
 
-union(tables: [
-  base |> map(fn: (r) => ({
-    register: "0x0880", name: "Dispatch start", raw: r.raw_0880,
-    means: if r.dispatch_active != 0 then "Active" else "Released"
-  })),
-  base |> map(fn: (r) => ({
-    register: "0x0881", name: "Active power", raw: r.raw_0881 * 65536 + r.raw_0882,
-    means: string(v: r.setpoint_w) + " W - " + r.action
-  })),
-  base |> map(fn: (r) => ({
-    register: "0x0885", name: "Mode", raw: r.raw_0885,
-    means: r.mode_name
-  })),
-  base |> map(fn: (r) => ({
-    register: "0x0886", name: "SoC target", raw: r.raw_0886,
-    means: string(v: r.target_soc_pct) + " %"
-  })),
-  base |> map(fn: (r) => ({
-    register: "0x0887", name: "Duration", raw: r.raw_0887 * 65536 + r.raw_0888,
-    means: string(v: r.duration_s / 60) + " min " + string(v: r.duration_s % 60) + " s"
-  })),
-])
-  |> group()
-  |> sort(columns: ["register"])
-  |> yield(name: "decode")
+# --- Panels: battery cell temperature ----------------------------------------------------
+#
+# FLEET MIN AND FLEET MAX, NOT PER-PACK. 0x010B-0x0110 report the coldest cell and the hottest
+# cell across all three packs, each tagged with the pack it came from -- see
+# `dispatch/registers.py`. Nothing here can be titled "Pack 2 temp": that would claim three
+# independent series the register block does not provide, and per-pack needs the extended
+# register set nobody here has probed.
+#
+# Read by the dispatcher on the same tick and published on the same `dispatch_state` point as
+# everything in the row above, so these cost no extra Modbus round trip -- section 7.1's
+# argument, applied to one more register block.
+TEMP_HISTORY = '''from(bucket: "alphaess")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "dispatch_state"
+                   and (r._field == "min_cell_temp_c" or r._field == "max_cell_temp_c"))
+  |> yield(name: "cell temps")
 '''
 
-panels.append({
-    "datasource": DS,
-    "description": "The dispatch block as it reads right now, decoded. The raw column is "
-                   "kept deliberately: it is what lets a decode be checked against the "
-                   "AlphaESS register spec without leaving this page, and every encoding "
-                   "here was got wrong by somebody first. 0x0881 and 0x0887 are 32-bit and "
-                   "are shown recombined from their two words. 0x0883 is reactive power and "
-                   "is never written - it is not in this table because the dispatcher does "
-                   "not touch it. Empty means no point in five minutes: see Dispatch state.",
-    "fieldConfig": {
-        "defaults": {
-            "custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": False},
-            "mappings": [],
-            "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
-        },
-        "overrides": [
-            {"matcher": {"id": "byName", "options": "register"},
-             "properties": [{"id": "displayName", "value": "Register"}]},
-            {"matcher": {"id": "byName", "options": "name"},
-             "properties": [{"id": "displayName", "value": "Name"}]},
-            {"matcher": {"id": "byName", "options": "raw"},
-             "properties": [{"id": "displayName", "value": "Raw"},
-                            {"id": "decimals", "value": 0}]},
-            {"matcher": {"id": "byName", "options": "means"},
-             "properties": [{"id": "displayName", "value": "Means"}]},
-        ],
-    },
-    "gridPos": {"h": 6, "w": 24, "x": 0, "y": 8},
-    "id": 24,
-    "options": {
-        "cellHeight": "sm",
-        "footer": {"countRows": False, "fields": "", "reducer": ["sum"], "show": False},
-        "showHeader": True,
-        "sortBy": [],
-    },
-    "pluginVersion": "11.6.0",
-    # Column order fixed here rather than by the order of fields in the Flux `map`: Flux does
-    # not promise an output column order, so a map that happens to come out right today would
-    # reorder itself on an unrelated change and nobody would notice.
-    "transformations": [{
-        "id": "organize",
-        "options": {
-            "excludeByName": {},
-            "includeByName": {},
-            "renameByName": {},
-            "indexByName": {"register": 0, "name": 1, "raw": 2, "means": 3},
-        },
-    }],
-    "targets": [target(DECODE_TABLE)],
-    "title": "Dispatch registers, decoded",
-    "type": "table",
-})
+# STARTING POINTS, NOT A SPEC. The SMILE-G3 datasheet gives a -10 to 50 C operating range with
+# derating near both edges, so amber at 35 and red at 45 leaves room to notice a climb before
+# the inverter starts derating on its own. Retune once there is a season of real data; the
+# same hand-tuned trade `generate-dispatch.py`'s Shortfall tile makes with SHORTFALL_PCT.
+TEMP_STEPS = [{"color": "green", "value": None},
+              {"color": "orange", "value": 35.0},
+              {"color": "red", "value": 45.0}]
+
+panels.append(stat(
+    27, "Min cell temp",
+    "The COLDEST cell in the whole battery, across all three packs -- not one pack's average "
+    "and not a per-pack reading, which these registers cannot provide. Low matters as much as "
+    "high: a lithium pack below freezing refuses or derates a charge, so a planned overnight "
+    "charge that quietly under-delivers in January is a question this tile answers. Read with "
+    "'Max cell temp' beside it - the SPREAD between them is its own signal, a wide gap meaning "
+    "one pack is working much harder than its neighbours.",
+    DISPATCH_LAST % "min_cell_temp_c", "celsius", 1, 0, 12,
+    TEMP_STEPS, y=8, no_value="unreadable"))
+
+panels.append(stat(
+    28, "Max cell temp",
+    "The HOTTEST cell in the whole battery, across all three packs. This is the one that "
+    "decides whether the inverter starts derating: a sustained 4.7 kW discharge is also the "
+    "hardest thermal load the pack sees, so a shortfall that appears only on long sessions is "
+    "worth checking against this tile before blaming the dispatcher. 'unreadable' is a failed "
+    "or implausible register read, not a cold battery -- dispatch/registers.py refuses to "
+    "publish a temperature it cannot vouch for rather than publishing a wrong one.",
+    DISPATCH_LAST % "max_cell_temp_c", "celsius", 1, 12, 12,
+    TEMP_STEPS, y=8, no_value="unreadable"))
+
+panels.append(timeseries(
+    29, "Battery cell temperature (min/max)",
+    "Seven days of the coldest and hottest cell. The two tiles above say where the battery is "
+    "now; this says what it has been doing, which is the only way to tell a warm afternoon "
+    "from a pack that has been climbing all week. The band between the lines is the spread "
+    "across the fleet - it widens under load and closes overnight, and a spread that stops "
+    "closing is worth looking into.",
+    [target(TEMP_HISTORY)],
+    12, 8, "celsius",
+    # Linear against the panel's stepAfter default, and no fill: temperature ramps, it does
+    # not hold a commanded value until rewritten the way the register series on panel 5 do.
+    [series_override("min_cell_temp_c",
+                     [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
+                      {"id": "custom.lineInterpolation", "value": "linear"},
+                      {"id": "displayName", "value": "min cell"}]),
+     series_override("max_cell_temp_c",
+                     [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}},
+                      {"id": "custom.lineInterpolation", "value": "linear"},
+                      {"id": "displayName", "value": "max cell"}])],
+    fill=0))
+
+# ITS OWN WINDOW, and it needs one. This dashboard's range is now-6h to now+36h, sized for the
+# planning horizon; a temperature history drawn against it spends most of its width on a
+# future it knows nothing about. `timeFrom` pins this one panel to the last seven days
+# regardless of the picker -- the same override the Overview dashboard's live panels carry,
+# and the panel's own zoom still works for "just today".
+panels[-1]["timeFrom"] = "7d"
 
 # --- Panel: planned vs actual SoC -------------------------------------------------------
 panels.append(timeseries(
@@ -852,7 +820,7 @@ from(bucket: "alphaess")
        else debug.null(type: "float") }))
   |> yield(name: "commanded")
 ''', "D")],
-    14, 9, "percent",
+    20, 9, "percent",
     # LINEAR, against the panel's stepAfter default, and only on these two.
     #
     # A step is the honest shape for a value that is CONSTANT across an interval and jumps at
@@ -910,7 +878,7 @@ from(bucket: "planning")
      target(PRICE_LINE, "B"),
      target(threshold_line("sell", "sell above"), "C"),
      target(threshold_line("buy", "buy below"), "D")],
-    23, 9, "kwatth",
+    29, 9, "kwatth",
     [series_override("charge", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
                                 {"id": "custom.drawStyle", "value": "bars"}]),
      series_override("discharge", [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
@@ -1058,7 +1026,7 @@ panels.append({
                             {"id": "custom.width", "value": 90}]},
         ],
     },
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 32},
+    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 38},
     "id": 11,
     "options": {
         "cellHeight": "sm",
@@ -1140,7 +1108,7 @@ panels.append({
                             {"id": "custom.width", "value": 70}]},
         ],
     },
-    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 42},
+    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 48},
     "id": 8,
     "options": {
         "cellHeight": "sm",
@@ -1213,7 +1181,7 @@ panels.append({
                             {"id": "custom.width", "value": 90}]},
         ],
     },
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 50},
+    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 56},
     "id": 7,
     "options": {
         "cellHeight": "sm",
@@ -1275,6 +1243,119 @@ join.left(
   |> yield(name: "actions")
 ''')],
     "title": "Planned Actions in app",
+    "type": "table",
+})
+
+# --- Panel: the register decode table ---------------------------------------------------
+#
+# LAST ON THE PAGE, and it belongs there. This is the panel you scroll to when a decode is
+# in doubt -- a debugging tool, not a status one -- and it sat above the two charts that
+# answer the question people actually open this dashboard with.
+#
+# The literal answer to "human-readable instead of register values" -- but the raw column
+# stays. Half the value of this table is being able to check a decode against the spec
+# without leaving the dashboard, and every encoding in section 5.2 was got wrong by somebody
+# first: the community's 0.392 %/bit claim is in the wild precisely because nobody could see
+# both columns at once.
+#
+# Built as a union of one-row streams rather than with findRecord, so that a stale window
+# yields an empty table and Grafana's own "No data" rather than a Flux error. The 32-bit
+# values are recombined here because the point stores the words verbatim, one field each.
+# THE FIELD LIST IS EXPLICIT, and every name on it is one state.py writes on EVERY tick.
+# That is a correctness requirement, not tidiness. `last()` returns the newest point per
+# field, each carrying its own timestamp, and `pivot` keys rows by that timestamp -- so the
+# moment one conditional field (`expires_at`, `slot_start`, `slot_action`, `plan_run`) goes
+# stale while the rest keep being written, the pivot emits TWO rows at two different instants
+# and the union below renders the whole table twice: one populated copy and one blank, for
+# the five minutes until the stale field falls out of the window. Adding a conditional field
+# to this list brings that straight back. tests/test_dispatch_dashboard.py pins it.
+DECODE_TABLE = '''base = from(bucket: "alphaess")
+  |> range(start: -5m)
+  |> filter(fn: (r) => r._measurement == "dispatch_state")
+  |> filter(fn: (r) => r._field == "dispatch_active" or r._field == "setpoint_w"
+                    or r._field == "action" or r._field == "mode_name"
+                    or r._field == "target_soc_pct" or r._field == "duration_s"
+                    or r._field =~ /^raw_08[0-9a-f][0-9a-f]$/)
+  |> last()
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+
+union(tables: [
+  base |> map(fn: (r) => ({
+    register: "0x0880", name: "Dispatch start", raw: r.raw_0880,
+    means: if r.dispatch_active != 0 then "Active" else "Released"
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0881", name: "Active power", raw: r.raw_0881 * 65536 + r.raw_0882,
+    means: string(v: r.setpoint_w) + " W - " + r.action
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0885", name: "Mode", raw: r.raw_0885,
+    means: r.mode_name
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0886", name: "SoC target", raw: r.raw_0886,
+    means: string(v: r.target_soc_pct) + " %"
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0887", name: "Duration", raw: r.raw_0887 * 65536 + r.raw_0888,
+    means: string(v: r.duration_s / 60) + " min " + string(v: r.duration_s % 60) + " s"
+  })),
+])
+  |> group()
+  |> sort(columns: ["register"])
+  |> yield(name: "decode")
+'''
+
+panels.append({
+    "datasource": DS,
+    "description": "The dispatch block as it reads right now, decoded. The raw column is "
+                   "kept deliberately: it is what lets a decode be checked against the "
+                   "AlphaESS register spec without leaving this page, and every encoding "
+                   "here was got wrong by somebody first. 0x0881 and 0x0887 are 32-bit and "
+                   "are shown recombined from their two words. 0x0883 is reactive power and "
+                   "is never written - it is not in this table because the dispatcher does "
+                   "not touch it. Empty means no point in five minutes: see Dispatch state.",
+    "fieldConfig": {
+        "defaults": {
+            "custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": False},
+            "mappings": [],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
+        },
+        "overrides": [
+            {"matcher": {"id": "byName", "options": "register"},
+             "properties": [{"id": "displayName", "value": "Register"}]},
+            {"matcher": {"id": "byName", "options": "name"},
+             "properties": [{"id": "displayName", "value": "Name"}]},
+            {"matcher": {"id": "byName", "options": "raw"},
+             "properties": [{"id": "displayName", "value": "Raw"},
+                            {"id": "decimals", "value": 0}]},
+            {"matcher": {"id": "byName", "options": "means"},
+             "properties": [{"id": "displayName", "value": "Means"}]},
+        ],
+    },
+    "gridPos": {"h": 6, "w": 24, "x": 0, "y": 66},
+    "id": 24,
+    "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": False, "fields": "", "reducer": ["sum"], "show": False},
+        "showHeader": True,
+        "sortBy": [],
+    },
+    "pluginVersion": "11.6.0",
+    # Column order fixed here rather than by the order of fields in the Flux `map`: Flux does
+    # not promise an output column order, so a map that happens to come out right today would
+    # reorder itself on an unrelated change and nobody would notice.
+    "transformations": [{
+        "id": "organize",
+        "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "renameByName": {},
+            "indexByName": {"register": 0, "name": 1, "raw": 2, "means": 3},
+        },
+    }],
+    "targets": [target(DECODE_TABLE)],
+    "title": "Dispatch registers, decoded",
     "type": "table",
 })
 
@@ -1343,7 +1424,10 @@ dashboard = {
     #     unchanged, so /d/alphaess-battery-plan and every link to it still resolve.
     # 15: both tables get explicit column widths and a short time format, for reading on a
     #     phone; "Planned actions" renamed to "Planned Actions in app".
-    "version": 17,
+    # 18: battery cell temperature - two stats (27, 28) and a 7-day chart (29) at y=8..20.
+    #     The register decode table (24) moves from y=8 to the bottom; panels 5, 6, 11, 8
+    #     and 7 all move down 6 rows.
+    "version": 18,
     "weekStart": "",
 }
 

@@ -175,6 +175,78 @@ class TestDecodeBlock:
             R.decode_block([0] * 8)
 
 
+class TestDecodeTempBlock:
+    """0x010B-0x0110. Six words whose signedness is not uniform: the two temperatures are
+    signed, the four pack/cell IDs are not."""
+
+    def _block(self, *, min_c=18.4, max_c=23.7, min_pack=1, min_cell=7,
+               max_pack=3, max_cell=12):
+        """Six words as the inverter returns them, raw = C * 10, two's complement."""
+        words = [0] * 6
+        words[R.REG_MIN_CELL_TEMP_PACK - R.REG_MIN_CELL_TEMP_PACK] = min_pack
+        words[R.REG_MIN_CELL_TEMP_CELL - R.REG_MIN_CELL_TEMP_PACK] = min_cell
+        words[R.REG_MIN_CELL_TEMP - R.REG_MIN_CELL_TEMP_PACK] = round(min_c * 10) & 0xFFFF
+        words[R.REG_MAX_CELL_TEMP_PACK - R.REG_MIN_CELL_TEMP_PACK] = max_pack
+        words[R.REG_MAX_CELL_TEMP_CELL - R.REG_MIN_CELL_TEMP_PACK] = max_cell
+        words[R.REG_MAX_CELL_TEMP - R.REG_MIN_CELL_TEMP_PACK] = round(max_c * 10) & 0xFFFF
+        return words
+
+    def test_decodes_a_known_block(self):
+        assert R.decode_temp_block(self._block()) == {
+            "min_cell_temp_c": 18.4, "min_cell_temp_pack": 1, "min_cell_temp_cell": 7,
+            "max_cell_temp_c": 23.7, "max_cell_temp_pack": 3, "max_cell_temp_cell": 12,
+        }
+
+    def test_a_cell_below_zero_decodes_below_zero(self):
+        """The one thing about this block that a naive decode gets wrong. Read unsigned,
+        -0.1 C publishes as +6553.5 C -- a number no threshold and no eye would catch as a
+        decode error, because the battery would simply look broken."""
+        temps = R.decode_temp_block(self._block(min_c=-3.2, max_c=1.5))
+        assert temps["min_cell_temp_c"] == -3.2
+        assert temps["max_cell_temp_c"] == 1.5
+
+    def test_the_ids_stay_unsigned(self):
+        """Pack and cell IDs are `Unsigned Short`. Decoding them signed would only show up
+        for an ID above 32767, which is not a thing this hardware reports -- so the guard is
+        that the top of the range still reads as itself."""
+        temps = R.decode_temp_block(self._block(min_pack=0xFFFF, max_pack=0x8000))
+        assert temps["min_cell_temp_pack"] == 0xFFFF
+        assert temps["max_cell_temp_pack"] == 0x8000
+
+    def test_wrong_word_count_raises(self):
+        with pytest.raises(ValueError, match="expected 6 words"):
+            R.decode_temp_block([0] * 5)
+
+
+class TestTempsPlausible:
+    """The scale guard. `registers.TEMP_PLAUSIBLE_C` is not a health threshold -- it is the
+    check that the x0.1 scale, which comes from a community map rather than a spec PDF, is
+    the right one."""
+
+    def _temps(self, min_c, max_c):
+        return {"min_cell_temp_c": min_c, "min_cell_temp_pack": 1, "min_cell_temp_cell": 1,
+                "max_cell_temp_c": max_c, "max_cell_temp_pack": 1, "max_cell_temp_cell": 2}
+
+    def test_a_normal_reading_passes(self):
+        assert R.temps_plausible(self._temps(18.4, 23.7))
+
+    def test_a_cold_winter_garage_still_passes(self):
+        """The bounds are wide on purpose: a genuinely cold battery must not be silenced."""
+        assert R.temps_plausible(self._temps(-12.0, -8.0))
+
+    def test_an_unsigned_decode_of_a_sub_zero_cell_is_rejected(self):
+        """What reading 0x010D unsigned produces for -0.1 C, and the reason this guard would
+        have caught that bug in production as well as in the test above."""
+        assert not R.temps_plausible(self._temps(6553.5, 20.0))
+
+    def test_a_scale_wrong_by_a_factor_of_ten_is_rejected(self):
+        assert not R.temps_plausible(self._temps(184.0, 237.0))
+
+    def test_min_above_max_is_rejected(self):
+        """Scale-independent: no correct decode of a real reading can produce it."""
+        assert not R.temps_plausible(self._temps(30.0, 12.0))
+
+
 class TestDescribe:
     def test_rows_carry_both_raw_and_meaning(self):
         """Half the value of the dashboard panel is checking a decode against the spec

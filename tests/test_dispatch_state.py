@@ -29,6 +29,12 @@ def block(*, start=1, power_w=-4500, soc_pct=20.0, mode=2, duration=300) -> list
     return words
 
 
+# One decoded temperature block, as `registers.decode_temp_block` returns it: the coldest and
+# hottest cell across all three packs, each tagged with the pack it came from.
+TEMPS = {"min_cell_temp_c": 18.4, "min_cell_temp_pack": 1, "min_cell_temp_cell": 7,
+         "max_cell_temp_c": 23.7, "max_cell_temp_pack": 3, "max_cell_temp_cell": 12}
+
+
 def state_of(**kw) -> tuple[dict, list[int]]:
     words = block(**kw)
     return R.decode_block(words), words
@@ -219,6 +225,44 @@ class TestWhatTheDispatcherKnows:
         commoner failure is the block alone."""
         f = build_degraded_fields(read_error="block read failed", actual_battery_w=-312.0)
         assert f["actual_battery_w"] == -312.0
+
+    def test_the_cell_temperatures_are_carried(self):
+        """`registers.TEMP_BLOCK`, decoded before the block read and published on the same
+        point. Pack IDs travel with the temperatures: a hot cell is only actionable once you
+        know which of the three boxes to open."""
+        s, words = state_of()
+        f = build_fields(s, words, NOW, temps=TEMPS)
+        assert f["min_cell_temp_c"] == 18.4
+        assert f["min_cell_temp_pack"] == 1
+        assert f["max_cell_temp_c"] == 23.7
+        assert f["max_cell_temp_pack"] == 3
+
+    def test_the_cell_ids_are_decoded_but_not_published(self):
+        """`decode_temp_block` returns them, this module drops them. The pack narrows a
+        reading to a physical box; the cell within it changes nothing anyone does next, and
+        every published field is a field some panel has to account for."""
+        s, words = state_of()
+        f = build_fields(s, words, NOW, temps=TEMPS)
+        assert "min_cell_temp_cell" not in f and "max_cell_temp_cell" not in f
+
+    def test_unread_temperatures_publish_no_fields_at_all(self):
+        """Same argument as `soc_pct` and `actual_battery_w`, and sharper here: zero is a
+        plausible-looking temperature, so a zero-filled field would read as a freezing
+        battery rather than as a failed read."""
+        s, words = state_of()
+        f = build_fields(s, words, NOW, temps=None)
+        assert not [k for k in f if "cell_temp" in k]
+
+    def test_a_degraded_point_still_carries_the_temperatures_when_that_read_worked(self):
+        """The temperature block and the dispatch block are separate reads, and the block is
+        the commoner failure -- same as the battery-power register above."""
+        f = build_degraded_fields(read_error="block read failed", temps=TEMPS)
+        assert f["min_cell_temp_c"] == 18.4
+        assert f["max_cell_temp_pack"] == 3
+
+    def test_a_degraded_point_with_no_temperatures_publishes_none(self):
+        assert not [k for k in build_degraded_fields(read_error="timed out", temps=None)
+                    if "cell_temp" in k]
 
     def test_a_landed_write_is_published_as_one(self):
         s, words = state_of()

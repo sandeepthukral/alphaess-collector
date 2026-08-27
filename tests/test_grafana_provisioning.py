@@ -12,6 +12,7 @@ claims `isDefault`, and no panel or alert query relies on the default.
 
 import json
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -324,6 +325,68 @@ def test_live_panels_keep_their_own_window():
 
     for title in ("Energy Flow: Sources -> Uses", "Solar vs Load vs SoC", "Power"):
         assert main[title].get("timeFrom") == "24h", title
+
+
+@pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
+def test_panel_ids_are_unique(path):
+    """Grafana keys a dashboard's panels by id, and tolerates a duplicate silently: the
+    second copy loads, panel links and "view panel" URLs resolve to whichever it picked, and
+    nothing anywhere says so. The failure is a link that opens the wrong chart.
+
+    Worth a test rather than care, because the way a duplicate gets written is by reading the
+    highest id off the generator and adding one -- and the generators no longer emit their
+    panels in id order.
+    """
+    ids = [p["id"] for p in json.loads(path.read_text()).get("panels", [])]
+    assert len(ids) == len(set(ids)), f"{path.name}: duplicate panel ids {sorted(ids)}"
+
+
+@pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
+def test_no_two_panels_overlap_in_the_grid(path):
+    """Two panels claiming the same cell is a layout Grafana resolves by pushing one of them
+    somewhere else, so the dashboard that deploys is not the one the generator describes.
+
+    This is the guard that makes "insert a row and shift everything below it down" a
+    mechanical change rather than an eyeballed one -- that move has been made three times on
+    the Battery Plan dashboard now (see its version history), each time by hand, each time
+    with every y below the insertion point needing to move by exactly the right amount.
+    """
+    occupied: dict[tuple[int, int], int] = {}
+    for panel in json.loads(path.read_text()).get("panels", []):
+        g = panel["gridPos"]
+        for y in range(g["y"], g["y"] + g["h"]):
+            for x in range(g["x"], g["x"] + g["w"]):
+                clash = occupied.get((x, y))
+                assert clash is None, (
+                    f"{path.name}: panels {clash} and {panel['id']} both occupy "
+                    f"cell (x={x}, y={y})")
+                occupied[(x, y)] = panel["id"]
+
+
+@pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
+def test_no_panel_claims_a_per_pack_temperature(path):
+    """0x010B-0x0110 report the coldest and hottest cell across the WHOLE battery, tagged
+    with the pack each came from -- not one reading per pack. A panel titled "Pack 2 temp"
+    would be charting a fleet extreme as if it were one box's temperature, and it would look
+    entirely reasonable on screen. `dispatch/registers.py` documents the same constraint at
+    the source; this is the end of that contract nobody reads before adding a panel.
+    """
+    for panel in json.loads(path.read_text()).get("panels", []):
+        assert not re.search(r"pack\s*\d+\s*temp", panel.get("title", ""), re.I), \
+            f"{path.name}: {panel['title']!r} claims a per-pack temperature"
+
+
+def test_the_temperature_history_keeps_its_own_window():
+    """The other half of `test_live_panels_keep_their_own_window`, on the plan dashboard.
+
+    Battery Plan's own range runs `now-6h` to `now+36h`, sized for the planning horizon. A
+    temperature history drawn against it spends most of its width on a future no measurement
+    can fill, which is the 2026-08-08 failure in a different panel. `timeFrom` pins this one
+    to seven days regardless of the picker.
+    """
+    _, plan = _panels_by_title("alphaess-battery-plan.json")
+    panel = plan["Battery cell temperature (min/max)"]
+    assert panel.get("timeFrom") == "7d"
 
 
 def _capacity_var(path):

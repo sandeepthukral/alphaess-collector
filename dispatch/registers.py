@@ -67,6 +67,39 @@ REG_PV_METER = 161         # 0x00A1  2 words, signed, W. AC-coupled PV meter.
                            #         and read 0 forever on this site, which is an
                            #         AC-coupled install behind APsystems micro-inverters.
 
+# --- battery cell temperature, 0x010B-0x0110 ---------------------------------------------
+# Six contiguous registers, read as one block alongside the measurements above.
+#
+# THESE ARE FLEET EXTREMES, NOT PER-PACK READINGS. There are three packs here; the block
+# reports the single coldest cell and the single hottest cell across all of them, each tagged
+# with the pack and cell that produced it. It cannot be fanned out into pack_1/pack_2/pack_3
+# temperatures -- that needs the extended per-pack register set, which this site has not
+# probed. A panel or field named "pack 2 temp" would be claiming a series that does not exist.
+#
+# THE TEMPERATURES ARE SIGNED, THE IDs ARE NOT. Alpha2MQTT types 0x010D and 0x0110 as `Short`
+# and the four ID registers as `Unsigned Short`, which is the same split the naive decode gets
+# wrong: read unsigned, a cell at -0.1 C publishes as +6553.5 C.
+#
+# ON THE SCALE. Alpha2MQTT comments all six as `0.001D/bit`, which is a copy-paste of the cell
+# VOLTAGE block immediately above them (0x0106-0x010A, `0.001V/bit`): at 0.001 a signed 16-bit
+# register would top out at 32.7 C, which is not a range anyone specs a battery over.
+# `ha-alphaess-modbus` documents these as int16 x0.1 C, and that is what is used here. Same
+# standing as REG_POWER's word count above -- community inference, not ground truth -- so
+# `temps_plausible` below is the guard, and the first live read is the confirmation.
+REG_MIN_CELL_TEMP_PACK = 267   # 0x010B  1 word,  unsigned, pack holding the coldest cell
+REG_MIN_CELL_TEMP_CELL = 268   # 0x010C  1 word,  unsigned, cell within that pack
+REG_MIN_CELL_TEMP = 269        # 0x010D  1 word,  SIGNED, raw / 10 -> degrees C
+REG_MAX_CELL_TEMP_PACK = 270   # 0x010E  1 word,  unsigned, pack holding the hottest cell
+REG_MAX_CELL_TEMP_CELL = 271   # 0x010F  1 word,  unsigned, cell within that pack
+REG_MAX_CELL_TEMP = 272        # 0x0110  1 word,  SIGNED, raw / 10 -> degrees C
+
+TEMP_BLOCK = (REG_MIN_CELL_TEMP_PACK, 6)  # mirrors DISPATCH_BLOCK: (start address, words)
+
+# What a cell in a house battery can plausibly read. Wide on purpose: this is not a health
+# threshold, it is a decode check. A scale wrong by a factor of ten or a hundred lands far
+# outside it, and so does an unsigned decode of a sub-zero cell (+6553.5).
+TEMP_PLAUSIBLE_C = (-30.0, 80.0)
+
 # --- inverter limits ---------------------------------------------------------------------
 # The authoritative answer to "how hard may we push". Read from the inverter rather than
 # configured, so they cannot drift from the hardware the way a copied constant would.
@@ -228,6 +261,49 @@ def decode_block(words: list[int]) -> dict:
         "target_soc_pct": decode_soc(at(REG_SOC)),
         "duration_s": decode(at(REG_TIME, 2)),
     }
+
+
+def decode_temp_block(words: list[int]) -> dict:
+    """A 6-word read of TEMP_BLOCK -> decoded battery temperature state.
+
+    Every word goes through `decode` with an explicit `signed`, rather than being indexed and
+    multiplied in place: the signedness differs across the block -- temperatures signed, pack
+    and cell IDs not -- and it is the one thing about these registers that a reader cannot
+    check by eye. See the block comment above TEMP_BLOCK.
+    """
+    if len(words) != TEMP_BLOCK[1]:
+        raise ValueError(f"expected {TEMP_BLOCK[1]} words, got {len(words)}")
+    base = TEMP_BLOCK[0]
+    def at(addr, n=1):
+        i = addr - base
+        return words[i:i + n]
+
+    return {
+        "min_cell_temp_c": round(decode(at(REG_MIN_CELL_TEMP), signed=True) * 0.1, 1),
+        "min_cell_temp_pack": decode(at(REG_MIN_CELL_TEMP_PACK)),
+        "min_cell_temp_cell": decode(at(REG_MIN_CELL_TEMP_CELL)),
+        "max_cell_temp_c": round(decode(at(REG_MAX_CELL_TEMP), signed=True) * 0.1, 1),
+        "max_cell_temp_pack": decode(at(REG_MAX_CELL_TEMP_PACK)),
+        "max_cell_temp_cell": decode(at(REG_MAX_CELL_TEMP_CELL)),
+    }
+
+
+def temps_plausible(temps: dict) -> bool:
+    """False when a decoded temp block cannot be describing this battery.
+
+    The same argument as `scheduler`'s IMPLAUSIBLE_POWER_W guard on grid and battery power:
+    these registers' scale is documented rather than observed, and a decode wrong by a factor
+    is the failure worth catching. The honest response to one is no field at all -- a
+    dashboard showing nothing is recoverable, a dashboard showing 2.5 C for a warm battery is
+    a wrong number nobody has reason to doubt.
+
+    `min > max` is in here for the same money: it cannot happen on a correct decode of a real
+    reading, so it is a second, scale-independent way for a misread block to announce itself.
+    """
+    lo, hi = TEMP_PLAUSIBLE_C
+    return (lo <= temps["min_cell_temp_c"] <= hi
+            and lo <= temps["max_cell_temp_c"] <= hi
+            and temps["min_cell_temp_c"] <= temps["max_cell_temp_c"])
 
 
 def describe(state: dict) -> list[tuple[str, str, int, str]]:

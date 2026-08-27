@@ -11,7 +11,7 @@ this doc is the visual reference for the control flow itself.
 flowchart LR
     P["battery-planning<br/>LP planner<br/>Wh forecast"] -->|batch, hrs ahead| T
     T["translator.py<br/>classify() / to_slots()<br/>→ slots.json"] -->|writes| S
-    S["scheduler.py<br/>tick()<br/>read live SoC/grid/batt<br/>→ surplus_w"] -->|every 60s| D
+    S["scheduler.py<br/>tick()<br/>read live SoC/grid/batt/cell temps<br/>→ surplus_w"] -->|every 60s| D
     D["slots.py<br/>decide() / clamp()"] -->|verified| I["inverter · apply/release<br/>readback verify, 1 retry<br/>→ InfluxDB + Kuma"]
 ```
 
@@ -28,7 +28,7 @@ the inverter — a planned charge/discharge is downgraded to hold once the targe
 ```mermaid
 flowchart TD
     A["tick() · every 60s"] --> B[reload slots.json if changed]
-    B --> C["read live SoC / grid_w / battery_w<br/>→ surplus_w = −(grid_w + battery_w)"]
+    B --> C["read live SoC / grid_w / battery_w<br/>→ surplus_w = −(grid_w + battery_w)<br/>+ min/max cell temp (published only)"]
     C --> D{doc is None?}
     D -- yes --> IDLE1[IDLE · no plan]
     D -- no --> E{"plan fresh?<br/>age &lt; 2h · before horizon"}

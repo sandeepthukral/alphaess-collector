@@ -717,6 +717,8 @@ No extra Modbus traffic — this is publishing a read it already did.
 | `soc_pct` | float | the SoC read before deciding | **only when that read worked** | `41.2` |
 | `verified` | int 0/1 | did the write land | **only when something was commanded** | `1` |
 | `actual_battery_w` | float, signed | `REG_BATTERY_POWER`, **sign-flipped** | **only when that read worked** | `−4400` |
+| `min_cell_temp_c` / `max_cell_temp_c` | float, signed | `0x010D` / `0x0110`, `raw × 0.1` | **only when that read worked and decoded plausibly** | `18.4` |
+| `min_cell_temp_pack` / `max_cell_temp_pack` | int | `0x010B` / `0x010E` | **same** | `3` |
 
 The last six are what the DISPATCHER knew, as opposed to what the inverter said, and that is
 why this table has a second half. Everything above them decodes a readback; everything from
@@ -737,6 +739,21 @@ dispatch-block read the same way `soc_pct` does, and it lands on the same point 
 `battery_power_w`. `dispatch/slots.py`'s `SHORTFALL_PCT`/`SHORTFALL_MIN_W` gate one log line
 per transition into and out of a sustained shortfall, and the Dispatch dashboard's "Shortfall"
 tile reads the same two fields.
+
+**The cell temperatures are the fleet's coldest and hottest cell, not a reading per pack.**
+`0x010B`-`0x0110` is one contiguous six-word block: the extreme values across all three packs,
+each tagged with the pack and cell that produced it. There is no per-pack series in here and
+none can be derived from it -- that needs the extended register set, which this site has not
+probed -- so no field and no panel may be named `pack_2_temp`. Read in the same tick as the
+surplus check, so like `actual_battery_w` they survive a failed dispatch-block read and cost
+no extra round trip. The scale is the one number here that comes from community inference
+rather than a spec PDF: Alpha2MQTT types both temperatures as signed but copies `0.001/bit`
+down from the cell-voltage block above them, while `ha-alphaess-modbus` documents `×0.1 °C`
+-- and 0.001 on a signed 16-bit register would cap the range at ±32.7 °C, which is not a
+range anyone specs a battery over. `registers.temps_plausible` is the guard: a reading outside
+−30…80 °C, or a min above its max, publishes no temperature fields at all rather than one that
+is wrong by a factor. The signedness matters for the same reason -- decoded unsigned, a cell
+at −0.1 °C publishes as +6553.5 °C.
 
 `verified` is the one that changes what the dashboard can say. It is the write-then-readback
 verdict behind monitor #6, and until it was published, "every log line says commanded, the

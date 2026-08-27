@@ -924,101 +924,59 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "The dispatch block as it reads right now, decoded. The raw column is kept deliberately: it is what lets a decode be checked against the AlphaESS register spec without leaving this page, and every encoding here was got wrong by somebody first. 0x0881 and 0x0887 are 32-bit and are shown recombined from their two words. 0x0883 is reactive power and is never written - it is not in this table because the dispatcher does not touch it. Empty means no point in five minutes: see Dispatch state.",
+      "description": "The COLDEST cell in the whole battery, across all three packs -- not one pack's average and not a per-pack reading, which these registers cannot provide. Low matters as much as high: a lithium pack below freezing refuses or derates a charge, so a planned overnight charge that quietly under-delivers in January is a question this tile answers. Read with 'Max cell temp' beside it - the SPREAD between them is its own signal, a wide gap meaning one pack is working much harder than its neighbours.",
       "fieldConfig": {
         "defaults": {
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "inspect": false
+          "color": {
+            "mode": "thresholds"
           },
+          "decimals": 1,
           "mappings": [],
+          "noValue": "unreadable",
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "text",
+                "color": "green",
                 "value": null
-              }
-            ]
-          }
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "register"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Register"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "name"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Name"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "raw"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Raw"
               },
               {
-                "id": "decimals",
-                "value": 0
+                "color": "orange",
+                "value": 35.0
+              },
+              {
+                "color": "red",
+                "value": 45.0
               }
             ]
           },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "means"
-            },
-            "properties": [
-              {
-                "id": "displayName",
-                "value": "Means"
-              }
-            ]
-          }
-        ]
+          "unit": "celsius"
+        },
+        "overrides": []
       },
       "gridPos": {
-        "h": 6,
-        "w": 24,
+        "h": 4,
+        "w": 12,
         "x": 0,
         "y": 8
       },
-      "id": 24,
+      "id": 27,
       "options": {
-        "cellHeight": "sm",
-        "footer": {
-          "countRows": false,
-          "fields": "",
-          "reducer": [
-            "sum"
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
           ],
-          "show": false
+          "fields": "",
+          "values": false
         },
-        "showHeader": true,
-        "sortBy": []
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
       },
       "pluginVersion": "11.6.0",
       "targets": [
@@ -1027,28 +985,225 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "base = from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\")\n  |> filter(fn: (r) => r._field == \"dispatch_active\" or r._field == \"setpoint_w\"\n                    or r._field == \"action\" or r._field == \"mode_name\"\n                    or r._field == \"target_soc_pct\" or r._field == \"duration_s\"\n                    or r._field =~ /^raw_08[0-9a-f][0-9a-f]$/)\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n\nunion(tables: [\n  base |> map(fn: (r) => ({\n    register: \"0x0880\", name: \"Dispatch start\", raw: r.raw_0880,\n    means: if r.dispatch_active != 0 then \"Active\" else \"Released\"\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0881\", name: \"Active power\", raw: r.raw_0881 * 65536 + r.raw_0882,\n    means: string(v: r.setpoint_w) + \" W - \" + r.action\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0885\", name: \"Mode\", raw: r.raw_0885,\n    means: r.mode_name\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0886\", name: \"SoC target\", raw: r.raw_0886,\n    means: string(v: r.target_soc_pct) + \" %\"\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0887\", name: \"Duration\", raw: r.raw_0887 * 65536 + r.raw_0888,\n    means: string(v: r.duration_s / 60) + \" min \" + string(v: r.duration_s % 60) + \" s\"\n  })),\n])\n  |> group()\n  |> sort(columns: [\"register\"])\n  |> yield(name: \"decode\")\n",
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"min_cell_temp_c\")\n  |> last()\n",
           "refId": "A"
         }
       ],
-      "title": "Dispatch registers, decoded",
-      "transformations": [
+      "title": "Min cell temp",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The HOTTEST cell in the whole battery, across all three packs. This is the one that decides whether the inverter starts derating: a sustained 4.7 kW discharge is also the hardest thermal load the pack sees, so a shortfall that appears only on long sessions is worth checking against this tile before blaming the dispatcher. 'unreadable' is a failed or implausible register read, not a cold battery -- dispatch/registers.py refuses to publish a temperature it cannot vouch for rather than publishing a wrong one.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 35.0
+              },
+              {
+                "color": "red",
+                "value": 45.0
+              }
+            ]
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "id": 28,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
         {
-          "id": "organize",
-          "options": {
-            "excludeByName": {},
-            "includeByName": {},
-            "indexByName": {
-              "means": 3,
-              "name": 1,
-              "raw": 2,
-              "register": 0
-            },
-            "renameByName": {}
-          }
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"max_cell_temp_c\")\n  |> last()\n",
+          "refId": "A"
         }
       ],
-      "type": "table"
+      "title": "Max cell temp",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Seven days of the coldest and hottest cell. The two tiles above say where the battery is now; this says what it has been doing, which is the only way to tell a warm afternoon from a pack that has been climbing all week. The band between the lines is the spread across the fleet - it widens under load and closes overnight, and a spread that stops closing is worth looking into.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "celsius"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "min_cell_temp_c"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "linear"
+              },
+              {
+                "id": "displayName",
+                "value": "min cell"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_cell_temp_c"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "linear"
+              },
+              {
+                "id": "displayName",
+                "value": "max cell"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      },
+      "id": 29,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"min_cell_temp_c\" or r._field == \"max_cell_temp_c\"))\n  |> yield(name: \"cell temps\")\n",
+          "refId": "A"
+        }
+      ],
+      "timeFrom": "7d",
+      "title": "Battery cell temperature (min/max)",
+      "type": "timeseries"
     },
     {
       "datasource": {
@@ -1213,7 +1368,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 20
       },
       "id": 5,
       "options": {
@@ -1489,7 +1644,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 29
       },
       "id": 6,
       "options": {
@@ -1708,7 +1863,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 38
       },
       "id": 11,
       "options": {
@@ -1910,7 +2065,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 42
+        "y": 48
       },
       "id": 8,
       "options": {
@@ -2092,7 +2247,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 50
+        "y": 56
       },
       "id": 7,
       "options": {
@@ -2143,6 +2298,137 @@
         }
       ],
       "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The dispatch block as it reads right now, decoded. The raw column is kept deliberately: it is what lets a decode be checked against the AlphaESS register spec without leaving this page, and every encoding here was got wrong by somebody first. 0x0881 and 0x0887 are 32-bit and are shown recombined from their two words. 0x0883 is reactive power and is never written - it is not in this table because the dispatcher does not touch it. Empty means no point in five minutes: see Dispatch state.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "register"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Register"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "name"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Name"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "raw"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Raw"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "means"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Means"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 66
+      },
+      "id": 24,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "base = from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\")\n  |> filter(fn: (r) => r._field == \"dispatch_active\" or r._field == \"setpoint_w\"\n                    or r._field == \"action\" or r._field == \"mode_name\"\n                    or r._field == \"target_soc_pct\" or r._field == \"duration_s\"\n                    or r._field =~ /^raw_08[0-9a-f][0-9a-f]$/)\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n\nunion(tables: [\n  base |> map(fn: (r) => ({\n    register: \"0x0880\", name: \"Dispatch start\", raw: r.raw_0880,\n    means: if r.dispatch_active != 0 then \"Active\" else \"Released\"\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0881\", name: \"Active power\", raw: r.raw_0881 * 65536 + r.raw_0882,\n    means: string(v: r.setpoint_w) + \" W - \" + r.action\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0885\", name: \"Mode\", raw: r.raw_0885,\n    means: r.mode_name\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0886\", name: \"SoC target\", raw: r.raw_0886,\n    means: string(v: r.target_soc_pct) + \" %\"\n  })),\n  base |> map(fn: (r) => ({\n    register: \"0x0887\", name: \"Duration\", raw: r.raw_0887 * 65536 + r.raw_0888,\n    means: string(v: r.duration_s / 60) + \" min \" + string(v: r.duration_s % 60) + \" s\"\n  })),\n])\n  |> group()\n  |> sort(columns: [\"register\"])\n  |> yield(name: \"decode\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Dispatch registers, decoded",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "indexByName": {
+              "means": 3,
+              "name": 1,
+              "raw": 2,
+              "register": 0
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "type": "table"
     }
   ],
   "preload": false,
@@ -2184,6 +2470,6 @@
   "timezone": "browser",
   "title": "Battery Plan",
   "uid": "alphaess-battery-plan",
-  "version": 17,
+  "version": 18,
   "weekStart": ""
 }

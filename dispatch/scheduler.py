@@ -143,6 +143,23 @@ class Inverter:
             raise OSError(f"dispatch block read failed: {r}")
         return list(r.registers)
 
+    async def read_temp_block(self) -> list[int]:
+        """The six battery cell-temperature words, verbatim.
+
+        One more read in a sequence that already does several per tick, over the same
+        connection -- not a new category of operation. `registers.decode_temp_block` turns it
+        into fields; this side only moves words.
+        """
+        addr, count = R.TEMP_BLOCK
+        try:
+            r = await self.c.read_holding_registers(addr,
+                                                    **{"count": count, self.kw: self.slave})
+        except ModbusException as e:  # see Inverter.read
+            raise OSError(f"temp block read failed: {e}") from e
+        if r.isError():
+            raise OSError(f"temp block read failed: {r}")
+        return list(r.registers)
+
     async def read_block(self) -> dict:
         return R.decode_block(await self.read_raw_block())
 
@@ -365,6 +382,24 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         log.warning("surplus read failed: %s -- a met charge target will hold, not release", e)
         surplus_w, batt_w = None, None
 
+    # Battery cell temperature, min and max across the whole fleet of packs. Observability
+    # only -- nothing below branches on it -- so it degrades to None and never fails a tick.
+    #
+    # Placed with the other measurement reads rather than beside the block read: like them it
+    # lives outside the dispatch block, so it survives a dispatch-block failure and reaches a
+    # degraded point (see `known` at step 9). The plausibility check is the scale guard
+    # documented in `registers.TEMP_PLAUSIBLE_C`, and it degrades exactly as the implausible
+    # power reading above does: publish nothing rather than a number that is wrong by a factor.
+    try:
+        temps = R.decode_temp_block(await inv.read_temp_block())
+        if not R.temps_plausible(temps):
+            log.warning("implausible cell temperatures %s -- not publishing them this tick",
+                        temps)
+            temps = None
+    except OSError as e:
+        log.warning("temp block read failed: %s", e)
+        temps = None
+
     # Charging-positive, matching `setpoint_w` -- REG_BATTERY_POWER is discharge-positive.
     # `None`, not 0, when the read failed or looked implausible: 0 would publish "the battery
     # is idle" for "unknown", which is exactly the lie `soc_pct` was made conditional to avoid.
@@ -550,6 +585,9 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         # Read at step 4, from a register the dispatch block does not touch -- present even on
         # a tick that could not read the block at all, same argument as `live_soc_pct` above.
         "actual_battery_w": actual_battery_w,
+        # Read at step 4 too, from its own block, and `None` whenever that read failed or
+        # looked implausible -- so an absent temperature field means "not read", never "cold".
+        "temps": temps,
     }
     if publisher is not None:
         if verified is not None and raw_words is not None:
@@ -572,8 +610,12 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # the network.
     await report(monitor_pings(decision, cache, live_soc, inv.dry_run))
 
-    log.info("%s | %s | soc=%s | verified=%s | %s", decision.kind, decision.reason,
+    log.info("%s | %s | soc=%s | temp=%s | verified=%s | %s", decision.kind, decision.reason,
              f"{live_soc:.1f}%" if live_soc is not None else "?",
+             # Both extremes, not an average: the pair is the reading, and a spread between
+             # them is itself the interesting thing. "?" for unread, as `soc` does.
+             f"{temps['min_cell_temp_c']:.1f}/{temps['max_cell_temp_c']:.1f}C"
+             if temps is not None else "?",
              cache.get("write_verified"),
              "HIJACKED" if cache.get("hijacked") else "ours")
     return decision
