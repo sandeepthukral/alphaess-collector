@@ -30,6 +30,12 @@ FLUX_COLUMNS = {"_time", "_value", "_field", "_measurement", "_start", "_stop", 
 # this catches the whole class rather than the one panel that prompted it.
 CONVERTS_TO_NUMBER = re.compile(r"_value:\s*(?:float|int)\(")
 
+# A decoded temperature block, as `registers.decode_temp_block` returns it. Present in both
+# fixtures below because the field-contract tests are an ALLOWLIST built from them: a
+# temperature panel would fail those tests for reading a field this repo does publish.
+TEMPS = {"min_cell_temp_c": 18.4, "min_cell_temp_pack": 1, "min_cell_temp_cell": 7,
+         "max_cell_temp_c": 23.7, "max_cell_temp_pack": 3, "max_cell_temp_cell": 12}
+
 
 def published_field_values() -> dict:
     """A fully populated `dispatch_state` point, values kept.
@@ -45,7 +51,7 @@ def published_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z",
         reason="discharge 4500 W to 20.0%", live=True, live_soc_pct=41.2,
-        write_verified=True, actual_battery_w=-4300.0)
+        write_verified=True, actual_battery_w=-4300.0, temps=TEMPS)
 
 
 def published_fields() -> set[str]:
@@ -65,7 +71,7 @@ def degraded_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z", read_error="timed out",
         decision_kind="idle", reason="live SoC unreadable", live=True,
-        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0)
+        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0, temps=TEMPS)
 
 
 def degraded_fields() -> set[str]:
@@ -176,6 +182,19 @@ class TestFieldContract:
                     f"{dashboard} / {title}: query reads r.{column}, which "
                     f"dispatch/state.py never writes")
 
+    def test_the_temperature_panels_are_under_this_contract(self):
+        """Anti-vacuity for the two tests around it.
+
+        They are a loop over `dispatch_queries()`, so a panel that loop never sees is a panel
+        whose field names are unchecked -- and the failure that produces is a tile that goes
+        blank in production and passes every test here. Named explicitly because these three
+        are the newest and the easiest to have added outside the net.
+        """
+        seen = {title for _dash, title, _q in dispatch_queries()}
+        for title in ("Min cell temp", "Max cell temp",
+                      "Battery cell temperature (min/max)"):
+            assert title in seen, f"{title} is not among the queries this class checks"
+
     def test_every_field_filter_names_a_field_we_publish(self):
         """`_field == "..."` is the other way a name enters a query."""
         known = published_fields() | degraded_fields()
@@ -215,7 +234,9 @@ class TestConditionalFields:
         and must never render as a failed write.
         """
         assert conditional_fields() == {"expires_at", "slot_start", "slot_action", "plan_run",
-                                        "verified", "soc_pct", "actual_battery_w"}
+                                        "verified", "soc_pct", "actual_battery_w",
+                                        "min_cell_temp_c", "min_cell_temp_pack",
+                                        "max_cell_temp_c", "max_cell_temp_pack"}
 
     def test_the_decode_table_reads_only_unconditionally_written_fields(self):
         """`last()` returns each field's newest point WITH ITS OWN TIMESTAMP, and `pivot`

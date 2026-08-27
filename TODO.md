@@ -70,6 +70,18 @@ are the last unretried network calls in the planner.
 
 ---
 
+**11. Nothing alarms on a permanently silent cell temperature.**
+`dispatch/scheduler.py` step 8b degrades a failed or implausible temperature read to no
+fields, warns once, and drops the repeats to debug — deliberately, because it is
+observability and must never cost a tick. The consequence is that a block which stops
+answering forever looks exactly like a healthy one from every monitor: the tiles read
+"unreadable", the chart flatlines into the past, and nothing says so. `dispatch/reliability.py`
+is where that check belongs (it already owns "these fields should be present and are not"),
+severity no higher than a warning — a missing temperature is not a reason to touch the
+battery. Deliberately left out of #128, which is the change that created the field: an alarm
+on a field with no history to calibrate against would be a threshold picked from nothing.
+Raised in that PR's review.
+
 ## Docs
 
 **8. `DEPLOY.md`'s "The two battery-plan dashboards are generated, not exported" is out of

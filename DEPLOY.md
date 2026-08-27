@@ -227,7 +227,7 @@ sudo docker compose logs --tail 5 dispatch
 One line per 60 s tick, and every field earns its place:
 
 ```
-command | hold at 0 W | soc=4.8% | verified=True | ours
+command | hold at 0 W | soc=4.8% | temp=18.4/23.7C | verified=True | ours
 ```
 
 | Field | Reads | Means |
@@ -235,6 +235,7 @@ command | hold at 0 W | soc=4.8% | verified=True | ours
 | kind | `command` / `release` / `idle` | `idle` is the fail-safe: no plan, stale plan, no slot, or SoC unreadable. It writes nothing after releasing once |
 | reason | `hold at 0 W` | The decision in words, including a downgrade — a charge whose target is not above live SoC says so here and becomes a hold |
 | soc | `4.8%` | Live SoC read this tick. `?` means the register could not be read, and no Mode 2 command is issued when it says that |
+| temp | `18.4/23.7C` | Coldest and hottest cell in the whole battery — min/max across all three packs, not one reading per pack. `?` means the block could not be read, or decoded to a temperature `registers.temps_plausible` refused to vouch for |
 | verified | `True` / `False` / `None` | The post-write readback matched what was written. **`False` is normal in dry run** and means nothing — nothing was written, so nothing can verify. Live, `False` is monitor #6's alarm: the log says commanded, the battery is not |
 | ownership | `ours` / `HIJACKED` | `HIJACKED` means the block is active with a command this process did not write, i.e. the app is driving. §8 |
 

@@ -78,7 +78,29 @@ def measurement_registers(live_soc_pct=80.0, block=None, battery_power_w=0) -> d
     regs[R.REG_GRID_POWER] = 0
     regs[R.REG_GRID_POWER + 1] = 0
     regs[R.REG_BATTERY_POWER] = int(battery_power_w) & 0xFFFF
+    regs.update(temp_registers())
     return regs
+
+
+def temp_registers(min_c=18.4, max_c=23.7, min_pack=3, max_pack=1,
+                   min_cell=7, max_cell=12) -> dict[int, int]:
+    """The six TEMP_BLOCK words, keyed by address.
+
+    SEEDED INTO EVERY SCRIPTED TICK, and that is the point of it existing. `ScriptedClient`
+    zero-fills any register it was not given, so without this every tick test here would
+    quietly read a zero block -- and a zero block is exactly the failure
+    `registers.temps_plausible` was hardened against, which would then be invisible to the
+    one suite that drives the whole path. The pack IDs are the ones the live inverter
+    reported on 2026-08-27: coldest cell in pack 3, hottest in pack 1.
+    """
+    return {
+        R.REG_MIN_CELL_TEMP_PACK: min_pack,
+        R.REG_MIN_CELL_TEMP_CELL: min_cell,
+        R.REG_MIN_CELL_TEMP: round(min_c * 10) & 0xFFFF,
+        R.REG_MAX_CELL_TEMP_PACK: max_pack,
+        R.REG_MAX_CELL_TEMP_CELL: max_cell,
+        R.REG_MAX_CELL_TEMP: round(max_c * 10) & 0xFFFF,
+    }
 
 
 def run_scripted_tick(tmp_path, monkeypatch, client, dry_run: bool, publisher,
@@ -175,6 +197,11 @@ class TestExceptionBoundary:
         inv = scheduler.Inverter(DeadClient(), 0x55, dry_run=True)
         with pytest.raises(OSError, match="dispatch block read failed"):
             asyncio.run(inv.read_raw_block())
+
+    def test_read_temp_block_converts_a_timeout(self):
+        inv = scheduler.Inverter(DeadClient(), 0x55, dry_run=True)
+        with pytest.raises(OSError, match="temp block read failed"):
+            asyncio.run(inv.read_temp_block())
 
     def test_write_converts_a_timeout(self):
         # dry_run=False: the dry-run branch returns before touching the bus, so a dry-run
@@ -387,6 +414,162 @@ class TestActualBatteryReading:
         point = pub.points[0]
         assert point["actual_battery_w"] == -3200.0
         assert "read_error" in point
+
+
+class TestCellTemperature:
+    """The wiring, which is where this feature actually lives.
+
+    `decode_temp_block`, `temps_plausible` and `build_fields(temps=...)` are each tested on
+    their own elsewhere. What those cannot show is that `tick()` joins them up -- reads the
+    block, refuses a bad one, survives a failure, and puts the result on the point and in the
+    log line an operator reads.
+    """
+
+    def test_the_temperatures_reach_the_published_point(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        pub = RecordingPublisher()
+        run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False, publisher=pub)
+        point = pub.points[0]
+        assert point["min_cell_temp_c"] == 18.4
+        assert point["max_cell_temp_c"] == 23.7
+        # The pack IDs travel with them: a hot cell is only actionable once you know which of
+        # the three boxes to open.
+        assert point["min_cell_temp_pack"] == 3
+        assert point["max_cell_temp_pack"] == 1
+
+    def test_they_survive_a_failed_block_read(self, tmp_path, monkeypatch):
+        """A degraded point still carries them -- two separate reads, and the dispatch block
+        is the commoner failure. Same argument as `actual_battery_w` above."""
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.REG_START}))
+        pub = RecordingPublisher()
+        run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False, publisher=pub)
+        point = pub.points[0]
+        assert point["min_cell_temp_c"] == 18.4
+        assert "read_error" in point
+
+    def test_a_failed_temp_read_does_not_fail_the_tick(self, tmp_path, monkeypatch, caplog):
+        """The whole safety claim of this feature in one test: temperature is observability,
+        and observability must never be able to cost a decision."""
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.TEMP_BLOCK[0]}))
+        pub = RecordingPublisher()
+        with caplog.at_level("WARNING"):
+            decision, _ = run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False,
+                                            publisher=pub)
+        assert decision.kind in ("command", "release", "idle")
+        point = pub.points[0]
+        assert not [k for k in point if "cell_temp" in k]
+        # The command still went out -- the failure cost the field and nothing else.
+        assert "setpoint_w" in point
+        assert "temp block read failed" in caplog.text
+
+    def test_an_all_zero_block_publishes_nothing_rather_than_a_freezing_battery(
+            self, tmp_path, monkeypatch, caplog):
+        """A BMS that has stopped answering returns zeros, which decode to a perfectly
+        plausible 0.0 C. Publishing that is the exact lie this module refuses everywhere
+        else, and the bounds alone do not catch it -- the 1-based pack ID does."""
+        regs = measurement_registers()
+        for addr in range(R.TEMP_BLOCK[0], R.TEMP_BLOCK[0] + R.TEMP_BLOCK[1]):
+            regs[addr] = 0
+        pub = RecordingPublisher()
+        with caplog.at_level("WARNING"):
+            run_scripted_tick(tmp_path, monkeypatch, ScriptedClient(regs), dry_run=False,
+                              publisher=pub)
+        assert not [k for k in pub.points[0] if "cell_temp" in k]
+        assert "implausible cell temperatures" in caplog.text
+
+    def test_an_implausible_scale_publishes_nothing(self, tmp_path, monkeypatch, caplog):
+        """Raw 1840/2370 is what this block would read if the scale were 1 C/bit rather than
+        0.1 -- the failure `TEMP_PLAUSIBLE_C` exists for, driven through the loop."""
+        regs = measurement_registers()
+        regs.update(temp_registers(min_c=184.0, max_c=237.0))
+        pub = RecordingPublisher()
+        with caplog.at_level("WARNING"):
+            run_scripted_tick(tmp_path, monkeypatch, ScriptedClient(regs), dry_run=False,
+                              publisher=pub)
+        assert not [k for k in pub.points[0] if "cell_temp" in k]
+        assert "implausible cell temperatures" in caplog.text
+
+    def test_a_short_read_degrades_instead_of_killing_the_tick(self, tmp_path, monkeypatch,
+                                                               caplog):
+        """`decode_temp_block` raises ValueError, not OSError, when a device answers with
+        fewer words than were asked for. Caught beside OSError in `tick()`, because an
+        uncaught one reaches `run()`'s catch-all and costs the whole `dispatch_state` point
+        for that minute -- the 2026-08-18 shape this file's docstring is about."""
+
+        class ShortTempClient(ScriptedClient):
+            async def read_holding_registers(self, addr, count=1, **kw):
+                r = await super().read_holding_registers(addr, count=count, **kw)
+                if addr == R.TEMP_BLOCK[0]:
+                    return SimpleNamespace(isError=lambda: False, registers=r.registers[:4])
+                return r
+
+        pub = RecordingPublisher()
+        with caplog.at_level("WARNING"):
+            decision, _ = run_scripted_tick(
+                tmp_path, monkeypatch, ShortTempClient(measurement_registers()),
+                dry_run=False, publisher=pub)
+        assert decision is not None
+        point = pub.points[0]
+        assert not [k for k in point if "cell_temp" in k]
+        assert "setpoint_w" in point          # the tick completed and published a full point
+        assert "expected 6 words, got 4" in caplog.text
+
+    def test_a_persistent_failure_warns_once_and_then_goes_quiet(self, tmp_path, monkeypatch,
+                                                                 caplog):
+        """A block this firmware does not support fails every 60 s forever, which at one
+        WARNING a tick is 1,440 identical lines a day burying everything that matters. The
+        repeats drop to debug; the first still shouts."""
+        slots_path = tmp_path / "slots.json"
+        slots_path.write_text(json.dumps(doc()))
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.TEMP_BLOCK[0]}))
+        inv = scheduler.Inverter(client, 0x55, dry_run=False)
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+
+        with caplog.at_level("WARNING"):
+            for i in range(3):
+                asyncio.run(scheduler.tick(inv, slots_path, cache,
+                                           T0 + dt.timedelta(seconds=60 * i)))
+        assert len([r for r in caplog.records if "temp block read failed" in r.message]) == 1
+
+    def test_a_recovery_is_announced_so_the_quiet_is_readable(self, tmp_path, monkeypatch,
+                                                             caplog):
+        """Without this line, "no warnings lately" means either fixed or still broken and
+        muted -- the failure mode of every rate-limited log."""
+        slots_path = tmp_path / "slots.json"
+        slots_path.write_text(json.dumps(doc()))
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.TEMP_BLOCK[0]}))
+        inv = scheduler.Inverter(client, 0x55, dry_run=False)
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        asyncio.run(scheduler.tick(inv, slots_path, cache, T0))
+
+        client.fail_addrs = frozenset()
+        with caplog.at_level("INFO"):
+            asyncio.run(scheduler.tick(inv, slots_path, cache, T0 + dt.timedelta(seconds=60)))
+        assert "cell temperature readings recovered" in caplog.text
+
+    def test_the_log_line_carries_both_extremes(self, tmp_path, monkeypatch, caplog):
+        """DEPLOY.md documents this line field by field, which makes its format an operator
+        interface rather than a debug aid."""
+        with caplog.at_level("INFO"):
+            run_scripted_tick(tmp_path, monkeypatch, ScriptedClient(measurement_registers()),
+                              dry_run=False, publisher=RecordingPublisher())
+        assert "temp=18.4/23.7C" in caplog.text
+
+    def test_the_log_line_says_question_mark_when_unread(self, tmp_path, monkeypatch, caplog):
+        """The formatting is inline in the `log.info` call, so a None reaching the format
+        expression would raise inside logging itself -- a tick killed by its own audit line."""
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.TEMP_BLOCK[0]}))
+        with caplog.at_level("INFO"):
+            run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False,
+                              publisher=RecordingPublisher())
+        assert "temp=?" in caplog.text
 
 
 class TestMagnitudeShortfall:

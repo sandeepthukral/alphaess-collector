@@ -662,114 +662,6 @@ panels.append(stat(
      {"color": "green", "value": 60}],
     y=4, no_value="no command"))
 
-# --- Panel: the register decode table ---------------------------------------------------
-#
-# The literal answer to "human-readable instead of register values" -- but the raw column
-# stays. Half the value of this table is being able to check a decode against the spec
-# without leaving the dashboard, and every encoding in section 5.2 was got wrong by somebody
-# first: the community's 0.392 %/bit claim is in the wild precisely because nobody could see
-# both columns at once.
-#
-# Built as a union of one-row streams rather than with findRecord, so that a stale window
-# yields an empty table and Grafana's own "No data" rather than a Flux error. The 32-bit
-# values are recombined here because the point stores the words verbatim, one field each.
-# THE FIELD LIST IS EXPLICIT, and every name on it is one state.py writes on EVERY tick.
-# That is a correctness requirement, not tidiness. `last()` returns the newest point per
-# field, each carrying its own timestamp, and `pivot` keys rows by that timestamp -- so the
-# moment one conditional field (`expires_at`, `slot_start`, `slot_action`, `plan_run`) goes
-# stale while the rest keep being written, the pivot emits TWO rows at two different instants
-# and the union below renders the whole table twice: one populated copy and one blank, for
-# the five minutes until the stale field falls out of the window. Adding a conditional field
-# to this list brings that straight back. tests/test_dispatch_dashboard.py pins it.
-DECODE_TABLE = '''base = from(bucket: "alphaess")
-  |> range(start: -5m)
-  |> filter(fn: (r) => r._measurement == "dispatch_state")
-  |> filter(fn: (r) => r._field == "dispatch_active" or r._field == "setpoint_w"
-                    or r._field == "action" or r._field == "mode_name"
-                    or r._field == "target_soc_pct" or r._field == "duration_s"
-                    or r._field =~ /^raw_08[0-9a-f][0-9a-f]$/)
-  |> last()
-  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-
-union(tables: [
-  base |> map(fn: (r) => ({
-    register: "0x0880", name: "Dispatch start", raw: r.raw_0880,
-    means: if r.dispatch_active != 0 then "Active" else "Released"
-  })),
-  base |> map(fn: (r) => ({
-    register: "0x0881", name: "Active power", raw: r.raw_0881 * 65536 + r.raw_0882,
-    means: string(v: r.setpoint_w) + " W - " + r.action
-  })),
-  base |> map(fn: (r) => ({
-    register: "0x0885", name: "Mode", raw: r.raw_0885,
-    means: r.mode_name
-  })),
-  base |> map(fn: (r) => ({
-    register: "0x0886", name: "SoC target", raw: r.raw_0886,
-    means: string(v: r.target_soc_pct) + " %"
-  })),
-  base |> map(fn: (r) => ({
-    register: "0x0887", name: "Duration", raw: r.raw_0887 * 65536 + r.raw_0888,
-    means: string(v: r.duration_s / 60) + " min " + string(v: r.duration_s % 60) + " s"
-  })),
-])
-  |> group()
-  |> sort(columns: ["register"])
-  |> yield(name: "decode")
-'''
-
-panels.append({
-    "datasource": DS,
-    "description": "The dispatch block as it reads right now, decoded. The raw column is "
-                   "kept deliberately: it is what lets a decode be checked against the "
-                   "AlphaESS register spec without leaving this page, and every encoding "
-                   "here was got wrong by somebody first. 0x0881 and 0x0887 are 32-bit and "
-                   "are shown recombined from their two words. 0x0883 is reactive power and "
-                   "is never written - it is not in this table because the dispatcher does "
-                   "not touch it. Empty means no point in five minutes: see Dispatch state.",
-    "fieldConfig": {
-        "defaults": {
-            "custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": False},
-            "mappings": [],
-            "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
-        },
-        "overrides": [
-            {"matcher": {"id": "byName", "options": "register"},
-             "properties": [{"id": "displayName", "value": "Register"}]},
-            {"matcher": {"id": "byName", "options": "name"},
-             "properties": [{"id": "displayName", "value": "Name"}]},
-            {"matcher": {"id": "byName", "options": "raw"},
-             "properties": [{"id": "displayName", "value": "Raw"},
-                            {"id": "decimals", "value": 0}]},
-            {"matcher": {"id": "byName", "options": "means"},
-             "properties": [{"id": "displayName", "value": "Means"}]},
-        ],
-    },
-    "gridPos": {"h": 6, "w": 24, "x": 0, "y": 8},
-    "id": 24,
-    "options": {
-        "cellHeight": "sm",
-        "footer": {"countRows": False, "fields": "", "reducer": ["sum"], "show": False},
-        "showHeader": True,
-        "sortBy": [],
-    },
-    "pluginVersion": "11.6.0",
-    # Column order fixed here rather than by the order of fields in the Flux `map`: Flux does
-    # not promise an output column order, so a map that happens to come out right today would
-    # reorder itself on an unrelated change and nobody would notice.
-    "transformations": [{
-        "id": "organize",
-        "options": {
-            "excludeByName": {},
-            "includeByName": {},
-            "renameByName": {},
-            "indexByName": {"register": 0, "name": 1, "raw": 2, "means": 3},
-        },
-    }],
-    "targets": [target(DECODE_TABLE)],
-    "title": "Dispatch registers, decoded",
-    "type": "table",
-})
 
 # --- Panel: planned vs actual SoC -------------------------------------------------------
 panels.append(timeseries(
@@ -852,7 +744,7 @@ from(bucket: "alphaess")
        else debug.null(type: "float") }))
   |> yield(name: "commanded")
 ''', "D")],
-    14, 9, "percent",
+    8, 9, "percent",
     # LINEAR, against the panel's stepAfter default, and only on these two.
     #
     # A step is the honest shape for a value that is CONSTANT across an interval and jumps at
@@ -910,7 +802,7 @@ from(bucket: "planning")
      target(PRICE_LINE, "B"),
      target(threshold_line("sell", "sell above"), "C"),
      target(threshold_line("buy", "buy below"), "D")],
-    23, 9, "kwatth",
+    17, 9, "kwatth",
     [series_override("charge", [{"id": "color", "value": {"fixedColor": "blue", "mode": "fixed"}},
                                 {"id": "custom.drawStyle", "value": "bars"}]),
      series_override("discharge", [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}},
@@ -1058,7 +950,7 @@ panels.append({
                             {"id": "custom.width", "value": 90}]},
         ],
     },
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 32},
+    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 26},
     "id": 11,
     "options": {
         "cellHeight": "sm",
@@ -1140,7 +1032,7 @@ panels.append({
                             {"id": "custom.width", "value": 70}]},
         ],
     },
-    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 42},
+    "gridPos": {"h": 10, "w": 12, "x": 0, "y": 36},
     "id": 8,
     "options": {
         "cellHeight": "sm",
@@ -1213,7 +1105,7 @@ panels.append({
                             {"id": "custom.width", "value": 90}]},
         ],
     },
-    "gridPos": {"h": 10, "w": 24, "x": 0, "y": 50},
+    "gridPos": {"h": 10, "w": 12, "x": 12, "y": 36},
     "id": 7,
     "options": {
         "cellHeight": "sm",
@@ -1275,6 +1167,119 @@ join.left(
   |> yield(name: "actions")
 ''')],
     "title": "Planned Actions in app",
+    "type": "table",
+})
+
+# --- Panel: the register decode table ---------------------------------------------------
+#
+# LAST ON THE PAGE, and it belongs there. This is the panel you scroll to when a decode is
+# in doubt -- a debugging tool, not a status one -- and it sat above the two charts that
+# answer the question people actually open this dashboard with.
+#
+# The literal answer to "human-readable instead of register values" -- but the raw column
+# stays. Half the value of this table is being able to check a decode against the spec
+# without leaving the dashboard, and every encoding in section 5.2 was got wrong by somebody
+# first: the community's 0.392 %/bit claim is in the wild precisely because nobody could see
+# both columns at once.
+#
+# Built as a union of one-row streams rather than with findRecord, so that a stale window
+# yields an empty table and Grafana's own "No data" rather than a Flux error. The 32-bit
+# values are recombined here because the point stores the words verbatim, one field each.
+# THE FIELD LIST IS EXPLICIT, and every name on it is one state.py writes on EVERY tick.
+# That is a correctness requirement, not tidiness. `last()` returns the newest point per
+# field, each carrying its own timestamp, and `pivot` keys rows by that timestamp -- so the
+# moment one conditional field (`expires_at`, `slot_start`, `slot_action`, `plan_run`) goes
+# stale while the rest keep being written, the pivot emits TWO rows at two different instants
+# and the union below renders the whole table twice: one populated copy and one blank, for
+# the five minutes until the stale field falls out of the window. Adding a conditional field
+# to this list brings that straight back. tests/test_dispatch_dashboard.py pins it.
+DECODE_TABLE = '''base = from(bucket: "alphaess")
+  |> range(start: -5m)
+  |> filter(fn: (r) => r._measurement == "dispatch_state")
+  |> filter(fn: (r) => r._field == "dispatch_active" or r._field == "setpoint_w"
+                    or r._field == "action" or r._field == "mode_name"
+                    or r._field == "target_soc_pct" or r._field == "duration_s"
+                    or r._field =~ /^raw_08[0-9a-f][0-9a-f]$/)
+  |> last()
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+
+union(tables: [
+  base |> map(fn: (r) => ({
+    register: "0x0880", name: "Dispatch start", raw: r.raw_0880,
+    means: if r.dispatch_active != 0 then "Active" else "Released"
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0881", name: "Active power", raw: r.raw_0881 * 65536 + r.raw_0882,
+    means: string(v: r.setpoint_w) + " W - " + r.action
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0885", name: "Mode", raw: r.raw_0885,
+    means: r.mode_name
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0886", name: "SoC target", raw: r.raw_0886,
+    means: string(v: r.target_soc_pct) + " %"
+  })),
+  base |> map(fn: (r) => ({
+    register: "0x0887", name: "Duration", raw: r.raw_0887 * 65536 + r.raw_0888,
+    means: string(v: r.duration_s / 60) + " min " + string(v: r.duration_s % 60) + " s"
+  })),
+])
+  |> group()
+  |> sort(columns: ["register"])
+  |> yield(name: "decode")
+'''
+
+panels.append({
+    "datasource": DS,
+    "description": "The dispatch block as it reads right now, decoded. The raw column is "
+                   "kept deliberately: it is what lets a decode be checked against the "
+                   "AlphaESS register spec without leaving this page, and every encoding "
+                   "here was got wrong by somebody first. 0x0881 and 0x0887 are 32-bit and "
+                   "are shown recombined from their two words. 0x0883 is reactive power and "
+                   "is never written - it is not in this table because the dispatcher does "
+                   "not touch it. Empty means no point in five minutes: see Dispatch state.",
+    "fieldConfig": {
+        "defaults": {
+            "custom": {"align": "auto", "cellOptions": {"type": "auto"}, "inspect": False},
+            "mappings": [],
+            "thresholds": {"mode": "absolute", "steps": [{"color": "text", "value": None}]},
+        },
+        "overrides": [
+            {"matcher": {"id": "byName", "options": "register"},
+             "properties": [{"id": "displayName", "value": "Register"}]},
+            {"matcher": {"id": "byName", "options": "name"},
+             "properties": [{"id": "displayName", "value": "Name"}]},
+            {"matcher": {"id": "byName", "options": "raw"},
+             "properties": [{"id": "displayName", "value": "Raw"},
+                            {"id": "decimals", "value": 0}]},
+            {"matcher": {"id": "byName", "options": "means"},
+             "properties": [{"id": "displayName", "value": "Means"}]},
+        ],
+    },
+    "gridPos": {"h": 6, "w": 24, "x": 0, "y": 46},
+    "id": 24,
+    "options": {
+        "cellHeight": "sm",
+        "footer": {"countRows": False, "fields": "", "reducer": ["sum"], "show": False},
+        "showHeader": True,
+        "sortBy": [],
+    },
+    "pluginVersion": "11.6.0",
+    # Column order fixed here rather than by the order of fields in the Flux `map`: Flux does
+    # not promise an output column order, so a map that happens to come out right today would
+    # reorder itself on an unrelated change and nobody would notice.
+    "transformations": [{
+        "id": "organize",
+        "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "renameByName": {},
+            "indexByName": {"register": 0, "name": 1, "raw": 2, "means": 3},
+        },
+    }],
+    "targets": [target(DECODE_TABLE)],
+    "title": "Dispatch registers, decoded",
     "type": "table",
 })
 
@@ -1343,7 +1348,13 @@ dashboard = {
     #     unchanged, so /d/alphaess-battery-plan and every link to it still resolve.
     # 15: both tables get explicit column widths and a short time format, for reading on a
     #     phone; "Planned actions" renamed to "Planned Actions in app".
-    "version": 17,
+    # 18: the register decode table (24) moves from y=8 to the bottom of the board - it is a
+    #     debugging tool and it sat above the two charts this dashboard exists for. "What to
+    #     set in the app" (8) and "Planned Actions in app" (7) become one half-width row
+    #     instead of two full-width ones; 8 grows to h=10 so the row has a flat bottom. Every
+    #     panel from 5 down moves up. The battery cell temperature panels live on the
+    #     Overview dashboard, not here.
+    "version": 18,
     "weekStart": "",
 }
 

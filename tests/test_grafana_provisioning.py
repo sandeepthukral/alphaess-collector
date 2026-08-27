@@ -12,6 +12,7 @@ claims `isDefault`, and no panel or alert query relies on the default.
 
 import json
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -324,6 +325,114 @@ def test_live_panels_keep_their_own_window():
 
     for title in ("Energy Flow: Sources -> Uses", "Solar vs Load vs SoC", "Power"):
         assert main[title].get("timeFrom") == "24h", title
+
+
+@pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
+def test_panel_ids_are_unique(path):
+    """Grafana keys a dashboard's panels by id, and tolerates a duplicate silently: the
+    second copy loads, panel links and "view panel" URLs resolve to whichever it picked, and
+    nothing anywhere says so. The failure is a link that opens the wrong chart.
+
+    Worth a test rather than care, because the way a duplicate gets written is by reading the
+    highest id off the generator and adding one -- and the generators no longer emit their
+    panels in id order.
+    """
+    ids = [p["id"] for p in json.loads(path.read_text()).get("panels", [])]
+    assert len(ids) == len(set(ids)), f"{path.name}: duplicate panel ids {sorted(ids)}"
+
+
+@pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
+def test_no_two_panels_overlap_in_the_grid(path):
+    """Two panels claiming the same cell is a layout Grafana resolves by pushing one of them
+    somewhere else, so the dashboard that deploys is not the one the generator describes.
+
+    This is the guard that makes "insert a row and shift everything below it down" a
+    mechanical change rather than an eyeballed one -- that move has been made three times on
+    the Battery Plan dashboard now (see its version history), each time by hand, each time
+    with every y below the insertion point needing to move by exactly the right amount.
+    """
+    occupied: dict[tuple[int, int], int] = {}
+    for panel in json.loads(path.read_text()).get("panels", []):
+        g = panel["gridPos"]
+        for y in range(g["y"], g["y"] + g["h"]):
+            for x in range(g["x"], g["x"] + g["w"]):
+                clash = occupied.get((x, y))
+                assert clash is None, (
+                    f"{path.name}: panels {clash} and {panel['id']} both occupy "
+                    f"cell (x={x}, y={y})")
+                occupied[(x, y)] = panel["id"]
+
+
+@pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
+def test_no_panel_claims_a_per_pack_temperature(path):
+    """0x010B-0x0110 report the coldest and hottest cell across the WHOLE battery, tagged
+    with the pack each came from -- not one reading per pack. A panel titled "Pack 2 temp"
+    would be charting a fleet extreme as if it were one box's temperature, and it would look
+    entirely reasonable on screen. `dispatch/registers.py` documents the same constraint at
+    the source; this is the end of that contract nobody reads before adding a panel.
+    """
+    for panel in json.loads(path.read_text()).get("panels", []):
+        assert not re.search(r"pack\s*\d+\s*temp", panel.get("title", ""), re.I), \
+            f"{path.name}: {panel['title']!r} claims a per-pack temperature"
+
+
+def test_the_two_app_tables_share_a_row():
+    """Both tables answer the same question -- what to type into the AlphaESS app -- and read
+    as one instruction, so they sit side by side rather than one scroll apart.
+
+    `test_no_two_panels_overlap_in_the_grid` proves the layout is legal; nothing proved it was
+    the intended one, and a full-width table is the shape both of these had before and the
+    shape a later edit would drift back to.
+    """
+    _, plan = _panels_by_title("alphaess-battery-plan.json")
+    left = plan["What to set in the app"]["gridPos"]
+    right = plan["Planned Actions in app"]["gridPos"]
+    assert left["y"] == right["y"], "the two app tables are no longer on one row"
+    assert left["w"] + right["w"] == 24, "the paired row does not fill the board's width"
+    assert left["x"] + left["w"] <= right["x"], "the two app tables overlap"
+
+
+def test_the_temperature_history_keeps_its_own_window():
+    """A fourth case of `test_live_panels_keep_their_own_window`'s rule, on the same board.
+
+    The main dashboard carries the plan's `now-6h` to `now+36h` range (the test above pins
+    that), so a temperature history drawn against it spends most of its width on a future no
+    measurement can fill -- the 2026-08-08 failure in a different panel. `timeFrom` pins this
+    one to seven days regardless of the picker; seven rather than the trio's 24h because a
+    battery's thermal story is a week long, not a day.
+
+    Kept separate from the trio's test rather than folded into its title list, because that
+    test asserts one shared value and this panel deliberately differs from it.
+    """
+    _, main = _panels_by_title("alphaess-dashboard.json")
+    assert main["Battery cell temperature (min/max)"].get("timeFrom") == "7d"
+
+
+def test_the_min_temp_tile_keeps_a_cold_band():
+    """The min tile's whole argument is that COLD is what matters there -- a lithium pack near
+    freezing refuses or derates a charge, which its own description says. Sharing the max
+    tile's hot-side ladder would render -20 C in the same comfortable green as 20 C, and that
+    is a one-line "tidy up the duplicate thresholds" refactor away at any time.
+
+    Stated as a behaviour rather than a step list: whatever the numbers become, a freezing
+    reading must not paint the same colour as a comfortable one.
+    """
+    _, main = _panels_by_title("alphaess-dashboard.json")
+    steps = main["Min cell temp"]["fieldConfig"]["defaults"]["thresholds"]["steps"]
+
+    def colour_at(value):
+        chosen = steps[0]["color"]
+        for step in steps[1:]:
+            if value >= step["value"]:
+                chosen = step["color"]
+        return chosen
+
+    assert colour_at(-20.0) != colour_at(20.0), \
+        f"a freezing min cell reads the same colour as a comfortable one: {steps}"
+    # And the max tile is left alone: its base is the comfortable colour, because a max cell
+    # can only be cold if the whole battery is, which the min tile already says louder.
+    max_steps = main["Max cell temp"]["fieldConfig"]["defaults"]["thresholds"]["steps"]
+    assert max_steps[0]["value"] is None and max_steps[0]["color"] == "green"
 
 
 def _capacity_var(path):

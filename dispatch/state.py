@@ -46,6 +46,7 @@ def _decision_fields(
     live_soc_pct: float | None,
     write_verified: bool | None,
     actual_battery_w: float | None = None,
+    temps: dict | None = None,
 ) -> dict[str, int | float | str]:
     """What the DISPATCHER knows about this tick, as opposed to what the inverter said.
 
@@ -90,6 +91,23 @@ def _decision_fields(
     # the two can be compared on the same point without a sign flip or a cross-series join.
     if actual_battery_w is not None:
         fields["actual_battery_w"] = float(actual_battery_w)
+    # `registers.TEMP_BLOCK`, the tick's LAST read -- taken after the write and the verify,
+    # because nothing decides on a temperature and an observability read has no business
+    # delaying a command (`scheduler.py` step 8b). Gated for the same
+    # reason as the two above: absent means the block could not be read or decoded to a
+    # plausible temperature, and there is no value that could stand in for that. Zero would
+    # read as a freezing battery, and the last reading carried forward would hide a BMS that
+    # has stopped answering -- both worse than a gap in the series.
+    #
+    # The MIN and MAX ACROSS ALL PACKS, tagged with the pack each came from. Not three
+    # per-pack readings and not derivable into them; see `registers.TEMP_BLOCK`. The cell IDs
+    # are decoded but not published -- the pack narrows it to a physical box, the cell within
+    # it does not change what anyone does next.
+    if temps is not None:
+        fields["min_cell_temp_c"] = float(temps["min_cell_temp_c"])
+        fields["min_cell_temp_pack"] = int(temps["min_cell_temp_pack"])
+        fields["max_cell_temp_c"] = float(temps["max_cell_temp_c"])
+        fields["max_cell_temp_pack"] = int(temps["max_cell_temp_pack"])
     return fields
 
 
@@ -138,6 +156,7 @@ def build_fields(
     live_soc_pct: float | None = None,
     write_verified: bool | None = None,
     actual_battery_w: float | None = None,
+    temps: dict | None = None,
 ) -> dict:
     """One `dispatch_state` point's fields. Pure -- every value is a function of the inputs.
 
@@ -165,7 +184,7 @@ def build_fields(
         "target_soc_pct": float(state["target_soc_pct"]),
         "duration_s": int(state["duration_s"]),
         **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
-                          actual_battery_w),
+                          actual_battery_w, temps),
     }
 
     # `expires_at` is when the dead man's switch runs out if nothing is written again. It is
@@ -202,6 +221,7 @@ def build_degraded_fields(
     live_soc_pct: float | None = None,
     write_verified: bool | None = None,
     actual_battery_w: float | None = None,
+    temps: dict | None = None,
 ) -> dict:
     """One `dispatch_state` point for a tick that decided but could not read the inverter.
 
@@ -224,7 +244,7 @@ def build_degraded_fields(
     the decision was made against, and dropping it because some other read failed would throw
     away a value that was successfully obtained. `actual_battery_w` is a third, separate read
     for the same reason -- the dispatch block can fail while the battery-power register still
-    answers.
+    answers -- and the cell temperatures are a fourth.
 
     Not merged into `build_fields()` with optional arguments: that function's contract is
     "every value is a function of a readback", and a version of it that sometimes has no
@@ -234,7 +254,7 @@ def build_degraded_fields(
     fields: dict[str, int | float | str] = {
         "read_error": read_error or "inverter unreadable",
         **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
-                          actual_battery_w),
+                          actual_battery_w, temps),
     }
     if slot:
         fields["slot_start"] = int(
