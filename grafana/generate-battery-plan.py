@@ -524,7 +524,7 @@ panels.append(stat(
     "all day and this is the only one that moves. 'no slot' is normal: it means the plan has "
     "nothing scheduled for right now, not that the dispatcher is down - Dispatch state is "
     "the panel that tells you that.",
-    DISPATCH_LAST_VALUE % "slot_action", "none", None, 0, 6,
+    DISPATCH_LAST_VALUE % "slot_action", "none", None, 0, 4,
     [{"color": "text", "value": None}],
     y=4, no_value="no slot", string_value=True,
     # The same four actions `translator.py:classify` emits, coloured to agree with
@@ -553,7 +553,7 @@ panels.append(stat(
     "still hold is not being refreshed. Note that a released dispatch and a dead dispatcher "
     "look identical at the register level - only the freshness of this point tells them "
     "apart.",
-    DISPATCH_LAST_VALUE % "action", "none", None, 6, 6,
+    DISPATCH_LAST_VALUE % "action", "none", None, 4, 4,
     [{"color": "red", "value": None}],
     y=4, no_value="NO DISPATCHER", string_value=True,
     mappings=[{"type": "value", "options": {
@@ -579,8 +579,24 @@ panels.append(stat(
     "The setpoint written to 0x0881, in the same sign convention as Battery Power now: "
     "positive charging, negative discharging. Compare the two - a large gap between "
     "commanded and actual means the inverter accepted the command and did not honour it.",
-    DISPATCH_LAST % "setpoint_w", "watt", None, 12, 4,
+    DISPATCH_LAST % "setpoint_w", "watt", None, 8, 4,
     [{"color": "red", "value": None}, {"color": "green", "value": 0}],
+    y=4))
+
+# The one panel in this row that reads the battery rather than the command -- placed between
+# the setpoint and its target so the actual SoC sits next to what the dispatcher is trying to
+# drive it toward. Same field and same 1h freshness window as "Battery Power now" in row 1.
+panels.append(stat(
+    26, "Current SoC",
+    "The battery's actual state of charge right now, read straight from the inverter. Sits "
+    "beside Commanded target SoC so the two can be compared at a glance.",
+    '''from(bucket: "alphaess")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "soc_percent")
+  |> last()
+  |> yield(name: "soc now")
+''', "percent", 0, 12, 4,
+    [{"color": "text", "value": None}],
     y=4))
 
 panels.append(stat(
