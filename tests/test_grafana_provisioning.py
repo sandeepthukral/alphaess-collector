@@ -389,6 +389,33 @@ def test_the_temperature_history_keeps_its_own_window():
     assert panel.get("timeFrom") == "7d"
 
 
+def test_the_min_temp_tile_keeps_a_cold_band():
+    """The min tile's whole argument is that COLD is what matters there -- a lithium pack near
+    freezing refuses or derates a charge, which its own description says. Sharing the max
+    tile's hot-side ladder would render -20 C in the same comfortable green as 20 C, and that
+    is a one-line "tidy up the duplicate thresholds" refactor away at any time.
+
+    Stated as a behaviour rather than a step list: whatever the numbers become, a freezing
+    reading must not paint the same colour as a comfortable one.
+    """
+    _, plan = _panels_by_title("alphaess-battery-plan.json")
+    steps = plan["Min cell temp"]["fieldConfig"]["defaults"]["thresholds"]["steps"]
+
+    def colour_at(value):
+        chosen = steps[0]["color"]
+        for step in steps[1:]:
+            if value >= step["value"]:
+                chosen = step["color"]
+        return chosen
+
+    assert colour_at(-20.0) != colour_at(20.0), \
+        f"a freezing min cell reads the same colour as a comfortable one: {steps}"
+    # And the max tile is left alone: its base is the comfortable colour, because a max cell
+    # can only be cold if the whole battery is, which the min tile already says louder.
+    max_steps = plan["Max cell temp"]["fieldConfig"]["defaults"]["thresholds"]["steps"]
+    assert max_steps[0]["value"] is None and max_steps[0]["color"] == "green"
+
+
 def _capacity_var(path):
     """The `capacity_wh` template variable of one dashboard, or None if it has none."""
     dash = json.loads(path.read_text(encoding="utf-8"))

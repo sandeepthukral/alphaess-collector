@@ -91,7 +91,9 @@ def _decision_fields(
     # the two can be compared on the same point without a sign flip or a cross-series join.
     if actual_battery_w is not None:
         fields["actual_battery_w"] = float(actual_battery_w)
-    # `registers.TEMP_BLOCK`, a third read outside the dispatch block, gated for the same
+    # `registers.TEMP_BLOCK`, the tick's LAST read -- taken after the write and the verify,
+    # because nothing decides on a temperature and an observability read has no business
+    # delaying a command (`scheduler.py` step 8b). Gated for the same
     # reason as the two above: absent means the block could not be read or decoded to a
     # plausible temperature, and there is no value that could stand in for that. Zero would
     # read as a freezing battery, and the last reading carried forward would hide a BMS that

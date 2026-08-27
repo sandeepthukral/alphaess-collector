@@ -537,9 +537,13 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     else:
         cache["write_verified"] = None
 
-    # Battery cell temperature, min and max across the whole fleet of packs.
+    # 8b. Battery cell temperature, min and max across the whole fleet of packs.
     #
-    # AFTER THE WRITE, not with the other measurement reads, and the ordering is the point.
+    # Lettered rather than numbered because it is not a step in the control loop: the loop is
+    # done deciding and done writing by the time this runs. It sits here, between the verify
+    # and the publish, only because the point it rides on is written at step 9.
+    #
+    # AFTER THE WRITE, not with the measurement reads at step 4, and the ordering is the point.
     # Nothing below branches on this -- it is published and logged and that is all -- so it
     # has no business sitting in front of the one thing this loop exists to do. A Modbus
     # timeout costs the client's full retry ladder, about 12 s, and spent here that is 12 s
@@ -555,15 +559,28 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # `temps_plausible` is the scale guard documented in `registers.TEMP_PLAUSIBLE_C`, and it
     # degrades exactly as the implausible power reading above does: publish nothing rather
     # than a number that is wrong by a factor, or a zero-filled block's freezing battery.
+    temp_error = ""
     try:
         temps = R.decode_temp_block(await inv.read_temp_block())
         if not R.temps_plausible(temps):
-            log.warning("implausible cell temperatures %s -- not publishing them this tick",
-                        temps)
-            temps = None
+            temp_error, temps = f"implausible cell temperatures {temps}", None
     except (OSError, ValueError) as e:
-        log.warning("temp block read failed: %s", e)
-        temps = None
+        temp_error, temps = f"temp block read failed: {e}", None
+
+    # ONE WARNING PER TRANSITION, not one per tick, and this is the failure that most needs it:
+    # a block this firmware does not support does not fail intermittently, it fails at 60 s
+    # intervals forever -- 1,440 identical WARNINGs a day burying the lines that mean
+    # something. Same trade `StatePublisher._failing` and the magnitude-shortfall line already
+    # make. The repeats stay at debug rather than being dropped, so `--log-level DEBUG` still
+    # answers "is it still failing right now".
+    was_failing = cache.get("temp_error", "")
+    if temp_error and not was_failing:
+        log.warning("%s -- publishing no temperature (further failures at debug)", temp_error)
+    elif temp_error:
+        log.debug("%s", temp_error)
+    elif was_failing:
+        log.info("cell temperature readings recovered")
+    cache["temp_error"] = temp_error
 
     # 9. Publish. A tick that could not read the inverter STILL publishes.
     #
@@ -595,8 +612,11 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         # Read at step 4, from a register the dispatch block does not touch -- present even on
         # a tick that could not read the block at all, same argument as `live_soc_pct` above.
         "actual_battery_w": actual_battery_w,
-        # Read at step 4 too, from its own block, and `None` whenever that read failed or
-        # looked implausible -- so an absent temperature field means "not read", never "cold".
+        # Read at step 8b, from its own block, and `None` whenever that read failed or looked
+        # implausible -- so an absent temperature field means "not read", never "cold".
+        #
+        # DELIBERATELY THE LAST READ OF THE TICK, unlike the two above: nothing decides on it,
+        # so it belongs behind the write rather than in front of it. See step 8b.
         "temps": temps,
     }
     if publisher is not None:

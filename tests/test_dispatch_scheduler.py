@@ -516,6 +516,43 @@ class TestCellTemperature:
         assert "setpoint_w" in point          # the tick completed and published a full point
         assert "expected 6 words, got 4" in caplog.text
 
+    def test_a_persistent_failure_warns_once_and_then_goes_quiet(self, tmp_path, monkeypatch,
+                                                                 caplog):
+        """A block this firmware does not support fails every 60 s forever, which at one
+        WARNING a tick is 1,440 identical lines a day burying everything that matters. The
+        repeats drop to debug; the first still shouts."""
+        slots_path = tmp_path / "slots.json"
+        slots_path.write_text(json.dumps(doc()))
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.TEMP_BLOCK[0]}))
+        inv = scheduler.Inverter(client, 0x55, dry_run=False)
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+
+        with caplog.at_level("WARNING"):
+            for i in range(3):
+                asyncio.run(scheduler.tick(inv, slots_path, cache,
+                                           T0 + dt.timedelta(seconds=60 * i)))
+        assert len([r for r in caplog.records if "temp block read failed" in r.message]) == 1
+
+    def test_a_recovery_is_announced_so_the_quiet_is_readable(self, tmp_path, monkeypatch,
+                                                             caplog):
+        """Without this line, "no warnings lately" means either fixed or still broken and
+        muted -- the failure mode of every rate-limited log."""
+        slots_path = tmp_path / "slots.json"
+        slots_path.write_text(json.dumps(doc()))
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.TEMP_BLOCK[0]}))
+        inv = scheduler.Inverter(client, 0x55, dry_run=False)
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        asyncio.run(scheduler.tick(inv, slots_path, cache, T0))
+
+        client.fail_addrs = frozenset()
+        with caplog.at_level("INFO"):
+            asyncio.run(scheduler.tick(inv, slots_path, cache, T0 + dt.timedelta(seconds=60)))
+        assert "cell temperature readings recovered" in caplog.text
+
     def test_the_log_line_carries_both_extremes(self, tmp_path, monkeypatch, caplog):
         """DEPLOY.md documents this line field by field, which makes its format an operator
         interface rather than a debug aid."""

@@ -182,6 +182,19 @@ class TestFieldContract:
                     f"{dashboard} / {title}: query reads r.{column}, which "
                     f"dispatch/state.py never writes")
 
+    def test_the_temperature_panels_are_under_this_contract(self):
+        """Anti-vacuity for the two tests around it.
+
+        They are a loop over `dispatch_queries()`, so a panel that loop never sees is a panel
+        whose field names are unchecked -- and the failure that produces is a tile that goes
+        blank in production and passes every test here. Named explicitly because these three
+        are the newest and the easiest to have added outside the net.
+        """
+        seen = {title for _dash, title, _q in dispatch_queries()}
+        for title in ("Min cell temp", "Max cell temp",
+                      "Battery cell temperature (min/max)"):
+            assert title in seen, f"{title} is not among the queries this class checks"
+
     def test_every_field_filter_names_a_field_we_publish(self):
         """`_field == "..."` is the other way a name enters a query."""
         known = published_fields() | degraded_fields()
