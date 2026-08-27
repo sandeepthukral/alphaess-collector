@@ -246,6 +246,54 @@ class TestTempsPlausible:
         """Scale-independent: no correct decode of a real reading can produce it."""
         assert not R.temps_plausible(self._temps(30.0, 12.0))
 
+    @pytest.mark.parametrize("temp", [-30.0, 80.0])
+    def test_the_bounds_are_inclusive(self, temp):
+        """Which side of the bound a reading falls on decides whether a real temperature is
+        published or silently dropped, so it is worth stating rather than inferring."""
+        assert R.temps_plausible(self._temps(temp, temp))
+
+    @pytest.mark.parametrize("temp", [-30.1, 80.1])
+    def test_just_outside_the_bounds_is_rejected(self, temp):
+        assert not R.temps_plausible(self._temps(temp, temp))
+
+    def test_an_all_zero_block_is_rejected(self):
+        """THE CASE THE BOUNDS ALONE MISS, and the one most likely to happen in production.
+
+        An unsupported register range, a BMS that has stopped answering, or a proxy padding a
+        reply all return six zero words. They decode to 0.0 C in pack 0 -- inside every bound,
+        and on the dashboard indistinguishable from a battery sitting at freezing. The 1-based
+        pack ID is what breaks the tie.
+        """
+        assert not R.temps_plausible(R.decode_temp_block([0] * 6))
+
+    def test_a_zero_pack_id_is_rejected_even_beside_a_sane_temperature(self):
+        """The zero block's tell, isolated: packs are 1-based (verified live 2026-08-27), so
+        an ID of 0 means the block is not what it claims however plausible the degrees look."""
+        temps = self._temps(18.4, 23.7)
+        temps["min_cell_temp_pack"] = 0
+        assert not R.temps_plausible(temps)
+
+    def test_the_pack_ids_observed_on_this_site_pass(self):
+        """MEASURED 2026-08-27 on the live inverter: coldest cell in pack 3, hottest in pack
+        1. The literal reading this guard must never reject."""
+        temps = self._temps(27.0, 29.0)
+        temps["min_cell_temp_pack"], temps["max_cell_temp_pack"] = 3, 1
+        assert R.temps_plausible(temps)
+
+    def test_a_wild_pack_id_is_rejected(self):
+        """0xFFFF in an ID slot is what a misaligned block looks like from here."""
+        temps = self._temps(18.4, 23.7)
+        temps["max_cell_temp_pack"] = 0xFFFF
+        assert not R.temps_plausible(temps)
+
+    def test_the_cell_ids_are_not_checked(self):
+        """Deliberate, and stated so a future reader does not read it as an omission: this
+        site has never enumerated cells per pack, so any bound would be invented, and an
+        invented bound silences working readings."""
+        temps = self._temps(18.4, 23.7)
+        temps["min_cell_temp_cell"], temps["max_cell_temp_cell"] = 0, 999
+        assert R.temps_plausible(temps)
+
 
 class TestDescribe:
     def test_rows_carry_both_raw_and_meaning(self):

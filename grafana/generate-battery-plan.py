@@ -685,9 +685,20 @@ TEMP_HISTORY = '''from(bucket: "alphaess")
 # derating near both edges, so amber at 35 and red at 45 leaves room to notice a climb before
 # the inverter starts derating on its own. Retune once there is a season of real data; the
 # same hand-tuned trade `generate-dispatch.py`'s Shortfall tile makes with SHORTFALL_PCT.
-TEMP_STEPS = [{"color": "green", "value": None},
-              {"color": "orange", "value": 35.0},
-              {"color": "red", "value": 45.0}]
+MAX_TEMP_STEPS = [{"color": "green", "value": None},
+                  {"color": "orange", "value": 35.0},
+                  {"color": "red", "value": 45.0}]
+
+# THE MIN TILE GETS ITS OWN LADDER, because its whole argument is that COLD is what matters
+# there: a lithium pack near freezing refuses or derates a charge, and the hot-side steps
+# above would render -20 C in the same comfortable green as 20 C. Blue below 5 leaves a band
+# of warning before the datasheet's -10 C floor. The top two steps are kept identical to the
+# max tile's so the two tiles never disagree about what "hot" looks like -- the min cell can
+# only be hot if the whole pack is.
+MIN_TEMP_STEPS = [{"color": "blue", "value": None},
+                  {"color": "green", "value": 5.0},
+                  {"color": "orange", "value": 35.0},
+                  {"color": "red", "value": 45.0}]
 
 panels.append(stat(
     27, "Min cell temp",
@@ -698,7 +709,7 @@ panels.append(stat(
     "'Max cell temp' beside it - the SPREAD between them is its own signal, a wide gap meaning "
     "one pack is working much harder than its neighbours.",
     DISPATCH_LAST % "min_cell_temp_c", "celsius", 1, 0, 12,
-    TEMP_STEPS, y=8, no_value="unreadable"))
+    MIN_TEMP_STEPS, y=8, no_value="unreadable"))
 
 panels.append(stat(
     28, "Max cell temp",
@@ -709,7 +720,7 @@ panels.append(stat(
     "or implausible register read, not a cold battery -- dispatch/registers.py refuses to "
     "publish a temperature it cannot vouch for rather than publishing a wrong one.",
     DISPATCH_LAST % "max_cell_temp_c", "celsius", 1, 12, 12,
-    TEMP_STEPS, y=8, no_value="unreadable"))
+    MAX_TEMP_STEPS, y=8, no_value="unreadable"))
 
 panels.append(timeseries(
     29, "Battery cell temperature (min/max)",

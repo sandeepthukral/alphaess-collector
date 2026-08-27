@@ -744,15 +744,22 @@ tile reads the same two fields.
 `0x010B`-`0x0110` is one contiguous six-word block: the extreme values across all three packs,
 each tagged with the pack and cell that produced it. There is no per-pack series in here and
 none can be derived from it -- that needs the extended register set, which this site has not
-probed -- so no field and no panel may be named `pack_2_temp`. Read in the same tick as the
-surplus check, so like `actual_battery_w` they survive a failed dispatch-block read and cost
-no extra round trip. The scale is the one number here that comes from community inference
+probed -- so no field and no panel may be named `pack_2_temp`. Read once per tick on the connection this
+process already holds, so like `actual_battery_w` they survive a failed dispatch-block read
+and cost no extra round trip -- but read AFTER the write and the verify, not with the other
+measurements: nothing branches on temperature, so a Modbus timeout here must not spend the
+client's full retry ladder in front of a command. The scale is the one number here that comes from community inference
 rather than a spec PDF: Alpha2MQTT types both temperatures as signed but copies `0.001/bit`
 down from the cell-voltage block above them, while `ha-alphaess-modbus` documents `×0.1 °C`
 -- and 0.001 on a signed 16-bit register would cap the range at ±32.7 °C, which is not a
 range anyone specs a battery over. `registers.temps_plausible` is the guard: a reading outside
-−30…80 °C, or a min above its max, publishes no temperature fields at all rather than one that
-is wrong by a factor. The signedness matters for the same reason -- decoded unsigned, a cell
+−30…80 °C, a min above its max, or a pack ID outside 1…8 publishes no temperature fields at
+all rather than one that is wrong by a factor. The pack ID is in there for the case the bounds
+miss: a silent BMS or an unsupported register range answers with six zero words, which decode
+to a perfectly plausible 0.0 °C in pack 0 and would render as a freezing battery. Packs are
+1-based — verified live on 2026-08-27, coldest cell in pack 3 and hottest in pack 1 — so a
+zero ID is the tell. A short reply raises rather than decoding, and `tick()` catches that
+beside `OSError` for the same reason: a bad read costs the field, never the tick. The signedness matters for the same reason -- decoded unsigned, a cell
 at −0.1 °C publishes as +6553.5 °C.
 
 `verified` is the one that changes what the dashboard can say. It is the write-then-readback

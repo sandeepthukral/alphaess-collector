@@ -100,6 +100,17 @@ TEMP_BLOCK = (REG_MIN_CELL_TEMP_PACK, 6)  # mirrors DISPATCH_BLOCK: (start addre
 # outside it, and so does an unsigned decode of a sub-zero cell (+6553.5).
 TEMP_PLAUSIBLE_C = (-30.0, 80.0)
 
+# Pack IDs are 1-BASED, which is what makes them the tell for a dead block: a zero-filled
+# read decodes to a perfectly plausible 0.0 C, and 0.0 C is the exact lie this module refuses
+# to publish everywhere else. VERIFIED 2026-08-27 against the live inverter -- the coldest
+# cell sat in pack 3 and the hottest in pack 1 on this three-pack site, so 0 is not an ID this
+# hardware reports.
+#
+# The upper bound is loose rather than 3. Three packs is a fact about this site today, not
+# about the register, and a fourth pack must not silence a field that is working; 8 still
+# rejects the shapes a misread produces -- 0, 65535, a temperature word landing in an ID slot.
+PACK_ID_RANGE = (1, 8)
+
 # --- inverter limits ---------------------------------------------------------------------
 # The authoritative answer to "how hard may we push". Read from the inverter rather than
 # configured, so they cannot drift from the hardware the way a copied constant would.
@@ -297,13 +308,26 @@ def temps_plausible(temps: dict) -> bool:
     dashboard showing nothing is recoverable, a dashboard showing 2.5 C for a warm battery is
     a wrong number nobody has reason to doubt.
 
+    THE ALL-ZERO BLOCK IS THE CASE THIS FUNCTION EXISTS FOR, and bounds alone do not catch it.
+    An unsupported register range, a BMS that has stopped answering, or a proxy padding a
+    short reply all produce six zero words, which decode to 0.0 C in pack 0 -- inside every
+    bound and indistinguishable from a freezing battery. The pack IDs are what break the tie,
+    because they are 1-based (see PACK_ID_RANGE), and checking them costs nothing.
+
     `min > max` is in here for the same money: it cannot happen on a correct decode of a real
-    reading, so it is a second, scale-independent way for a misread block to announce itself.
+    reading, so it is a third, scale-independent way for a misread block to announce itself.
+
+    The cell IDs are deliberately NOT checked. A pack is a physical box with a known count; a
+    cell index within one is a number this site has never enumerated, so any bound on it would
+    be invented rather than known, and inventing one risks silencing a working reading.
     """
     lo, hi = TEMP_PLAUSIBLE_C
+    pack_lo, pack_hi = PACK_ID_RANGE
     return (lo <= temps["min_cell_temp_c"] <= hi
             and lo <= temps["max_cell_temp_c"] <= hi
-            and temps["min_cell_temp_c"] <= temps["max_cell_temp_c"])
+            and temps["min_cell_temp_c"] <= temps["max_cell_temp_c"]
+            and pack_lo <= temps["min_cell_temp_pack"] <= pack_hi
+            and pack_lo <= temps["max_cell_temp_pack"] <= pack_hi)
 
 
 def describe(state: dict) -> list[tuple[str, str, int, str]]:

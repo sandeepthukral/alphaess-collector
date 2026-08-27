@@ -382,24 +382,6 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         log.warning("surplus read failed: %s -- a met charge target will hold, not release", e)
         surplus_w, batt_w = None, None
 
-    # Battery cell temperature, min and max across the whole fleet of packs. Observability
-    # only -- nothing below branches on it -- so it degrades to None and never fails a tick.
-    #
-    # Placed with the other measurement reads rather than beside the block read: like them it
-    # lives outside the dispatch block, so it survives a dispatch-block failure and reaches a
-    # degraded point (see `known` at step 9). The plausibility check is the scale guard
-    # documented in `registers.TEMP_PLAUSIBLE_C`, and it degrades exactly as the implausible
-    # power reading above does: publish nothing rather than a number that is wrong by a factor.
-    try:
-        temps = R.decode_temp_block(await inv.read_temp_block())
-        if not R.temps_plausible(temps):
-            log.warning("implausible cell temperatures %s -- not publishing them this tick",
-                        temps)
-            temps = None
-    except OSError as e:
-        log.warning("temp block read failed: %s", e)
-        temps = None
-
     # Charging-positive, matching `setpoint_w` -- REG_BATTERY_POWER is discharge-positive.
     # `None`, not 0, when the read failed or looked implausible: 0 would publish "the battery
     # is idle" for "unknown", which is exactly the lie `soc_pct` was made conditional to avoid.
@@ -554,6 +536,34 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         cache["write_verified"] = ok
     else:
         cache["write_verified"] = None
+
+    # Battery cell temperature, min and max across the whole fleet of packs.
+    #
+    # AFTER THE WRITE, not with the other measurement reads, and the ordering is the point.
+    # Nothing below branches on this -- it is published and logged and that is all -- so it
+    # has no business sitting in front of the one thing this loop exists to do. A Modbus
+    # timeout costs the client's full retry ladder, about 12 s, and spent here that is 12 s
+    # added to the delay before a command reaches the inverter; spent below, it delays a
+    # dashboard field nobody is watching in real time.
+    #
+    # `ValueError` is caught beside `OSError` because `decode_temp_block` raises it on a short
+    # reply -- a proxy or a firmware answering four words where six were asked for. That is a
+    # bad read like any other and must degrade to no fields, not take the tick down with it:
+    # an uncaught one here would reach `run()`'s catch-all and cost the whole `dispatch_state`
+    # point for that minute, which is the 2026-08-18 failure this file's docstring is about.
+    #
+    # `temps_plausible` is the scale guard documented in `registers.TEMP_PLAUSIBLE_C`, and it
+    # degrades exactly as the implausible power reading above does: publish nothing rather
+    # than a number that is wrong by a factor, or a zero-filled block's freezing battery.
+    try:
+        temps = R.decode_temp_block(await inv.read_temp_block())
+        if not R.temps_plausible(temps):
+            log.warning("implausible cell temperatures %s -- not publishing them this tick",
+                        temps)
+            temps = None
+    except (OSError, ValueError) as e:
+        log.warning("temp block read failed: %s", e)
+        temps = None
 
     # 9. Publish. A tick that could not read the inverter STILL publishes.
     #
