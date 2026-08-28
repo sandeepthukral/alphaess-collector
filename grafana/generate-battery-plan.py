@@ -1348,6 +1348,17 @@ dashboard = {
     #     unchanged, so /d/alphaess-battery-plan and every link to it still resolve.
     # 15: both tables get explicit column widths and a short time format, for reading on a
     #     phone; "Planned actions" renamed to "Planned Actions in app".
+    # 16: Dispatch state's field picker widens from empty (AUTO, numeric-only) to /.*/, so the
+    #     panel can render `action`, a string, at all - it had read NO DISPATCHER unconditionally,
+    #     on a healthy dispatcher as readily as a dead one, since the field it needs was being
+    #     discarded before any value mapping saw it.
+    # 17: /.*/ from 16 also pulled in `_time` and the sys_sn tag, so the query now keeps only
+    #     `_value`. Command expires in's base threshold step turns neutral (was red, painting a
+    #     resting dispatcher red all day) with the countdown floored at 0. Decision (panel 25)
+    #     is added, reading `slot_action` so it moves through a dry-run day on its own. The SoC
+    #     chart's plan series is shifted onto the instant it describes and the measured line
+    #     reads `last` over 5 minutes, so a correctly-followed plan no longer looks a quarter-hour
+    #     ahead; plan age's orange/red thresholds move to 90 min / 2 h to match slots.MAX_PLAN_AGE.
     # 18: the register decode table (24) moves from y=8 to the bottom of the board - it is a
     #     debugging tool and it sat above the two charts this dashboard exists for. "What to
     #     set in the app" (8) and "Planned Actions in app" (7) become one half-width row
