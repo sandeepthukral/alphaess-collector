@@ -69,10 +69,14 @@ HEALTH_LAST_HOURLY = '''from(bucket: "alphaess")
 # hand against `registers.py`'s `FAULT_BLOCK`/`FIRMWARE_BLOCK`/`INVERTER_FW_BLOCK`/
 # `SYSTEM_CONFIG_BLOCK`, and a future change to one of those base addresses or word counts has
 # to be mirrored here.
-FAULT_FIELDS = [f"fault_raw_{0x0131 + i:04x}" for i in range(22)]
-FIRMWARE_FIELDS = [f"firmware_raw_{0x0115 + i:04x}" for i in range(6)]
-INVERTER_FW_FIELDS = [f"inverter_fw_raw_{0x0640 + i:04x}" for i in range(20)]
-SYSTEM_CONFIG_FIELDS = [f"system_config_raw_{0x0800 + i:04x}" for i in range(16)]
+def _raw_field_names(prefix, start, count):
+    return [f"{prefix}{start + i:04x}" for i in range(count)]
+
+
+FAULT_FIELDS = _raw_field_names("fault_raw_", 0x0131, 22)
+FIRMWARE_FIELDS = _raw_field_names("firmware_raw_", 0x0115, 6)
+INVERTER_FW_FIELDS = _raw_field_names("inverter_fw_raw_", 0x0640, 20)
+SYSTEM_CONFIG_FIELDS = _raw_field_names("system_config_raw_", 0x0800, 16)
 
 
 def _field_filter(fields):

@@ -314,10 +314,10 @@ def test_copied_panels_span_the_plan_horizon():
 
     Scoped to copies landing on alphaess-dashboard.json only. The battery-health copy of
     "Battery cell temperature (min/max)" is carved out: that dashboard has no relationship
-    to the plan's horizon at all (it runs a plain 30-day lookback,
-    test_dashboards_were_found's tenth entry), and the copied panel pins its own
-    `timeFrom: "7d"` regardless of either parent's range -- the same override
+    to the plan's horizon at all (it runs a plain 30-day lookback), and the copied panel
+    pins its own `timeFrom: "7d"` regardless of either parent's range -- the same override
     test_the_temperature_history_keeps_its_own_window already requires of the original.
+    test_the_battery_health_copy_keeps_the_same_window below is that carve-out's own guard.
     """
     plan_dash, _ = _panels_by_title("alphaess-battery-plan.json")
     main_dash, main = _panels_by_title("alphaess-dashboard.json")
@@ -437,7 +437,12 @@ def test_the_battery_health_copy_keeps_the_same_window():
     temperature story doesn't need.
     """
     _, health = _panels_by_title("alphaess-battery-health.json")
-    assert health["Battery cell temperature (min/max)"].get("timeFrom") == "7d"
+    panel = health["Battery cell temperature (min/max)"]
+    assert panel.get("timeFrom") == "7d"
+    assert "timeShift" not in panel, (
+        "a negative timeShift is silently dropped by Grafana 11.6 rather than erroring, "
+        "so this has to be timeFrom, not timeShift -- see test_copied_panels_span_the_plan_"
+        "horizon's docstring")
 
 
 def test_the_min_temp_tile_keeps_a_cold_band():
