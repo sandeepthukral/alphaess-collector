@@ -75,6 +75,19 @@ MONITOR_URLS = {
 # there for, a derate, is exactly the case where the number changes mid-run.
 LIMITS_REFRESH_S = 3600
 
+# The health-poller's own cadence gates, unrelated to LIMITS_REFRESH_S above: that one is a
+# clamping concern (`run()`'s loop, feeding `S.clamp`), these are observability, gated inside
+# `tick()` itself -- see step 8c/8d for why they live there rather than in `run()`.
+HEALTH_REFRESH_S = 3600
+WEEKLY_HEALTH_REFRESH_S = 604800
+
+# How many consecutive HEALTH_REFRESH_S-spaced failures a single weekly block tolerates before
+# giving up on the hourly backoff and reverting to the full week. Three hours of a register
+# that never answers is enough to call it unsupported rather than transient -- past that,
+# retrying it hourly forever is the same Modbus-budget risk `read_error` skipping (8c/8d)
+# exists to bound, just paid weekly instead of every tick.
+WEEKLY_FAIL_STREAK_LIMIT = 3
+
 # A house that is neither generating nor drawing more than this. Anything past it from the
 # measurement registers is a decode error, not a reading: the site is a 5 kW inverter behind a
 # 3x25 A connection.
@@ -160,6 +173,54 @@ class Inverter:
             raise OSError(f"temp block read failed: {r}")
         return list(r.registers)
 
+    async def read_fault_block(self) -> list[int]:
+        """The 22 fault/warning words, verbatim. See `registers.FAULT_BLOCK`."""
+        addr, count = R.FAULT_BLOCK
+        try:
+            r = await self.c.read_holding_registers(addr,
+                                                    **{"count": count, self.kw: self.slave})
+        except ModbusException as e:  # see Inverter.read
+            raise OSError(f"fault block read failed: {e}") from e
+        if r.isError():
+            raise OSError(f"fault block read failed: {r}")
+        return list(r.registers)
+
+    async def read_firmware_block(self) -> list[int]:
+        """The 6 firmware/battery-identity words, verbatim. See `registers.FIRMWARE_BLOCK`."""
+        addr, count = R.FIRMWARE_BLOCK
+        try:
+            r = await self.c.read_holding_registers(addr,
+                                                    **{"count": count, self.kw: self.slave})
+        except ModbusException as e:  # see Inverter.read
+            raise OSError(f"firmware block read failed: {e}") from e
+        if r.isError():
+            raise OSError(f"firmware block read failed: {r}")
+        return list(r.registers)
+
+    async def read_inverter_fw_block(self) -> list[int]:
+        """The 20 inverter firmware/serial words, verbatim. See `registers.INVERTER_FW_BLOCK`."""
+        addr, count = R.INVERTER_FW_BLOCK
+        try:
+            r = await self.c.read_holding_registers(addr,
+                                                    **{"count": count, self.kw: self.slave})
+        except ModbusException as e:  # see Inverter.read
+            raise OSError(f"inverter firmware block read failed: {e}") from e
+        if r.isError():
+            raise OSError(f"inverter firmware block read failed: {r}")
+        return list(r.registers)
+
+    async def read_system_config_block(self) -> list[int]:
+        """The 16 system-config words, verbatim. See `registers.SYSTEM_CONFIG_BLOCK`."""
+        addr, count = R.SYSTEM_CONFIG_BLOCK
+        try:
+            r = await self.c.read_holding_registers(addr,
+                                                    **{"count": count, self.kw: self.slave})
+        except ModbusException as e:  # see Inverter.read
+            raise OSError(f"system config block read failed: {e}") from e
+        if r.isError():
+            raise OSError(f"system config block read failed: {r}")
+        return list(r.registers)
+
     async def read_block(self) -> dict:
         return R.decode_block(await self.read_raw_block())
 
@@ -189,14 +250,29 @@ class Inverter:
         await self.write(R.REG_START, [0])
 
     async def limits(self) -> tuple[int | None, int | None]:
+        """Charge and discharge ceilings, each read (and degraded) independently.
+
+        Two separate registers, each in its own try -- a shared one originally wrapped both
+        reads together, which meant a discharge-register timeout threw away a charge limit
+        that had just been read successfully. `slots.clamp()` already treats a `None` half
+        independently of the other (a derate on one side is not a derate on both), so there
+        was no reason for this function to be less granular than its own caller.
+        """
         try:
-            return (await self.read(R.REG_MAX_CHARGE_POWER),
-                    await self.read(R.REG_MAX_DISCHARGE_POWER))
+            max_charge = await self.read(R.REG_MAX_CHARGE_POWER)
         except OSError as e:
             # Not fatal. Losing the clamp is worse than not having it only if the plan is
             # asking for something out of range, which the translator should already prevent.
-            log.warning("could not read inverter limits (%s) -- proceeding unclamped", e)
-            return None, None
+            log.warning("could not read inverter charge limit (%s) -- proceeding unclamped "
+                        "for charging", e)
+            max_charge = None
+        try:
+            max_discharge = await self.read(R.REG_MAX_DISCHARGE_POWER)
+        except OSError as e:
+            log.warning("could not read inverter discharge limit (%s) -- proceeding "
+                        "unclamped for discharging", e)
+            max_discharge = None
+        return max_charge, max_discharge
 
 
 def configure_logging(retention_days: int, verbose: bool):
@@ -322,6 +398,64 @@ def check_alive() -> int:
     if p.get("live_soc_pct") is not None:
         print(f"  live SoC {p['live_soc_pct']}%")
     return 1 if stale else 0
+
+
+async def _read_weekly_block(cache: dict, now: dt.datetime, name: str, read_words, decode
+                             ) -> dict | None:
+    """One weekly-tier block's independent gate, read, and backoff. Used three times from
+    step 8d, once each for `registers.FIRMWARE_BLOCK`/`INVERTER_FW_BLOCK`/`SYSTEM_CONFIG_BLOCK`
+    -- `name` keys this block's own `cache` entries, `read_words` is the bound `Inverter`
+    method that fetches its raw words, `decode` is the matching `registers.decode_*_block`.
+
+    THREE INDEPENDENT GATES, not one shared one. These are three separate register ranges with
+    independent support and independent failure: a firmware block this inverter does not
+    support must not also silence, or slow the retry of, the inverter-firmware or
+    system-config blocks, which may read back fine on their own schedule. An earlier version
+    shared one `weekly_health_read_at`/`weekly_health_ok` pair across all three, which had two
+    bugs at once -- a lone failing block was masked by its two working siblings (the gate
+    still advanced a full week, `any()` rather than `all()`), and once the aggregate did flip
+    unhealthy, ALL THREE retried hourly together even though only one was actually failing.
+
+    BACKS OFF TO HEALTH_REFRESH_S AFTER A FAILURE, THEN GIVES UP AFTER
+    WEEKLY_FAIL_STREAK_LIMIT CONSECUTIVE ONES. A transient timeout should not cost a full week
+    before the next attempt -- that was the original bug this replaces -- but a register that
+    has failed WEEKLY_FAIL_STREAK_LIMIT hours running is not transient, it is a register this
+    hardware does not have, and retrying it hourly forever is the same Modbus-budget risk the
+    `read_error` skip in 8c/8d exists to bound. Past the limit the interval reverts to the
+    full week: still checked, just rarely, the same posture the block had before it started
+    failing.
+    """
+    read_at_key, streak_key, error_key = (
+        f"weekly_{name}_read_at", f"weekly_{name}_fail_streak", f"weekly_{name}_error")
+    read_at = cache.get(read_at_key)
+    streak = cache.get(streak_key, 0)
+    interval = (HEALTH_REFRESH_S if 0 < streak < WEEKLY_FAIL_STREAK_LIMIT
+               else WEEKLY_HEALTH_REFRESH_S)
+    if read_at is not None and (now - read_at).total_seconds() < interval:
+        return None
+
+    error, decoded = "", None
+    try:
+        decoded = decode(await read_words())
+    except (OSError, ValueError) as e:
+        error = f"{name.replace('_', ' ')} block read failed: {e}"
+
+    # Warn once per NEW failure, debug on repeats, announce a recovery -- same shape as every
+    # other gated read in this file, kept independent per block so a second block failing
+    # while a first is already known-failing still gets its own WARNING rather than hiding
+    # behind the first one's already-quieted debug logging.
+    was_failing = cache.get(error_key, "")
+    if error and not was_failing:
+        log.warning("%s -- publishing no field for this block (further failures at debug)",
+                    error)
+    elif error:
+        log.debug("%s", error)
+    elif was_failing:
+        log.info("%s block readings recovered", name.replace("_", " "))
+    cache[error_key] = error
+    cache[read_at_key] = now
+    cache[streak_key] = 0 if decoded is not None else streak + 1
+    return decoded
 
 
 async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -> S.Decision:
@@ -582,6 +716,73 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         log.info("cell temperature readings recovered")
     cache["temp_error"] = temp_error
 
+    # 8c. Hourly health tier: fault/warning words, and the inverter's own power limits
+    # republished under the health-dashboard's field names.
+    #
+    # GATED, unlike 8b: these registers barely move within an hour, so reading them every tick
+    # buys nothing and costs a second Modbus round-trip 59 ticks out of 60. Same
+    # cache-timestamp-gate shape as `run()`'s LIMITS_REFRESH_S, but living in `tick()` itself,
+    # which already takes `cache` and `now` -- that is what lets a test drive this gate
+    # directly, the way `TestCellTemperature` already drives 8b, instead of needing to exercise
+    # `run()`'s own while loop, which nothing in this codebase tests today.
+    #
+    # `cache.get("health_read_at")` being absent (a fresh process) counts as due, so a freshly
+    # started dispatcher publishes these fields on its very first tick rather than leaving the
+    # health dashboard empty for up to an hour after every deploy.
+    #
+    # The power limits are NOT read again here: `cache["limits"]` is already refreshed hourly by
+    # `run()`'s own LIMITS_REFRESH_S gate, for the clamp in steps 6-7. A second hourly timer
+    # re-reading the same registers would be two clocks answering one question. This gate only
+    # republishes that already-fresh value under the health dashboard's own field names.
+    #
+    # SKIPPED WHEN `read_error` IS ALREADY SET. By this point in the tick, `read_error` means
+    # at least one of SoC/dispatch-block/verify already failed to answer -- i.e. the inverter is
+    # very likely unreachable right now. Adding a fault-block read on top of that pays a second
+    # ~12 s timeout (the client's full retry ladder, same cost 8b's own comment documents) for a
+    # read almost certain to fail too, delaying `write_heartbeat()`/the Kuma ping for no benefit.
+    # Skipping leaves the gate due, so the very next tick tries again once the inverter recovers.
+    health_read_at = cache.get("health_read_at")
+    health_due = (health_read_at is None
+                  or (now - health_read_at).total_seconds() >= HEALTH_REFRESH_S)
+    faults, limits_hourly = None, None
+    if health_due and not read_error:
+        health_error = ""
+        try:
+            faults = R.decode_fault_block(await inv.read_fault_block())
+        except (OSError, ValueError) as e:
+            health_error, faults = f"fault block read failed: {e}", None
+        limits_hourly = cache.get("limits")
+
+        was_health_failing = cache.get("health_error", "")
+        if health_error and not was_health_failing:
+            log.warning("%s -- publishing no health fields (further failures at debug)",
+                        health_error)
+        elif health_error:
+            log.debug("%s", health_error)
+        elif was_health_failing:
+            log.info("hourly health readings recovered")
+        cache["health_error"] = health_error
+        cache["health_read_at"] = now
+
+    # 8d. Weekly health tier: firmware, inverter firmware/serial, and system config -- a
+    # tripwire, not a trend, per the block comments in `registers.py`. Same `read_error` skip
+    # as 8c -- three MORE block reads on top of 8c's one is the worst case that motivated the
+    # skip in the first place (up to four extra ~12 s timeouts on a fresh process where every
+    # weekly block and 8c's fault block are due at once against an unreachable inverter).
+    #
+    # Each block's own gate, backoff, and give-up-after-N-failures live in
+    # `_read_weekly_block` -- see its docstring for why these three are independent rather
+    # than sharing one timestamp.
+    firmware, inverter_fw, system_config = None, None, None
+    if not read_error:
+        firmware = await _read_weekly_block(
+            cache, now, "firmware", inv.read_firmware_block, R.decode_firmware_block)
+        inverter_fw = await _read_weekly_block(
+            cache, now, "inverter_fw", inv.read_inverter_fw_block, R.decode_inverter_fw_block)
+        system_config = await _read_weekly_block(
+            cache, now, "system_config", inv.read_system_config_block,
+            R.decode_system_config_block)
+
     # 9. Publish. A tick that could not read the inverter STILL publishes.
     #
     # It used to publish nothing, which made an unreadable inverter and a dead dispatcher the
@@ -618,6 +819,13 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         # DELIBERATELY THE LAST READ OF THE TICK, unlike the two above: nothing decides on it,
         # so it belongs behind the write rather than in front of it. See step 8b.
         "temps": temps,
+        # Read at steps 8c/8d, each `None` whenever its gate had not elapsed this tick or its
+        # read failed -- an absent field means "not read this tick", never "nothing wrong".
+        "faults": faults,
+        "limits_hourly": limits_hourly,
+        "firmware": firmware,
+        "inverter_fw": inverter_fw,
+        "system_config": system_config,
     }
     if publisher is not None:
         if verified is not None and raw_words is not None:

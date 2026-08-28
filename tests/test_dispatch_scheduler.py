@@ -164,6 +164,18 @@ class ScriptedClient:
         return SimpleNamespace(isError=lambda: False)
 
 
+def tick_with_cache(tmp_path, monkeypatch, client, cache: dict, now: dt.datetime = T0,
+                    dry_run: bool = False, slots_doc: dict | None = None) -> scheduler.S.Decision:
+    """Like `run_scripted_tick`, but the caller owns `cache` across the call -- needed to seed
+    `cache["limits"]` or a `*_read_at` timestamp the way `run()` would, since
+    `run_scripted_tick` always hands `tick()` a fresh cache."""
+    slots_path = tmp_path / "slots.json"
+    slots_path.write_text(json.dumps(slots_doc if slots_doc is not None else doc()))
+    monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+    inv = scheduler.Inverter(client, 0x55, dry_run=dry_run)
+    return asyncio.run(scheduler.tick(inv, slots_path, cache, now))
+
+
 class RecordingPublisher:
     def __init__(self):
         self.points: list[dict] = []
@@ -224,6 +236,16 @@ class TestExceptionBoundary:
         """
         inv = scheduler.Inverter(DeadClient(), 0x55, dry_run=True)
         assert asyncio.run(inv.limits()) == (None, None)
+
+    def test_limits_are_read_independently(self):
+        """A shared try around both reads originally meant a discharge-register timeout threw
+        away a charge limit that had just been read successfully -- `slots.clamp()` already
+        treats each half independently, so `limits()` must not be less granular than its own
+        caller."""
+        client = ScriptedClient({R.REG_MAX_CHARGE_POWER: 15000},
+                                fail_addrs=frozenset({R.REG_MAX_DISCHARGE_POWER}))
+        inv = scheduler.Inverter(client, 0x55, dry_run=True)
+        assert asyncio.run(inv.limits()) == (15000, None)
 
 
 class TestTickSurvivesAnUnreadableInverter:
@@ -570,6 +592,312 @@ class TestCellTemperature:
             run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False,
                               publisher=RecordingPublisher())
         assert "temp=?" in caplog.text
+
+
+class TestFaultBlock:
+    """The hourly health tier's wiring -- step 8c. `decode_fault_block` is tested on its own
+    in `test_dispatch_registers.py`; this shows `tick()` joins it up the same way step 8b
+    already does for temperature."""
+
+    def test_the_fault_fields_reach_the_published_point_on_a_fresh_process(
+            self, tmp_path, monkeypatch):
+        """A fresh `cache` has no `health_read_at` -- that counts as due, so the very first
+        tick after a cold start publishes these fields rather than waiting an hour."""
+        client = ScriptedClient(measurement_registers())
+        pub = RecordingPublisher()
+        run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False, publisher=pub)
+        point = pub.points[0]
+        assert point["fault_raw_0131"] == 0
+        assert "active_fault_count" not in point  # see registers.FAULT_BLOCK's comment
+
+    def test_a_failed_fault_read_does_not_fail_the_tick(self, tmp_path, monkeypatch, caplog):
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.FAULT_BLOCK[0]}))
+        pub = RecordingPublisher()
+        with caplog.at_level("WARNING"):
+            decision, _ = run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False,
+                                            publisher=pub)
+        assert decision.kind in ("command", "release", "idle")
+        point = pub.points[0]
+        assert not [k for k in point if k.startswith("fault_")]
+        assert "setpoint_w" in point
+        assert "fault block read failed" in caplog.text
+
+    def test_skipped_entirely_when_the_tick_already_has_a_read_error(
+            self, tmp_path, monkeypatch):
+        """A failed dispatch-block read (`REG_START`) sets `read_error` before step 8c runs --
+        the inverter is very likely unreachable, so piling a fault-block read on top of that is
+        a second ~12 s timeout paid for a read almost certain to fail too. `limits_hourly` is
+        skipped along with it, even though republishing it costs no I/O -- one shared gate
+        condition, matching 8c's own comment."""
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.REG_START}))
+        cache: dict = {"released": False, "publisher": RecordingPublisher(),
+                      "limits": (15000, 13000)}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        point = cache["publisher"].points[0]
+        assert "fault_raw_0131" not in point
+        assert "max_charge_power_w" not in point
+        # The gate itself must stay due -- skipped, not attempted-and-failed -- so the very
+        # next tick tries again once the inverter answers.
+        assert "health_read_at" not in cache
+
+    def test_the_inverter_limits_are_republished_under_health_field_names(
+            self, tmp_path, monkeypatch):
+        """Not a new register read: `cache["limits"]` is already refreshed hourly by `run()`'s
+        LIMITS_REFRESH_S for the clamp, so this just exposes that value under new names."""
+        client = ScriptedClient(measurement_registers())
+        cache: dict = {"released": False, "publisher": RecordingPublisher(),
+                      "limits": (15000, 13000)}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        point = cache["publisher"].points[0]
+        assert point["max_charge_power_w"] == 15000
+        assert point["max_discharge_power_w"] == 13000
+
+    def test_an_unread_limit_half_is_absent_not_zero(self, tmp_path, monkeypatch):
+        """`Inverter.limits()` degrades each half independently to None on its own failure --
+        see `TestExceptionBoundary`. A `None` half must stay absent, not become a 0 W ceiling
+        nobody commanded."""
+        client = ScriptedClient(measurement_registers())
+        cache: dict = {"released": False, "publisher": RecordingPublisher(),
+                      "limits": (15000, None)}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        point = cache["publisher"].points[0]
+        assert point["max_charge_power_w"] == 15000
+        assert "max_discharge_power_w" not in point
+
+
+class TestWeeklyHealthBlocks:
+    """The weekly health tier's wiring -- step 8d. A tripwire, not a trend, so lighter than
+    `TestFaultBlock`, but with one thing `TestFaultBlock` does not need to prove: the three
+    blocks are read independently, so one failing must not silence the other two."""
+
+    def test_the_weekly_fields_reach_the_published_point_on_a_fresh_process(
+            self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        pub = RecordingPublisher()
+        run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False, publisher=pub)
+        point = pub.points[0]
+        assert point["firmware_raw_0115"] == 0
+        assert point["inverter_fw_raw_0640"] == 0
+        assert point["system_config_raw_0800"] == 0
+
+    def test_a_failed_firmware_read_does_not_silence_the_other_two_blocks(
+            self, tmp_path, monkeypatch, caplog):
+        """ONE TRY PER BLOCK, not one try around all three -- a firmware block this hardware
+        does not support must not cost the inverter-firmware and system-config blocks, which
+        read back fine."""
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.FIRMWARE_BLOCK[0]}))
+        pub = RecordingPublisher()
+        with caplog.at_level("WARNING"):
+            decision, _ = run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False,
+                                            publisher=pub)
+        assert decision.kind in ("command", "release", "idle")
+        point = pub.points[0]
+        assert not [k for k in point if k.startswith("firmware_raw_")]
+        assert point["inverter_fw_raw_0640"] == 0
+        assert point["system_config_raw_0800"] == 0
+        assert "setpoint_w" in point
+        assert "firmware block read failed" in caplog.text
+
+    def test_a_failure_of_all_three_blocks_does_not_fail_the_tick(
+            self, tmp_path, monkeypatch, caplog):
+        client = ScriptedClient(measurement_registers(), fail_addrs=frozenset(
+            {R.FIRMWARE_BLOCK[0], R.INVERTER_FW_BLOCK[0], R.SYSTEM_CONFIG_BLOCK[0]}))
+        pub = RecordingPublisher()
+        with caplog.at_level("WARNING"):
+            decision, _ = run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False,
+                                            publisher=pub)
+        assert decision.kind in ("command", "release", "idle")
+        point = pub.points[0]
+        for prefix in ("firmware_raw_", "inverter_fw_raw_", "system_config_raw_"):
+            assert not [k for k in point if k.startswith(prefix)]
+        assert "setpoint_w" in point
+
+    def test_a_failure_backs_off_to_the_hourly_interval_not_the_full_week(
+            self, tmp_path, monkeypatch):
+        """Previously the whole tier's shared timestamp was stamped unconditionally, so one
+        transient timeout cost a full week before the next attempt. The failing block must now
+        retry within the hour."""
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.FIRMWARE_BLOCK[0]}))
+        pub = RecordingPublisher()
+        cache: dict = {"released": False, "publisher": pub}
+        tick_with_cache(tmp_path, monkeypatch, client, cache, now=T0)
+        assert cache["weekly_firmware_fail_streak"] == 1
+
+        client.fail_addrs = frozenset()
+        tick_with_cache(tmp_path, monkeypatch, client, cache,
+                        now=T0 + dt.timedelta(minutes=90))
+        assert "firmware_raw_0115" in pub.points[1]
+
+    def test_a_failing_block_does_not_slow_its_siblings_retry(self, tmp_path, monkeypatch):
+        """THE BUG THIS CLASS OF FIX EXISTS FOR: an earlier version shared one timestamp
+        across all three blocks, so a lone persistently-failing block (system config, say)
+        dragged the other two -- which read back fine every time -- onto its own hourly retry
+        cadence instead of letting them settle back onto their normal week. Each block's own
+        gate must be untouched by its siblings' fortunes."""
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.SYSTEM_CONFIG_BLOCK[0]}))
+        pub = RecordingPublisher()
+        cache: dict = {"released": False, "publisher": pub}
+        tick_with_cache(tmp_path, monkeypatch, client, cache, now=T0)
+        assert "firmware_raw_0115" in pub.points[0]        # firmware succeeded first tick
+        assert "system_config_raw_0800" not in pub.points[0]
+
+        # A day later: system config is still down, but firmware and inverter firmware must
+        # NOT be due again yet -- they succeeded, so their own gate is the full week, and
+        # nothing about system config's own trouble should have touched it.
+        tick_with_cache(tmp_path, monkeypatch, client, cache,
+                        now=T0 + dt.timedelta(days=1))
+        assert "firmware_raw_0115" not in pub.points[1]
+        assert "inverter_fw_raw_0640" not in pub.points[1]
+
+    def test_a_persistent_failure_gives_up_after_the_streak_limit(
+            self, tmp_path, monkeypatch):
+        """A register that fails WEEKLY_FAIL_STREAK_LIMIT hourly attempts in a row is not
+        transient -- it is a register this hardware does not have. Past the limit, retrying it
+        hourly forever is exactly the Modbus-budget risk the `read_error` skip elsewhere in
+        this file exists to bound, so the interval must revert to the full week."""
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.FIRMWARE_BLOCK[0]}))
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        now = T0
+        for _ in range(scheduler.WEEKLY_FAIL_STREAK_LIMIT):
+            tick_with_cache(tmp_path, monkeypatch, client, cache, now=now)
+            now += dt.timedelta(hours=1, minutes=1)
+        assert cache["weekly_firmware_fail_streak"] == scheduler.WEEKLY_FAIL_STREAK_LIMIT
+
+        # One more hour later: still within the old hourly cadence, but the streak limit has
+        # been reached, so this must NOT attempt again -- the gate has reverted to the week.
+        pub = cache["publisher"]
+        n_points_before = len(pub.points)
+        tick_with_cache(tmp_path, monkeypatch, client, cache, now=now + dt.timedelta(hours=1))
+        assert cache["weekly_firmware_fail_streak"] == scheduler.WEEKLY_FAIL_STREAK_LIMIT
+        assert len(pub.points) == n_points_before + 1  # the tick still ran, just skipped 8d
+
+    def test_a_success_restores_the_full_week_interval(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        pub = RecordingPublisher()
+        cache: dict = {"released": False, "publisher": pub}
+        tick_with_cache(tmp_path, monkeypatch, client, cache, now=T0)
+        assert cache["weekly_firmware_fail_streak"] == 0
+
+        tick_with_cache(tmp_path, monkeypatch, client, cache,
+                        now=T0 + dt.timedelta(hours=2))
+        assert "firmware_raw_0115" not in pub.points[1]
+
+    def test_a_second_block_newly_failing_gets_its_own_warning(
+            self, tmp_path, monkeypatch, caplog):
+        """Independent error-transition tracking per block, not one shared string: a second,
+        DIFFERENT block failing for the first time must not hide behind a first block's
+        already-quieted (debug-level) repeat failures.
+
+        System config succeeded on the first tick, so its own gate does not come due again
+        for a full week -- unlike firmware, which is already failing and therefore due again
+        within the hour. Waited out here (via a synthetic 8-day gap, not a real wait) so both
+        blocks are genuinely due on the second tick, rather than asserting on a block whose
+        gate a shorter gap would have skipped entirely.
+        """
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.FIRMWARE_BLOCK[0]}))
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        with caplog.at_level("WARNING"):
+            tick_with_cache(tmp_path, monkeypatch, client, cache, now=T0)
+            caplog.clear()
+            # Firmware fails again (now debug-only, already warned), and system config fails
+            # for the first time once its own weekly gate comes due -- that failure must still
+            # warn on its own.
+            client.fail_addrs = frozenset({R.FIRMWARE_BLOCK[0], R.SYSTEM_CONFIG_BLOCK[0]})
+            tick_with_cache(tmp_path, monkeypatch, client, cache,
+                            now=T0 + dt.timedelta(days=8))
+        assert "system config block read failed" in caplog.text
+        assert "firmware block read failed" not in caplog.text  # already warned once, now quiet
+
+    def test_skipped_entirely_when_the_tick_already_has_a_read_error(
+            self, tmp_path, monkeypatch):
+        """Same reasoning as the fault block's own version of this test: three MORE block
+        reads on top of an already-unreachable inverter is the worst case that motivated the
+        skip -- up to four extra ~12 s timeouts on a fresh process where both gates are due."""
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.REG_START}))
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        point = cache["publisher"].points[0]
+        assert "firmware_raw_0115" not in point
+        assert "weekly_firmware_read_at" not in cache
+
+
+class TestHealthGates:
+    """The literal acceptance check: hourly/weekly fields appear only once their gate has
+    elapsed, and do not re-fire on the very next tick. `cache["health_read_at"]` and
+    `cache["weekly_firmware_read_at"]` (one of three independent weekly-block keys -- see
+    `TestWeeklyHealthBlocks` for why they're separate) are what `run()` would maintain across
+    ticks in production; these tests drive `tick()` directly with a shared `cache`, the way
+    `test_a_persistent_failure_warns_once_and_then_goes_quiet` already does for step 8b."""
+
+    def test_hourly_fields_absent_when_the_gate_has_not_elapsed(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        cache: dict = {"released": False, "publisher": RecordingPublisher(),
+                      "health_read_at": T0}
+        tick_with_cache(tmp_path, monkeypatch, client, cache,
+                        now=T0 + dt.timedelta(minutes=30))
+        point = cache["publisher"].points[0]
+        assert "fault_raw_0131" not in point
+
+    def test_hourly_fields_present_once_the_gate_has_elapsed(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        cache: dict = {"released": False, "publisher": RecordingPublisher(),
+                      "health_read_at": T0 - dt.timedelta(hours=2)}
+        tick_with_cache(tmp_path, monkeypatch, client, cache, now=T0)
+        point = cache["publisher"].points[0]
+        assert "fault_raw_0131" in point
+
+    def test_hourly_fields_do_not_republish_on_the_tick_right_after_crossing(
+            self, tmp_path, monkeypatch):
+        """The gate, once crossed, must not fire again a minute later -- the whole point of
+        HEALTH_REFRESH_S existing."""
+        client = ScriptedClient(measurement_registers())
+        pub = RecordingPublisher()
+        cache: dict = {"released": False, "publisher": pub,
+                      "health_read_at": T0 - dt.timedelta(hours=2)}
+        tick_with_cache(tmp_path, monkeypatch, client, cache, now=T0)
+        assert "fault_raw_0131" in pub.points[0]
+
+        tick_with_cache(tmp_path, monkeypatch, client, cache,
+                        now=T0 + dt.timedelta(minutes=1))
+        assert "fault_raw_0131" not in pub.points[1]
+
+    def test_weekly_fields_absent_when_the_gate_has_not_elapsed(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        cache: dict = {"released": False, "publisher": RecordingPublisher(),
+                      "weekly_firmware_read_at": T0}
+        tick_with_cache(tmp_path, monkeypatch, client, cache,
+                        now=T0 + dt.timedelta(days=1))
+        point = cache["publisher"].points[0]
+        assert "firmware_raw_0115" not in point
+
+    def test_weekly_fields_present_once_the_gate_has_elapsed(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        cache: dict = {"released": False, "publisher": RecordingPublisher(),
+                      "weekly_firmware_read_at": T0 - dt.timedelta(days=8)}
+        tick_with_cache(tmp_path, monkeypatch, client, cache, now=T0)
+        point = cache["publisher"].points[0]
+        assert "firmware_raw_0115" in point
+
+    def test_weekly_fields_do_not_republish_on_the_tick_right_after_crossing(
+            self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        pub = RecordingPublisher()
+        cache: dict = {"released": False, "publisher": pub,
+                      "weekly_firmware_read_at": T0 - dt.timedelta(days=8)}
+        tick_with_cache(tmp_path, monkeypatch, client, cache, now=T0)
+        assert "firmware_raw_0115" in pub.points[0]
+
+        tick_with_cache(tmp_path, monkeypatch, client, cache,
+                        now=T0 + dt.timedelta(minutes=1))
+        assert "firmware_raw_0115" not in pub.points[1]
 
 
 class TestMagnitudeShortfall:

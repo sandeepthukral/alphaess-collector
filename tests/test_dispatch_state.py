@@ -264,6 +264,72 @@ class TestWhatTheDispatcherKnows:
         assert not [k for k in build_degraded_fields(read_error="timed out", temps=None)
                     if "cell_temp" in k]
 
+    def test_the_fault_words_are_carried(self):
+        """`registers.decode_fault_block`'s output merged straight in -- every raw word,
+        hex-keyed like the raw dispatch block already is. No derived count: see
+        `registers.FAULT_BLOCK`'s comment on why a nonzero-word summary isn't safe yet."""
+        s, words = state_of()
+        faults = {"fault_raw_0131": 5, "fault_raw_0132": 0}
+        f = build_fields(s, words, NOW, faults=faults)
+        assert f["fault_raw_0131"] == 5
+        assert f["fault_raw_0132"] == 0
+
+    def test_unread_faults_publish_no_fields_at_all(self):
+        s, words = state_of()
+        f = build_fields(s, words, NOW, faults=None)
+        assert not [k for k in f if k.startswith("fault_raw_")]
+
+    def test_a_degraded_point_still_carries_the_faults_when_that_read_worked(self):
+        f = build_degraded_fields(read_error="block read failed",
+                                  faults={"fault_raw_0131": 3})
+        assert f["fault_raw_0131"] == 3
+
+    def test_the_hourly_power_limits_are_carried_under_health_field_names(self):
+        """Not a fresh read -- `scheduler.py` step 8c republishes `cache["limits"]` here under
+        the health dashboard's own names, independent of a register having been touched this
+        tick."""
+        s, words = state_of()
+        f = build_fields(s, words, NOW, limits_hourly=(15000, 13000))
+        assert f["max_charge_power_w"] == 15000
+        assert f["max_discharge_power_w"] == 13000
+
+    def test_an_unread_limit_half_is_absent_not_zero(self):
+        """`Inverter.limits()` degrades each half independently -- a `None` half must stay
+        absent, not become a 0 W ceiling nobody commanded."""
+        s, words = state_of()
+        f = build_fields(s, words, NOW, limits_hourly=(15000, None))
+        assert f["max_charge_power_w"] == 15000
+        assert "max_discharge_power_w" not in f
+
+    def test_unread_limits_publish_no_fields_at_all(self):
+        s, words = state_of()
+        f = build_fields(s, words, NOW, limits_hourly=None)
+        assert "max_charge_power_w" not in f and "max_discharge_power_w" not in f
+
+    def test_the_weekly_blocks_are_carried_raw(self):
+        """`registers.decode_firmware_block`/`decode_inverter_fw_block`/
+        `decode_system_config_block` merged straight in, same raw-hex treatment as faults --
+        which word is which named field is not confirmed, so nothing here is decoded."""
+        s, words = state_of()
+        f = build_fields(s, words, NOW,
+                         firmware={"firmware_raw_0115": 7},
+                         inverter_fw={"inverter_fw_raw_0640": 8},
+                         system_config={"system_config_raw_0800": 9})
+        assert f["firmware_raw_0115"] == 7
+        assert f["inverter_fw_raw_0640"] == 8
+        assert f["system_config_raw_0800"] == 9
+
+    def test_unread_weekly_blocks_publish_no_fields_at_all(self):
+        s, words = state_of()
+        f = build_fields(s, words, NOW, firmware=None, inverter_fw=None, system_config=None)
+        assert not [k for k in f if k.startswith(("firmware_raw_", "inverter_fw_raw_",
+                                                    "system_config_raw_"))]
+
+    def test_a_degraded_point_still_carries_the_weekly_blocks_when_that_read_worked(self):
+        f = build_degraded_fields(read_error="block read failed",
+                                  firmware={"firmware_raw_0115": 7})
+        assert f["firmware_raw_0115"] == 7
+
     def test_a_landed_write_is_published_as_one(self):
         s, words = state_of()
         assert build_fields(s, words, NOW, write_verified=True)["verified"] == 1

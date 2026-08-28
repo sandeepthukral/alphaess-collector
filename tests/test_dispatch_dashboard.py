@@ -30,11 +30,39 @@ FLUX_COLUMNS = {"_time", "_value", "_field", "_measurement", "_start", "_stop", 
 # this catches the whole class rather than the one panel that prompted it.
 CONVERTS_TO_NUMBER = re.compile(r"_value:\s*(?:float|int)\(")
 
+# Cadence tiers for `dispatch_state` fields NOT read every tick (`dispatch/scheduler.py` steps
+# 8c/8d). `TestStalenessGuards` below requires a `last()` window comfortably wider than a
+# field's own update interval, or a field that only refreshes once an hour/week would read as
+# permanently stale -- the same "comfortably wider, not exactly" argument the tick-tier's own
+# -5m/-10m already makes, just scaled to a slower cadence. Anything not named here is assumed
+# tick-cadence and held to that tight window.
+HOURLY_HEALTH_FIELD_PREFIXES = ("fault_raw_",)
+HOURLY_HEALTH_FIELDS = {"max_charge_power_w", "max_discharge_power_w"}
+WEEKLY_HEALTH_FIELD_PREFIXES = ("firmware_raw_", "inverter_fw_raw_", "system_config_raw_")
+
+
+def _allowed_last_windows(field: str) -> set[str]:
+    if field.startswith(HOURLY_HEALTH_FIELD_PREFIXES) or field in HOURLY_HEALTH_FIELDS:
+        return {"-3h"}
+    if field.startswith(WEEKLY_HEALTH_FIELD_PREFIXES):
+        return {"-10d"}
+    return {"-5m", "-10m"}
+
 # A decoded temperature block, as `registers.decode_temp_block` returns it. Present in both
 # fixtures below because the field-contract tests are an ALLOWLIST built from them: a
 # temperature panel would fail those tests for reading a field this repo does publish.
 TEMPS = {"min_cell_temp_c": 18.4, "min_cell_temp_pack": 1, "min_cell_temp_cell": 7,
          "max_cell_temp_c": 23.7, "max_cell_temp_pack": 3, "max_cell_temp_cell": 12}
+
+# The health-poller's hourly/weekly fixtures, same reasoning as TEMPS above. Built by calling
+# the real decode functions on an all-zero block rather than hand-typing 64 field names, so
+# this allowlist can't drift from what `registers.py` actually produces if a block's size ever
+# changes.
+FAULTS = R.decode_fault_block([0] * R.FAULT_BLOCK[1])
+LIMITS_HOURLY = (15000, 13000)
+FIRMWARE = R.decode_firmware_block([0] * R.FIRMWARE_BLOCK[1])
+INVERTER_FW = R.decode_inverter_fw_block([0] * R.INVERTER_FW_BLOCK[1])
+SYSTEM_CONFIG = R.decode_system_config_block([0] * R.SYSTEM_CONFIG_BLOCK[1])
 
 
 def published_field_values() -> dict:
@@ -51,7 +79,9 @@ def published_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z",
         reason="discharge 4500 W to 20.0%", live=True, live_soc_pct=41.2,
-        write_verified=True, actual_battery_w=-4300.0, temps=TEMPS)
+        write_verified=True, actual_battery_w=-4300.0, temps=TEMPS,
+        faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
+        inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG)
 
 
 def published_fields() -> set[str]:
@@ -71,7 +101,9 @@ def degraded_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z", read_error="timed out",
         decision_kind="idle", reason="live SoC unreadable", live=True,
-        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0, temps=TEMPS)
+        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0, temps=TEMPS,
+        faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
+        inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG)
 
 
 def degraded_fields() -> set[str]:
@@ -232,11 +264,19 @@ class TestConditionalFields:
         than listing it is for. Both need the same-instant `exists` treatment as `expires_at`:
         `verified` is absent whenever nothing was commanded, which is the normal resting case
         and must never render as a failed write.
+
+        The health-poller's raw-hex fields (fault/firmware/inverter-firmware/system-config)
+        are derived from the same `FAULTS`/`FIRMWARE`/etc. fixtures as the allowlist above,
+        rather than typed out by hand here, so this assertion can't drift from what those
+        fixtures actually contain.
         """
-        assert conditional_fields() == {"expires_at", "slot_start", "slot_action", "plan_run",
-                                        "verified", "soc_pct", "actual_battery_w",
-                                        "min_cell_temp_c", "min_cell_temp_pack",
-                                        "max_cell_temp_c", "max_cell_temp_pack"}
+        assert conditional_fields() == (
+            {"expires_at", "slot_start", "slot_action", "plan_run",
+             "verified", "soc_pct", "actual_battery_w",
+             "min_cell_temp_c", "min_cell_temp_pack",
+             "max_cell_temp_c", "max_cell_temp_pack",
+             "max_charge_power_w", "max_discharge_power_w"}
+            | set(FAULTS) | set(FIRMWARE) | set(INVERTER_FW) | set(SYSTEM_CONFIG))
 
     def test_the_decode_table_reads_only_unconditionally_written_fields(self):
         """`last()` returns each field's newest point WITH ITS OWN TIMESTAMP, and `pivot`
@@ -318,6 +358,33 @@ class TestTheGeneratorsAgree:
             assert "range(start: -5m)" in block, name
 
 
+class TestAllowedLastWindows:
+    """`_allowed_last_windows` on its own -- no committed dashboard queries a health-poller
+    field yet, so `test_every_last_value_query_uses_a_short_window` below can't exercise these
+    branches until the Battery Health dashboard lands. Pinned here now so that PR inherits a
+    working guard rather than discovering the gap mid-implementation."""
+
+    def test_tick_cadence_fields_keep_the_tight_window(self):
+        assert _allowed_last_windows("action") == {"-5m", "-10m"}
+
+    def test_a_field_named_by_nothing_here_defaults_to_the_tight_window(self):
+        """The conservative default: an unrecognised field is assumed tick-cadence, not
+        assumed safe to widen."""
+        assert _allowed_last_windows("some_future_field") == {"-5m", "-10m"}
+
+    def test_the_hourly_fault_block_gets_the_hourly_window(self):
+        assert _allowed_last_windows("fault_raw_0131") == {"-3h"}
+
+    def test_the_republished_limits_get_the_hourly_window(self):
+        assert _allowed_last_windows("max_charge_power_w") == {"-3h"}
+        assert _allowed_last_windows("max_discharge_power_w") == {"-3h"}
+
+    def test_each_weekly_block_gets_the_weekly_window(self):
+        assert _allowed_last_windows("firmware_raw_0115") == {"-10d"}
+        assert _allowed_last_windows("inverter_fw_raw_0640") == {"-10d"}
+        assert _allowed_last_windows("system_config_raw_0800") == {"-10d"}
+
+
 class TestStalenessGuards:
     """Section 7.3. A dead dispatcher does not clear `dispatch_state` -- it leaves the last
     point sitting there forever. A panel querying a wide range with `last()` renders a
@@ -325,15 +392,24 @@ class TestStalenessGuards:
     wrong answer in the one place you go to check."""
 
     def test_every_last_value_query_uses_a_short_window(self):
+        """-5m/-10m for tick-cadence fields (section 7.3's original argument); a wider,
+        still-bounded window for the health-poller's hourly/weekly fields, matched to their
+        own update cadence -- see `_allowed_last_windows` above. A query naming no field (a
+        decode table pivoting several at once) falls back to the tight tick-cadence window,
+        the conservative default."""
         for dashboard, title, query in dispatch_queries():
             if "|> last()" not in query:
                 continue
             windows = re.findall(r"range\(start:\s*(-?\w+)", query)
             assert windows, f"{dashboard} / {title}: last() with no range"
+            fields = set(re.findall(r'_field\s*==\s*"([^"]+)"', query))
+            allowed = (set().union(*(_allowed_last_windows(f) for f in fields)) if fields
+                      else {"-5m", "-10m"})
             for w in windows:
-                assert w in ("-5m", "-10m"), (
-                    f"{dashboard} / {title}: last() over {w} would render a stale command "
-                    f"as current -- section 7.3 requires a window of a few loop iterations")
+                assert w in allowed, (
+                    f"{dashboard} / {title}: last() over {w} would render a stale value as "
+                    f"current for field(s) {fields or '(none named)'} -- expected one of "
+                    f"{allowed}, matching that field's own update cadence")
 
     def test_there_are_state_stats_to_guard(self):
         """Guards the two guards below, which iterate a discovered set and would otherwise

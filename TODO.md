@@ -82,6 +82,67 @@ battery. Deliberately left out of #128, which is the change that created the fie
 on a field with no history to calibrate against would be a threshold picked from nothing.
 Raised in that PR's review.
 
+**12. The health-poller's cell-voltage block needs its base address confirmed before it can be
+added.** `registers.py`'s own comment on the temperature block (lines 83-88) cites Alpha2MQTT
+documenting the cell-voltage block at `0x0106`-`0x010A` (5 words), copied there specifically as
+the source that got miscopied onto the temp block's own scale comment. The battery-health
+dashboard's handover instead specifies `0x0105`-`0x010A` (6 words) for this block, mirroring
+`TEMP_BLOCK`'s pack/cell/value-times-two layout. A one-register base-address error would shift
+every field in the block, the same class of mistake this module's docstring opens with (the
+0x0883 anecdote). Resolve by reading both candidate base addresses against the live inverter
+with `--once` and comparing to the app's own displayed cell voltages, the same way the temp
+block's scale was confirmed on 2026-08-15/08-27, then add `decode_voltage_block`/
+`voltage_plausible` next to `decode_temp_block` and wire it into the health-poller's hourly
+gate (`HEALTH_REFRESH_S`, `dispatch/scheduler.py` step 8c).
+
+**13. The health-poller's daily tier (SoH, lifetime energy, heatsink temp, PV energy) has no
+confirmed register layout.** The battery-health dashboard's handover lists `0x011B` (SoH),
+`0x0120`-`0x0125` (lifetime charge/discharge/grid-charge energy, likely 3 metrics x 2 words
+each for 32-bit values but word order and scale unconfirmed), `0x0435` (inverter heatsink
+temp), and `0x043E`/`0x08D2` (inverter/system lifetime PV energy) — none of these appear
+anywhere else in this repo, and no register-reference document backing them was found (the
+existing constants trace to Alpha2MQTT/ha-alphaess-modbus citations in `registers.py`'s
+comments; these new ones don't). Needs either an authoritative reference or live-inverter
+verification — SoH and lifetime energy totals are both visible in the AlphaESS app, so a
+`--once` read cross-checked against the app's own numbers is the same verification path used
+for the temp/voltage blocks — before `decode_soh`/`decode_energy_block`/etc. can be written.
+Once confirmed, add a `DAILY_HEALTH_REFRESH_S` gate (`~86400s`) next to `HEALTH_REFRESH_S`.
+
+**14. The health-poller's weekly firmware/system-config blocks are published as raw hex, not
+decoded fields.** `FIRMWARE_BLOCK` (`0x0115`-`0x011A`), `INVERTER_FW_BLOCK`
+(`0x0640`-`0x0653`), and `SYSTEM_CONFIG_BLOCK` (`0x0800`-`0x080F`) are read and published
+verbatim (`firmware_raw_*`/`inverter_fw_raw_*`/`system_config_raw_*`, hex-keyed) rather than
+as the named fields the battery-health dashboard's handover describes (BMU/LMU/ISO firmware
+version, battery capacity/type, max feed-into-grid %, PV capacity settings, system mode,
+battery-ready flag) — which individual words within each block correspond to which named
+value isn't confirmed anywhere in this repo. Row 5 of `alphaess-battery-health.json` shows raw
+register/value pairs for now, same "checkable, not decoded" treatment the handover already
+sanctions for the already-shipped fault/warning table (`FAULT_BLOCK`, raw words only — see
+item 15 on why it has no derived count either). Decode individual fields once confirmed; no
+gate/cadence change needed, just extending the existing `decode_firmware_block`/
+`decode_inverter_fw_block`/`decode_system_config_block` functions in `registers.py`.
+
+**15. `FAULT_BLOCK` (`0x0131`-`0x0146`) has no derived "how many faults are active" summary,
+and needs one confirmed live before it gets one.** Raised in PR #129's review: a naive
+`sum(1 for w in words if w != 0)` looked safe because it needs no bit-level knowledge to
+compute, but the range itself is not confirmed to be fault/warning bits exclusively — if even
+one word in it is a normally-nonzero status value, counter, or nameplate figure rather than a
+fault flag, that count pins itself at 1 or more permanently, which reads on the health
+dashboard as "faults active" forever and is worse than publishing no summary at all, because it
+looks confident. Resolve the same way as items 12/13: read the block live with `--once` while
+cross-checking the AlphaESS app's own fault/warning display, identify which words (if any) are
+genuinely always-zero-when-healthy, and only then add a derived count — scoped to just those
+words, not the whole block — back to `decode_fault_block`.
+
+Also raised in the same review, and worth deciding alongside this rather than separately: the
+block is sampled once an hour (`HEALTH_REFRESH_S`, `scheduler.py` step 8c), with no latching,
+so a fault that raises and clears again inside that hour is never observed at all -- the
+dashboard would show clean the whole time. The hourly cadence itself was the handover's own
+choice, not something to second-guess before the block's contents are even confirmed, but once
+items 12-15 settle what these words actually mean, it's worth asking then whether a genuinely
+fault-carrying word should be sampled every tick (like the temp block) or latched sticky
+("seen nonzero since last hourly publish") rather than read only at the instant the gate fires.
+
 ## Docs
 
 **8. `DEPLOY.md`'s "The two battery-plan dashboards are generated, not exported" is out of
