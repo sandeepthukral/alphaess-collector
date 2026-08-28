@@ -13,16 +13,6 @@ and renumbering would break every reference to it in a commit message or a PR.
 
 ## Bugs
 
-**1. The Battery Plan dashboard has changed twice without a `version` bump.**
-`"version"` has read `17` since #97 (`2945739`), and both #100 (`89ddee6`) and `6e81f25`
-edited `grafana/alphaess-battery-plan.json` after it. The generator's own comment says what
-happens next: Grafana's file provisioner reads the new file, sees a version that is not
-higher, and does nothing — no error, no log line, and recreating the container does not help.
-It names the symptom too, which is the reason this is first on the list: *"a fix that appears
-not to have worked, which sends you back to re-debug a query that was already correct."*
-Bump it, and add the two missing numbered lines to the log above it (the log already skips
-16 and 17).
-
 **4. `tests/test_dispatch_goldens.py:330` string-sorts `plan_run`.**
 
 ```python
@@ -41,8 +31,7 @@ before 2026-07-30 carry `+02:00` where later ones carry `Z`. Use it.
 engine felt like — the Dispatch dashboard rendered the same query with `Means` first, which
 puts the thing you read last in front of the register you were looking for. Every other
 generated table in the repo pins this with an `organize` transformation; that one does not.
-Fixed on `alphaess-dispatch.json`, not on `alphaess-battery-plan.json`, because the plan
-dashboard needs item 1's version bump first.
+Fixed on `alphaess-dispatch.json`, not yet on `alphaess-battery-plan.json`.
 
 **5. Panel 8, "What to set in the app", should have gone at go-live — on Battery Plan.**
 `DESIGN-dispatch.md` §7.4 makes deleting it a go-live step and explains why: it is the
@@ -53,9 +42,7 @@ overlap to the dry run. The dry run ended on 2026-08-18. Panel 7, "Planned Actio
 is the same class.
 
 Both were on the **Overview** dashboard too, which neither §7.4 nor this item noticed, and
-that pair is gone as of 2026-08-20. What remains is Battery Plan's, and it is blocked on
-item 1: deleting a panel there without bumping `version` past 17 changes the file and not
-the dashboard, so the panels stay up and the deletion looks like it failed.
+that pair is gone as of 2026-08-20. What remains is Battery Plan's.
 
 **6. Monitor #1, `plan-run`, still does not exist.**
 `PLAN-repo-seams.md` Part 3, and the only change the dispatch feature makes to
