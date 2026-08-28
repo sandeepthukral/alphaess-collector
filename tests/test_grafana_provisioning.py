@@ -45,13 +45,13 @@ def test_dashboards_were_found():
     added to grafana/ but never mounted in docker-compose.yml, which provisions
     nothing and fails silently -- see test_every_dashboard_is_mounted below.
     """
-    assert len(DASHBOARDS) == 9
+    assert len(DASHBOARDS) == 10
 
 
 def test_generators_were_found():
     """The pairing glob has the same failure mode as the dashboard glob: match nothing,
     test nothing, pass."""
-    assert len(GENERATORS) == 4
+    assert len(GENERATORS) == 5
 
 
 @pytest.mark.parametrize("generator", GENERATORS, ids=lambda p: p.name)
@@ -194,29 +194,38 @@ def test_price_line_reads_the_plan_ahead_of_now():
         "the collector's stored price must be bounded at now(), or the two sources overlap")
 
 
-# Panels the main dashboard shows a second copy of, keyed by the dashboard they were
-# copied FROM. They are copied rather than shared because Grafana has no way to provision
-# one panel into two dashboards.
+# Panels one dashboard shows a second copy of, keyed by the dashboard they were copied FROM,
+# each mapped to (the dashboard they were copied INTO, the titles copied). They are copied
+# rather than shared because Grafana has no way to provision one panel into two dashboards.
 #
-# Both sources are generated, which is the whole risk: an edit to a generator lands in its
-# own dashboard automatically and in alphaess-dashboard.json only if someone remembers.
-# alphaess-dashboard.json is hand-maintained and has no generator to regenerate it, so
-# nothing but this test connects the copies.
+# The first two entries copy FROM a generated dashboard INTO alphaess-dashboard.json, which is
+# hand-maintained and has no generator to regenerate it -- an edit to `generate-battery-plan.py`
+# or `generate-dispatch.py` lands in its own dashboard automatically and in
+# alphaess-dashboard.json only if someone remembers, so nothing but this test connects them.
+#
+# The third entry runs the other way: alphaess-dashboard.json is the hand-maintained SOURCE and
+# alphaess-battery-health.json (generated) is the copy. It is the first entry in either
+# direction, because it is the first panel that started life on a hand-maintained dashboard
+# before a generated one wanted a copy of it.
 COPIED_PANELS = {
-    "alphaess-battery-plan.json": [
+    "alphaess-battery-plan.json": ("alphaess-dashboard.json", [
         "Planned SoC vs actual SoC",
-    ],
-    "alphaess-dispatch.json": [
+    ]),
+    "alphaess-dispatch.json": ("alphaess-dashboard.json", [
         "Dispatcher",
         "Decision",
         "Doing",
         "Command expires in",
         "What the dispatcher will do next",
-    ],
+    ]),
+    "alphaess-dashboard.json": ("alphaess-battery-health.json", [
+        "Battery cell temperature (min/max)",
+    ]),
 }
 
-# Every copied title, flat -- the range rule below applies to all of them equally.
-EVERY_COPIED_PANEL = [t for ts in COPIED_PANELS.values() for t in ts]
+# Every (destination, title) pair, flat -- the horizon rule below applies only to the pairs
+# landing on alphaess-dashboard.json; see test_copied_panels_span_the_plan_horizon.
+EVERY_COPIED_PANEL = [(target, t) for target, ts in COPIED_PANELS.values() for t in ts]
 
 
 def _overrides(panel):
@@ -243,25 +252,27 @@ def _panels_by_title(name):
 
 @pytest.mark.parametrize("source", sorted(COPIED_PANELS))
 def test_copied_panels_match_their_source(source):
-    """The copies on the main dashboard must run the same queries as the originals.
+    """The copies must run the same queries as the originals, whichever direction the copy
+    runs.
 
-    Those queries are generated -- from generate-battery-plan.py and generate-dispatch.py
-    -- so a change there lands in the source dashboard automatically and in
-    alphaess-dashboard.json only if someone remembers. Two dashboards then disagree about
-    what the battery is doing, and both look right. Mirror the change into
-    grafana/alphaess-dashboard.json.
+    Two of these three copy FROM a generated dashboard, so a change there lands in the
+    source automatically and in the hand-maintained copy only if someone remembers. The
+    third runs the other way -- alphaess-dashboard.json is hand-maintained and has no
+    generator to regenerate it, so an edit made directly there is exactly as invisible to
+    its generated copy. Either way, two dashboards then disagree about what the battery is
+    doing, and both look right.
 
-    This is what makes copying a dispatch panel onto Overview safe. The alternative
-    considered was pinning the DISPATCH_LAST constant across files, which would have
-    checked the query's opening lines and nothing else; comparing the whole target list
-    against the generated original checks all of it, including the parts a hand-edit is
-    most likely to get subtly wrong.
+    This is what makes copying a panel between dashboards safe. The alternative considered
+    was pinning the query constant across files, which would have checked the query's
+    opening lines and nothing else; comparing the whole target list against the original
+    checks all of it, including the parts a hand-edit is most likely to get subtly wrong.
     """
-    _, main = _panels_by_title("alphaess-dashboard.json")
+    target_name, titles = COPIED_PANELS[source]
+    _, main = _panels_by_title(target_name)
     _, origin = _panels_by_title(source)
 
-    for title in COPIED_PANELS[source]:
-        assert title in main, f"{title} is missing from the main dashboard"
+    for title in titles:
+        assert title in main, f"{title} is missing from {target_name}"
         assert title in origin, f"{title} is missing from {source}"
         assert [t["query"] for t in main[title]["targets"]] == \
                [t["query"] for t in origin[title]["targets"]], f"{title} ({source})"
@@ -269,18 +280,19 @@ def test_copied_panels_match_their_source(source):
         # decide what the numbers mean on screen, and a unit changed on one dashboard and
         # not the other is the same drift as a diverging query, and just as invisible.
         #
-        # Compared per field rather than whole, and only for fields both carry: a copy on
-        # the main dashboard is laid out differently -- half-width, its own column widths
-        # -- and that is presentation, which is allowed to differ.
+        # Compared per field rather than whole, and only for fields both carry: a copy is
+        # laid out differently -- half-width, its own column widths -- and that is
+        # presentation, which is allowed to differ.
         assert _overrides(main[title]) == _overrides(origin[title]), f"{title} ({source})"
 
 
 def test_the_copy_list_is_not_empty():
-    """Guards the guard: an emptied list, or a source dashboard renamed, would make the
-    test above iterate nothing and pass."""
+    """Guards the guard: an emptied list, or a source/target dashboard renamed, would make
+    the test above iterate nothing and pass."""
     assert COPIED_PANELS
-    for source, titles in COPIED_PANELS.items():
+    for source, (target_name, titles) in COPIED_PANELS.items():
         assert (REPO / "grafana" / source).exists(), source
+        assert (REPO / "grafana" / target_name).exists(), target_name
         assert titles, source
 
 
@@ -299,13 +311,22 @@ def test_copied_panels_span_the_plan_horizon():
     it might be: `What the dispatcher will do next` draws the slots AHEAD of now, so a
     timeFrom override on it would leave a panel whose entire subject is the future
     rendering a blank strip -- the same failure as 2026-08-08, on a different panel.
+
+    Scoped to copies landing on alphaess-dashboard.json only. The battery-health copy of
+    "Battery cell temperature (min/max)" is carved out: that dashboard has no relationship
+    to the plan's horizon at all (it runs a plain 30-day lookback,
+    test_dashboards_were_found's tenth entry), and the copied panel pins its own
+    `timeFrom: "7d"` regardless of either parent's range -- the same override
+    test_the_temperature_history_keeps_its_own_window already requires of the original.
     """
     plan_dash, _ = _panels_by_title("alphaess-battery-plan.json")
     main_dash, main = _panels_by_title("alphaess-dashboard.json")
 
     assert main_dash["time"] == plan_dash["time"]
 
-    for title in EVERY_COPIED_PANEL:
+    for target_name, title in EVERY_COPIED_PANEL:
+        if target_name != "alphaess-dashboard.json":
+            continue
         panel = main[title]
         assert "timeFrom" not in panel and "timeShift" not in panel, (
             f"{title} must take the dashboard's range, not an override that ends at now")
@@ -406,6 +427,17 @@ def test_the_temperature_history_keeps_its_own_window():
     """
     _, main = _panels_by_title("alphaess-dashboard.json")
     assert main["Battery cell temperature (min/max)"].get("timeFrom") == "7d"
+
+
+def test_the_battery_health_copy_keeps_the_same_window():
+    """The battery-health dashboard's own copy of the same panel must carry the same
+    `timeFrom` override as its source, for the same reason as the test above -- Battery
+    Health runs a plain `now-30d` to `now` lookback (no plan horizon involved at all), so
+    without the override this copy would spend most of its width on three weeks the
+    temperature story doesn't need.
+    """
+    _, health = _panels_by_title("alphaess-battery-health.json")
+    assert health["Battery cell temperature (min/max)"].get("timeFrom") == "7d"
 
 
 def test_the_min_temp_tile_keeps_a_cold_band():

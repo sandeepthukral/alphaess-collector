@@ -93,7 +93,11 @@ every field in the block, the same class of mistake this module's docstring open
 with `--once` and comparing to the app's own displayed cell voltages, the same way the temp
 block's scale was confirmed on 2026-08-15/08-27, then add `decode_voltage_block`/
 `voltage_plausible` next to `decode_temp_block` and wire it into the health-poller's hourly
-gate (`HEALTH_REFRESH_S`, `dispatch/scheduler.py` step 8c).
+gate (`HEALTH_REFRESH_S`, `dispatch/scheduler.py` step 8c). `alphaess-battery-health.json`
+has no voltage panels yet, on purpose — a panel querying `min_cell_voltage_v`/
+`max_cell_voltage_v` before `dispatch/state.py` writes them is exactly what
+`tests/test_dispatch_dashboard.py::TestFieldContract::test_every_field_filter_names_a_field_we_publish`
+exists to catch, so add the panels in the same change that adds the fields.
 
 **13. The health-poller's daily tier (SoH, lifetime energy, heatsink temp, PV energy) has no
 confirmed register layout.** The battery-health dashboard's handover lists `0x011B` (SoH),
@@ -107,6 +111,8 @@ verification — SoH and lifetime energy totals are both visible in the AlphaESS
 `--once` read cross-checked against the app's own numbers is the same verification path used
 for the temp/voltage blocks — before `decode_soh`/`decode_energy_block`/etc. can be written.
 Once confirmed, add a `DAILY_HEALTH_REFRESH_S` gate (`~86400s`) next to `HEALTH_REFRESH_S`.
+Same rule as item 12: `alphaess-battery-health.json` carries no SoH/daily-energy/lifetime-cycle
+panels until these fields exist, so add both in one change.
 
 **14. The health-poller's weekly firmware/system-config blocks are published as raw hex, not
 decoded fields.** `FIRMWARE_BLOCK` (`0x0115`-`0x011A`), `INVERTER_FW_BLOCK`
@@ -132,7 +138,9 @@ dashboard as "faults active" forever and is worse than publishing no summary at 
 looks confident. Resolve the same way as items 12/13: read the block live with `--once` while
 cross-checking the AlphaESS app's own fault/warning display, identify which words (if any) are
 genuinely always-zero-when-healthy, and only then add a derived count — scoped to just those
-words, not the whole block — back to `decode_fault_block`.
+words, not the whole block — back to `decode_fault_block`. Add an "Active faults" stat to
+`alphaess-battery-health.json` row 1 in the same change, reading the new field — today that row
+has no fault summary tile at all, for the same reason item 12 gives.
 
 Also raised in the same review, and worth deciding alongside this rather than separately: the
 block is sampled once an hour (`HEALTH_REFRESH_S`, `scheduler.py` step 8c), with no latching,
