@@ -1,0 +1,1116 @@
+{
+  "__elements": {},
+  "__inputs": [
+    {
+      "description": "",
+      "label": "alphaess",
+      "name": "DS_ALPHAESS",
+      "pluginId": "influxdb",
+      "pluginName": "InfluxDB",
+      "type": "datasource"
+    }
+  ],
+  "__requires": [
+    {
+      "id": "grafana",
+      "name": "Grafana",
+      "type": "grafana",
+      "version": "11.6.0"
+    },
+    {
+      "id": "influxdb",
+      "name": "InfluxDB",
+      "type": "datasource",
+      "version": "1.0.0"
+    },
+    {
+      "id": "stat",
+      "name": "Stat",
+      "type": "panel",
+      "version": ""
+    },
+    {
+      "id": "table",
+      "name": "Table",
+      "type": "panel",
+      "version": ""
+    },
+    {
+      "id": "timeseries",
+      "name": "Time series",
+      "type": "panel",
+      "version": ""
+    }
+  ],
+  "annotations": {
+    "list": []
+  },
+  "description": "Is the battery itself okay -- faults, thermal history and the inverter's own power ceilings, on the cadence each actually updates. Battery Plan answers what the optimiser wants and Dispatch answers what the control loop is doing about it; neither answers this.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The battery level the dispatcher last read, same field the Dispatch dashboard shows.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"soc_pct\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "SoC now",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The coldest cell across the whole battery, tagged with which pack it is in. A lithium pack near freezing refuses or derates a charge, which is why this tile keeps its own cold band rather than sharing the max tile's ladder.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 5.0
+              },
+              {
+                "color": "orange",
+                "value": 35.0
+              },
+              {
+                "color": "red",
+                "value": 45.0
+              }
+            ]
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 5,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"min_cell_temp_c\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Min cell temp",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The hottest cell across the whole battery, tagged with which pack it is in.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 35.0
+              },
+              {
+                "color": "red",
+                "value": 45.0
+              }
+            ]
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 10,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"max_cell_temp_c\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Max cell temp",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The inverter's own charge ceiling, read hourly and republished here under the health dashboard's field names -- the same reading `slots.clamp` already uses to cap a command, not a fresh register read.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 15,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"max_charge_power_w\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Max charge power limit",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The inverter's own discharge ceiling, read hourly and republished under the health dashboard's field names. Independent of the charge limit above -- one being readable does not imply the other is.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"max_discharge_power_w\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Max discharge power limit",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Seven days of the coldest and hottest cell. The two tiles above say where the battery is now; this says what it has been doing, which is the only way to tell a warm afternoon from a pack that has been climbing all week. The band between the lines is the spread across the fleet - it widens under load and closes overnight, and a spread that stops closing is worth looking into.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "celsius"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "min_cell_temp_c"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "linear"
+              },
+              {
+                "id": "displayName",
+                "value": "min cell"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max_cell_temp_c"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              },
+              {
+                "id": "custom.lineInterpolation",
+                "value": "linear"
+              },
+              {
+                "id": "displayName",
+                "value": "max cell"
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 4
+      },
+      "id": 6,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"min_cell_temp_c\" or r._field == \"max_cell_temp_c\"))\n  |> yield(name: \"cell temps\")\n",
+          "refId": "A"
+        }
+      ],
+      "timeFrom": "7d",
+      "title": "Battery cell temperature (min/max)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The inverter's own charge/discharge ceilings, read hourly. A limit that steps down over time -- rather than jumping back up on the next hourly read -- is the inverter derating itself, which is worth noticing well before it shows up as a shortfall on the Dispatch dashboard.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 0,
+            "gradientMode": "none",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          },
+          "unit": "watt"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max charge"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "max discharge"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 12
+      },
+      "id": 7,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"max_charge_power_w\" or r._field == \"max_discharge_power_w\"))\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> map(fn: (r) => ({ _time: r._time,\n       \"max charge\": r.max_charge_power_w, \"max discharge\": r.max_discharge_power_w }))\n  |> yield(name: \"limits\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Charge / discharge power limits",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "FAULT_BLOCK, 0x0131-0x0146, read hourly. No word here is confirmed to be a fault bit specifically rather than a counter or status value (TODO.md item 15), so there is no derived 'faults active' count -- only the raw words, to be checked against the AlphaESS app's own display.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "register"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Register"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Value"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "id": 8,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"strings\"\n\nfrom(bucket: \"alphaess\")\n  |> range(start: -3h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and (r._field == \"fault_raw_0131\" or r._field == \"fault_raw_0132\" or r._field == \"fault_raw_0133\" or r._field == \"fault_raw_0134\" or r._field == \"fault_raw_0135\" or r._field == \"fault_raw_0136\" or r._field == \"fault_raw_0137\" or r._field == \"fault_raw_0138\" or r._field == \"fault_raw_0139\" or r._field == \"fault_raw_013a\" or r._field == \"fault_raw_013b\" or r._field == \"fault_raw_013c\" or r._field == \"fault_raw_013d\" or r._field == \"fault_raw_013e\" or r._field == \"fault_raw_013f\" or r._field == \"fault_raw_0140\" or r._field == \"fault_raw_0141\" or r._field == \"fault_raw_0142\" or r._field == \"fault_raw_0143\" or r._field == \"fault_raw_0144\" or r._field == \"fault_raw_0145\" or r._field == \"fault_raw_0146\"))\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time,\n       register: \"0x\" + strings.trimPrefix(v: r._field, prefix: \"fault_raw_\"),\n       value: r._value }))\n  |> keep(columns: [\"register\", \"value\"])\n  |> group()\n  |> sort(columns: [\"register\"])\n  |> yield(name: \"faults\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Faults and warnings (raw)",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "indexByName": {
+              "register": 0,
+              "value": 1
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "FIRMWARE_BLOCK, 0x0115-0x011A (BMU/LMU/ISO firmware, battery capacity/type), read weekly. Which word is which named value is not confirmed anywhere in this repo yet (TODO.md item 14), so this is the raw words rather than named fields.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "register"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Register"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Value"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 0,
+        "y": 30
+      },
+      "id": 9,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"strings\"\n\nfrom(bucket: \"alphaess\")\n  |> range(start: -10d)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and (r._field == \"firmware_raw_0115\" or r._field == \"firmware_raw_0116\" or r._field == \"firmware_raw_0117\" or r._field == \"firmware_raw_0118\" or r._field == \"firmware_raw_0119\" or r._field == \"firmware_raw_011a\"))\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time,\n       register: \"0x\" + strings.trimPrefix(v: r._field, prefix: \"firmware_raw_\"),\n       value: r._value }))\n  |> keep(columns: [\"register\", \"value\"])\n  |> group()\n  |> sort(columns: [\"register\"])\n  |> yield(name: \"firmware\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Firmware versions (raw)",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "indexByName": {
+              "register": 0,
+              "value": 1
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "INVERTER_FW_BLOCK, 0x0640-0x0653 (inverter master/slave firmware and serial), read weekly. Same raw-hex treatment as Firmware versions, and for the same reason.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "register"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Register"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Value"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 8,
+        "y": 30
+      },
+      "id": 10,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"strings\"\n\nfrom(bucket: \"alphaess\")\n  |> range(start: -10d)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and (r._field == \"inverter_fw_raw_0640\" or r._field == \"inverter_fw_raw_0641\" or r._field == \"inverter_fw_raw_0642\" or r._field == \"inverter_fw_raw_0643\" or r._field == \"inverter_fw_raw_0644\" or r._field == \"inverter_fw_raw_0645\" or r._field == \"inverter_fw_raw_0646\" or r._field == \"inverter_fw_raw_0647\" or r._field == \"inverter_fw_raw_0648\" or r._field == \"inverter_fw_raw_0649\" or r._field == \"inverter_fw_raw_064a\" or r._field == \"inverter_fw_raw_064b\" or r._field == \"inverter_fw_raw_064c\" or r._field == \"inverter_fw_raw_064d\" or r._field == \"inverter_fw_raw_064e\" or r._field == \"inverter_fw_raw_064f\" or r._field == \"inverter_fw_raw_0650\" or r._field == \"inverter_fw_raw_0651\" or r._field == \"inverter_fw_raw_0652\" or r._field == \"inverter_fw_raw_0653\"))\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time,\n       register: \"0x\" + strings.trimPrefix(v: r._field, prefix: \"inverter_fw_raw_\"),\n       value: r._value }))\n  |> keep(columns: [\"register\", \"value\"])\n  |> group()\n  |> sort(columns: [\"register\"])\n  |> yield(name: \"inverter_fw\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Inverter firmware (raw)",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "indexByName": {
+              "register": 0,
+              "value": 1
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "SYSTEM_CONFIG_BLOCK, 0x0800-0x080F (max feed-into-grid %, PV capacity settings, system mode, battery-ready flag), read weekly. Same raw-hex treatment, and for the same reason.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "register"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Register"
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Value"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 10,
+        "w": 8,
+        "x": 16,
+        "y": 30
+      },
+      "id": 11,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": [
+            "sum"
+          ],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"strings\"\n\nfrom(bucket: \"alphaess\")\n  |> range(start: -10d)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and (r._field == \"system_config_raw_0800\" or r._field == \"system_config_raw_0801\" or r._field == \"system_config_raw_0802\" or r._field == \"system_config_raw_0803\" or r._field == \"system_config_raw_0804\" or r._field == \"system_config_raw_0805\" or r._field == \"system_config_raw_0806\" or r._field == \"system_config_raw_0807\" or r._field == \"system_config_raw_0808\" or r._field == \"system_config_raw_0809\" or r._field == \"system_config_raw_080a\" or r._field == \"system_config_raw_080b\" or r._field == \"system_config_raw_080c\" or r._field == \"system_config_raw_080d\" or r._field == \"system_config_raw_080e\" or r._field == \"system_config_raw_080f\"))\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time,\n       register: \"0x\" + strings.trimPrefix(v: r._field, prefix: \"system_config_raw_\"),\n       value: r._value }))\n  |> keep(columns: [\"register\", \"value\"])\n  |> group()\n  |> sort(columns: [\"register\"])\n  |> yield(name: \"system_config\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "System config (raw)",
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {},
+            "includeByName": {},
+            "indexByName": {
+              "register": 0,
+              "value": 1
+            },
+            "renameByName": {}
+          }
+        }
+      ],
+      "type": "table"
+    }
+  ],
+  "preload": false,
+  "refresh": "5m",
+  "schemaVersion": 42,
+  "tags": [
+    "alphaess",
+    "battery",
+    "health"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Battery Health",
+  "uid": "alphaess-battery-health",
+  "version": 1,
+  "weekStart": ""
+}

@@ -349,6 +349,7 @@ services:
       - ./grafana/alphaess-battery-plan.json:/etc/grafana/dashboard-src/alphaess-battery-plan.json:ro
       - ./grafana/alphaess-dispatch.json:/etc/grafana/dashboard-src/alphaess-dispatch.json:ro
       - ./grafana/alphaess-battery-score.json:/etc/grafana/dashboard-src/alphaess-battery-score.json:ro
+      - ./grafana/alphaess-battery-health.json:/etc/grafana/dashboard-src/alphaess-battery-health.json:ro
     depends_on:
       influxdb:
         condition: service_healthy
