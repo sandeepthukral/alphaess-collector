@@ -264,25 +264,25 @@ class TestWhatTheDispatcherKnows:
         assert not [k for k in build_degraded_fields(read_error="timed out", temps=None)
                     if "cell_temp" in k]
 
-    def test_the_fault_words_and_count_are_carried(self):
-        """`registers.decode_fault_block`'s output merged straight in -- every raw word plus
-        the derived count, hex-keyed like the raw dispatch block already is."""
+    def test_the_fault_words_are_carried(self):
+        """`registers.decode_fault_block`'s output merged straight in -- every raw word,
+        hex-keyed like the raw dispatch block already is. No derived count: see
+        `registers.FAULT_BLOCK`'s comment on why a nonzero-word summary isn't safe yet."""
         s, words = state_of()
-        faults = {"fault_raw_0131": 5, "active_fault_count": 1}
+        faults = {"fault_raw_0131": 5, "fault_raw_0132": 0}
         f = build_fields(s, words, NOW, faults=faults)
         assert f["fault_raw_0131"] == 5
-        assert f["active_fault_count"] == 1
+        assert f["fault_raw_0132"] == 0
 
     def test_unread_faults_publish_no_fields_at_all(self):
         s, words = state_of()
         f = build_fields(s, words, NOW, faults=None)
-        assert "active_fault_count" not in f
         assert not [k for k in f if k.startswith("fault_raw_")]
 
     def test_a_degraded_point_still_carries_the_faults_when_that_read_worked(self):
         f = build_degraded_fields(read_error="block read failed",
-                                  faults={"active_fault_count": 3})
-        assert f["active_fault_count"] == 3
+                                  faults={"fault_raw_0131": 3})
+        assert f["fault_raw_0131"] == 3
 
     def test_the_hourly_power_limits_are_carried_under_health_field_names(self):
         """Not a fresh read -- `scheduler.py` step 8c republishes `cache["limits"]` here under

@@ -114,8 +114,8 @@ def _decision_fields(
         fields["max_cell_temp_c"] = float(temps["max_cell_temp_c"])
         fields["max_cell_temp_pack"] = int(temps["max_cell_temp_pack"])
     # `registers.FAULT_BLOCK`, hourly-gated (`scheduler.py` step 8c). No fault/warning bit is
-    # named -- see that block's comment -- so every word is published as-is, hex-keyed, plus
-    # the one derived value that needs no bit-level knowledge to be correct: a nonzero count.
+    # named, and no derived count either -- see that block's comment in `registers.py` -- so
+    # every word is published as-is, hex-keyed, and nothing else.
     if faults is not None:
         fields.update({k: int(v) for k, v in faults.items()})
     # The inverter's own charge/discharge ceiling, already read hourly by `run()`'s

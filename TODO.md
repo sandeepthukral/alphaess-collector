@@ -117,10 +117,22 @@ version, battery capacity/type, max feed-into-grid %, PV capacity settings, syst
 battery-ready flag) — which individual words within each block correspond to which named
 value isn't confirmed anywhere in this repo. Row 5 of `alphaess-battery-health.json` shows raw
 register/value pairs for now, same "checkable, not decoded" treatment the handover already
-sanctions for the already-shipped fault/warning table (`FAULT_BLOCK`, `active_fault_count`).
-Decode individual fields once confirmed; no gate/cadence change needed, just extending the existing
-`decode_firmware_block`/`decode_inverter_fw_block`/`decode_system_config_block` functions in
-`registers.py`.
+sanctions for the already-shipped fault/warning table (`FAULT_BLOCK`, raw words only — see
+item 15 on why it has no derived count either). Decode individual fields once confirmed; no
+gate/cadence change needed, just extending the existing `decode_firmware_block`/
+`decode_inverter_fw_block`/`decode_system_config_block` functions in `registers.py`.
+
+**15. `FAULT_BLOCK` (`0x0131`-`0x0146`) has no derived "how many faults are active" summary,
+and needs one confirmed live before it gets one.** Raised in PR #129's review: a naive
+`sum(1 for w in words if w != 0)` looked safe because it needs no bit-level knowledge to
+compute, but the range itself is not confirmed to be fault/warning bits exclusively — if even
+one word in it is a normally-nonzero status value, counter, or nameplate figure rather than a
+fault flag, that count pins itself at 1 or more permanently, which reads on the health
+dashboard as "faults active" forever and is worse than publishing no summary at all, because it
+looks confident. Resolve the same way as items 12/13: read the block live with `--once` while
+cross-checking the AlphaESS app's own fault/warning display, identify which words (if any) are
+genuinely always-zero-when-healthy, and only then add a derived count — scoped to just those
+words, not the whole block — back to `decode_fault_block`.
 
 ## Docs
 

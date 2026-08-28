@@ -297,23 +297,21 @@ class TestTempsPlausible:
 
 class TestDecodeFaultBlock:
     """0x0131-0x0146. No bit is named -- see the block comment above FAULT_BLOCK -- so this is
-    a raw passthrough plus a nonzero word count, not a scale/sign test like the temp block."""
+    a pure raw passthrough, not a scale/sign test like the temp block. No derived count either:
+    this range is not confirmed to be fault/warning bits exclusively, so a nonzero-word summary
+    would risk pinning itself permanently active on a normally-nonzero status/counter word."""
 
-    def test_an_all_zero_block_has_no_active_faults(self):
+    def test_an_all_zero_block_decodes_to_all_zero_fields(self):
         fields = R.decode_fault_block([0] * 22)
-        assert fields["active_fault_count"] == 0
         assert fields["fault_raw_0131"] == 0
         assert fields["fault_raw_0146"] == 0
 
-    def test_counts_words_not_bits(self):
-        """A word with several bits set still counts once -- the count answers "how many
-        registers have something set", not "how many individual conditions are active",
-        because nothing here knows what a given bit means."""
-        words = [0] * 22
-        words[0] = 0b1011  # three bits set in one word
-        words[5] = 1
-        fields = R.decode_fault_block(words)
-        assert fields["active_fault_count"] == 2
+    def test_no_derived_count_is_published(self):
+        """Guards the fix, not just the feature: a future change resurrecting a nonzero-word
+        count here would reintroduce the permanently-pinned-active risk this block's comment
+        warns about."""
+        fields = R.decode_fault_block([1] * 22)
+        assert "active_fault_count" not in fields
 
     def test_every_word_is_keyed_by_its_own_hex_address(self):
         words = list(range(22))

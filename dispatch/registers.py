@@ -139,9 +139,13 @@ SOC_STEP = 0.4
 # Twenty-two contiguous registers, immediately after the inverter limits above. No bit-level
 # meaning is published here -- AlphaESS has not documented a fault/warning bit map anywhere
 # this repo has found, and guessing one risks mislabeling a real fault as benign, or vice
-# versa. Every word is republished raw, keyed by its own hex address, alongside a simple
-# nonzero count: enough to say "something is set" and point at exactly which register, without
-# inventing what it means.
+# versa. Every word is republished raw, keyed by its own hex address.
+#
+# NO DERIVED "nonzero word count" EITHER, and that is deliberate, not an oversight: this range
+# is not confirmed to be fault/warning bits exclusively. If even one word in it is a normally-
+# nonzero status value, a counter, or a nameplate figure rather than a fault flag, a "count of
+# nonzero words" pins itself at 1 or more permanently and reads as a fault that is always
+# active -- worse than no summary at all, because it looks confident. See TODO.md #15.
 REG_FAULT_WARNING_START = 305   # 0x0131  22 words, raw hex, no decode
 FAULT_BLOCK = (REG_FAULT_WARNING_START, 22)
 
@@ -359,20 +363,17 @@ def temps_plausible(temps: dict) -> bool:
 
 
 def decode_fault_block(words: list[int]) -> dict:
-    """A 22-word read of FAULT_BLOCK -> raw words, hex-keyed, plus a nonzero count.
+    """A 22-word read of FAULT_BLOCK -> raw words, hex-keyed.
 
-    No fault or warning bit is named -- see the block comment above FAULT_BLOCK for why. Every
-    word is kept so a real event is at least visible and locatable even though it is not yet
-    interpretable; `active_fault_count` is the one derived value, cheap and unambiguous
-    (a word count, not a bit count) precisely because it needs no knowledge of what any bit
-    means to be correct.
+    No fault or warning bit is named, and no derived count either -- see the block comment
+    above FAULT_BLOCK for why a "nonzero word" summary is not safe to compute yet. Every word
+    is kept so a real event is at least visible and locatable even though it is not yet
+    interpretable.
     """
     if len(words) != FAULT_BLOCK[1]:
         raise ValueError(f"expected {FAULT_BLOCK[1]} words, got {len(words)}")
     base = FAULT_BLOCK[0]
-    fields = {f"fault_raw_{base + i:04x}": word for i, word in enumerate(words)}
-    fields["active_fault_count"] = sum(1 for word in words if word != 0)
-    return fields
+    return {f"fault_raw_{base + i:04x}": word for i, word in enumerate(words)}
 
 
 def decode_firmware_block(words: list[int]) -> dict:

@@ -36,6 +36,16 @@ CONVERTS_TO_NUMBER = re.compile(r"_value:\s*(?:float|int)\(")
 TEMPS = {"min_cell_temp_c": 18.4, "min_cell_temp_pack": 1, "min_cell_temp_cell": 7,
          "max_cell_temp_c": 23.7, "max_cell_temp_pack": 3, "max_cell_temp_cell": 12}
 
+# The health-poller's hourly/weekly fixtures, same reasoning as TEMPS above. Built by calling
+# the real decode functions on an all-zero block rather than hand-typing 64 field names, so
+# this allowlist can't drift from what `registers.py` actually produces if a block's size ever
+# changes.
+FAULTS = R.decode_fault_block([0] * R.FAULT_BLOCK[1])
+LIMITS_HOURLY = (15000, 13000)
+FIRMWARE = R.decode_firmware_block([0] * R.FIRMWARE_BLOCK[1])
+INVERTER_FW = R.decode_inverter_fw_block([0] * R.INVERTER_FW_BLOCK[1])
+SYSTEM_CONFIG = R.decode_system_config_block([0] * R.SYSTEM_CONFIG_BLOCK[1])
+
 
 def published_field_values() -> dict:
     """A fully populated `dispatch_state` point, values kept.
@@ -51,7 +61,9 @@ def published_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z",
         reason="discharge 4500 W to 20.0%", live=True, live_soc_pct=41.2,
-        write_verified=True, actual_battery_w=-4300.0, temps=TEMPS)
+        write_verified=True, actual_battery_w=-4300.0, temps=TEMPS,
+        faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
+        inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG)
 
 
 def published_fields() -> set[str]:
@@ -71,7 +83,9 @@ def degraded_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z", read_error="timed out",
         decision_kind="idle", reason="live SoC unreadable", live=True,
-        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0, temps=TEMPS)
+        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0, temps=TEMPS,
+        faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
+        inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG)
 
 
 def degraded_fields() -> set[str]:
@@ -232,11 +246,19 @@ class TestConditionalFields:
         than listing it is for. Both need the same-instant `exists` treatment as `expires_at`:
         `verified` is absent whenever nothing was commanded, which is the normal resting case
         and must never render as a failed write.
+
+        The health-poller's raw-hex fields (fault/firmware/inverter-firmware/system-config)
+        are derived from the same `FAULTS`/`FIRMWARE`/etc. fixtures as the allowlist above,
+        rather than typed out by hand here, so this assertion can't drift from what those
+        fixtures actually contain.
         """
-        assert conditional_fields() == {"expires_at", "slot_start", "slot_action", "plan_run",
-                                        "verified", "soc_pct", "actual_battery_w",
-                                        "min_cell_temp_c", "min_cell_temp_pack",
-                                        "max_cell_temp_c", "max_cell_temp_pack"}
+        assert conditional_fields() == (
+            {"expires_at", "slot_start", "slot_action", "plan_run",
+             "verified", "soc_pct", "actual_battery_w",
+             "min_cell_temp_c", "min_cell_temp_pack",
+             "max_cell_temp_c", "max_cell_temp_pack",
+             "max_charge_power_w", "max_discharge_power_w"}
+            | set(FAULTS) | set(FIRMWARE) | set(INVERTER_FW) | set(SYSTEM_CONFIG))
 
     def test_the_decode_table_reads_only_unconditionally_written_fields(self):
         """`last()` returns each field's newest point WITH ITS OWN TIMESTAMP, and `pivot`
