@@ -78,8 +78,29 @@ def measurement_registers(live_soc_pct=80.0, block=None, battery_power_w=0) -> d
     regs[R.REG_GRID_POWER] = 0
     regs[R.REG_GRID_POWER + 1] = 0
     regs[R.REG_BATTERY_POWER] = int(battery_power_w) & 0xFFFF
+    regs.update(voltage_registers())
     regs.update(temp_registers())
     return regs
+
+
+def voltage_registers(min_v=3.298, max_v=3.312, min_pack=3, max_pack=1,
+                      min_cell=7, max_cell=12) -> dict[int, int]:
+    """The six VOLTAGE_BLOCK words, keyed by address.
+
+    Same reason as `temp_registers` for existing: `ScriptedClient` zero-fills anything not
+    given, and a zero block is exactly the failure `registers.voltage_plausible` guards
+    against. Same pack IDs as `temp_registers`' defaults, for no stronger reason than that
+    they are the ones already confirmed live on this site (2026-08-27) -- voltage and
+    temperature extremes are not guaranteed to share a pack in general.
+    """
+    return {
+        R.REG_MIN_CELL_VOLTAGE_PACK: min_pack,
+        R.REG_MIN_CELL_VOLTAGE_CELL: min_cell,
+        R.REG_MIN_CELL_VOLTAGE: round(min_v * 1000),
+        R.REG_MAX_CELL_VOLTAGE_PACK: max_pack,
+        R.REG_MAX_CELL_VOLTAGE_CELL: max_cell,
+        R.REG_MAX_CELL_VOLTAGE: round(max_v * 1000),
+    }
 
 
 def temp_registers(min_c=18.4, max_c=23.7, min_pack=3, max_pack=1,
@@ -436,6 +457,120 @@ class TestActualBatteryReading:
         point = pub.points[0]
         assert point["actual_battery_w"] == -3200.0
         assert "read_error" in point
+
+
+class TestCellVoltage:
+    """The wiring, mirroring `TestCellTemperature` immediately below -- same shape, a
+    separate read and a separate error variable (see step 8b's comment for why)."""
+
+    def test_the_voltages_reach_the_published_point(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        pub = RecordingPublisher()
+        run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False, publisher=pub)
+        point = pub.points[0]
+        assert point["min_cell_voltage_v"] == 3.298
+        assert point["max_cell_voltage_v"] == 3.312
+        assert point["min_cell_voltage_pack"] == 3
+        assert point["max_cell_voltage_pack"] == 1
+
+    def test_they_survive_a_failed_block_read(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.REG_START}))
+        pub = RecordingPublisher()
+        run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False, publisher=pub)
+        point = pub.points[0]
+        assert point["min_cell_voltage_v"] == 3.298
+        assert "read_error" in point
+
+    def test_a_failed_voltage_read_does_not_fail_the_tick(self, tmp_path, monkeypatch, caplog):
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.VOLTAGE_BLOCK[0]}))
+        pub = RecordingPublisher()
+        with caplog.at_level("WARNING"):
+            decision, _ = run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False,
+                                            publisher=pub)
+        assert decision.kind in ("command", "release", "idle")
+        point = pub.points[0]
+        assert not [k for k in point if "cell_voltage" in k]
+        assert "setpoint_w" in point
+        assert "voltage block read failed" in caplog.text
+
+    def test_an_all_zero_block_publishes_nothing_rather_than_a_dead_cell(
+            self, tmp_path, monkeypatch, caplog):
+        regs = measurement_registers()
+        for addr in range(R.VOLTAGE_BLOCK[0], R.VOLTAGE_BLOCK[0] + R.VOLTAGE_BLOCK[1]):
+            regs[addr] = 0
+        pub = RecordingPublisher()
+        with caplog.at_level("WARNING"):
+            run_scripted_tick(tmp_path, monkeypatch, ScriptedClient(regs), dry_run=False,
+                              publisher=pub)
+        assert not [k for k in pub.points[0] if "cell_voltage" in k]
+        assert "implausible cell voltages" in caplog.text
+
+    def test_an_implausible_scale_publishes_nothing(self, tmp_path, monkeypatch, caplog):
+        """Raw 32980/33120 is what this block would read if the scale were 0.0001 V/bit
+        rather than 0.001 -- the failure VOLTAGE_PLAUSIBLE_V exists for."""
+        regs = measurement_registers()
+        regs.update(voltage_registers(min_v=32.98, max_v=33.12))
+        pub = RecordingPublisher()
+        with caplog.at_level("WARNING"):
+            run_scripted_tick(tmp_path, monkeypatch, ScriptedClient(regs), dry_run=False,
+                              publisher=pub)
+        assert not [k for k in pub.points[0] if "cell_voltage" in k]
+        assert "implausible cell voltages" in caplog.text
+
+    def test_a_short_read_degrades_instead_of_killing_the_tick(self, tmp_path, monkeypatch,
+                                                               caplog):
+        class ShortVoltageClient(ScriptedClient):
+            async def read_holding_registers(self, addr, count=1, **kw):
+                r = await super().read_holding_registers(addr, count=count, **kw)
+                if addr == R.VOLTAGE_BLOCK[0]:
+                    return SimpleNamespace(isError=lambda: False, registers=r.registers[:4])
+                return r
+
+        pub = RecordingPublisher()
+        with caplog.at_level("WARNING"):
+            decision, _ = run_scripted_tick(
+                tmp_path, monkeypatch, ShortVoltageClient(measurement_registers()),
+                dry_run=False, publisher=pub)
+        assert decision is not None
+        point = pub.points[0]
+        assert not [k for k in point if "cell_voltage" in k]
+        assert "setpoint_w" in point
+        assert "expected 6 words, got 4" in caplog.text
+
+    def test_a_persistent_failure_warns_once_and_then_goes_quiet(self, tmp_path, monkeypatch,
+                                                                 caplog):
+        slots_path = tmp_path / "slots.json"
+        slots_path.write_text(json.dumps(doc()))
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.VOLTAGE_BLOCK[0]}))
+        inv = scheduler.Inverter(client, 0x55, dry_run=False)
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+
+        with caplog.at_level("WARNING"):
+            for i in range(3):
+                asyncio.run(scheduler.tick(inv, slots_path, cache,
+                                           T0 + dt.timedelta(seconds=60 * i)))
+        assert len([r for r in caplog.records
+                   if "voltage block read failed" in r.message]) == 1
+
+    def test_a_recovery_is_announced_so_the_quiet_is_readable(self, tmp_path, monkeypatch,
+                                                             caplog):
+        slots_path = tmp_path / "slots.json"
+        slots_path.write_text(json.dumps(doc()))
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.VOLTAGE_BLOCK[0]}))
+        inv = scheduler.Inverter(client, 0x55, dry_run=False)
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        asyncio.run(scheduler.tick(inv, slots_path, cache, T0))
+
+        client.fail_addrs = frozenset()
+        with caplog.at_level("INFO"):
+            asyncio.run(scheduler.tick(inv, slots_path, cache, T0 + dt.timedelta(seconds=60)))
+        assert "cell voltage readings recovered" in caplog.text
 
 
 class TestCellTemperature:

@@ -156,6 +156,23 @@ class Inverter:
             raise OSError(f"dispatch block read failed: {r}")
         return list(r.registers)
 
+    async def read_voltage_block(self) -> list[int]:
+        """The six battery cell-voltage words, verbatim.
+
+        Same read shape as `read_temp_block` immediately below -- the two blocks are adjacent
+        on the wire (0x0105-0x0110) but kept as separate reads, matching how every other block
+        in this file gets its own method rather than a merged multi-block read.
+        """
+        addr, count = R.VOLTAGE_BLOCK
+        try:
+            r = await self.c.read_holding_registers(addr,
+                                                    **{"count": count, self.kw: self.slave})
+        except ModbusException as e:  # see Inverter.read
+            raise OSError(f"voltage block read failed: {e}") from e
+        if r.isError():
+            raise OSError(f"voltage block read failed: {r}")
+        return list(r.registers)
+
     async def read_temp_block(self) -> list[int]:
         """The six battery cell-temperature words, verbatim.
 
@@ -671,7 +688,7 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     else:
         cache["write_verified"] = None
 
-    # 8b. Battery cell temperature, min and max across the whole fleet of packs.
+    # 8b. Battery cell voltage and temperature, min and max across the whole fleet of packs.
     #
     # Lettered rather than numbered because it is not a step in the control loop: the loop is
     # done deciding and done writing by the time this runs. It sits here, between the verify
@@ -684,15 +701,39 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # added to the delay before a command reaches the inverter; spent below, it delays a
     # dashboard field nobody is watching in real time.
     #
-    # `ValueError` is caught beside `OSError` because `decode_temp_block` raises it on a short
-    # reply -- a proxy or a firmware answering four words where six were asked for. That is a
-    # bad read like any other and must degrade to no fields, not take the tick down with it:
-    # an uncaught one here would reach `run()`'s catch-all and cost the whole `dispatch_state`
-    # point for that minute, which is the 2026-08-18 failure this file's docstring is about.
+    # Voltage and temperature are two separate reads (`registers.VOLTAGE_BLOCK` and
+    # `TEMP_BLOCK` are adjacent on the wire but not merged -- see `read_voltage_block`'s
+    # docstring) and two separate error variables, on purpose: a firmware that answers one
+    # block and not the other should not lose the field it could actually read.
     #
-    # `temps_plausible` is the scale guard documented in `registers.TEMP_PLAUSIBLE_C`, and it
-    # degrades exactly as the implausible power reading above does: publish nothing rather
-    # than a number that is wrong by a factor, or a zero-filled block's freezing battery.
+    # `ValueError` is caught beside `OSError` because `decode_temp_block`/`decode_voltage_block`
+    # raise it on a short reply -- a proxy or a firmware answering fewer words than asked for.
+    # That is a bad read like any other and must degrade to no fields, not take the tick down
+    # with it: an uncaught one here would reach `run()`'s catch-all and cost the whole
+    # `dispatch_state` point for that minute, which is the 2026-08-18 failure this file's
+    # docstring is about.
+    #
+    # `temps_plausible`/`voltage_plausible` are the scale guards documented in
+    # `registers.TEMP_PLAUSIBLE_C`/`VOLTAGE_PLAUSIBLE_V`, and they degrade exactly as the
+    # implausible power reading above does: publish nothing rather than a number that is wrong
+    # by a factor, or a zero-filled block's freezing/dead-cell battery.
+    voltage_error = ""
+    try:
+        voltages = R.decode_voltage_block(await inv.read_voltage_block())
+        if not R.voltage_plausible(voltages):
+            voltage_error, voltages = f"implausible cell voltages {voltages}", None
+    except (OSError, ValueError) as e:
+        voltage_error, voltages = f"voltage block read failed: {e}", None
+
+    was_voltage_failing = cache.get("voltage_error", "")
+    if voltage_error and not was_voltage_failing:
+        log.warning("%s -- publishing no voltage (further failures at debug)", voltage_error)
+    elif voltage_error:
+        log.debug("%s", voltage_error)
+    elif was_voltage_failing:
+        log.info("cell voltage readings recovered")
+    cache["voltage_error"] = voltage_error
+
     temp_error = ""
     try:
         temps = R.decode_temp_block(await inv.read_temp_block())
@@ -813,11 +854,13 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         # Read at step 4, from a register the dispatch block does not touch -- present even on
         # a tick that could not read the block at all, same argument as `live_soc_pct` above.
         "actual_battery_w": actual_battery_w,
-        # Read at step 8b, from its own block, and `None` whenever that read failed or looked
-        # implausible -- so an absent temperature field means "not read", never "cold".
+        # Read at step 8b, from their own blocks, and `None` whenever that read failed or
+        # looked implausible -- so an absent voltage/temperature field means "not read", never
+        # "dead cell"/"cold".
         #
-        # DELIBERATELY THE LAST READ OF THE TICK, unlike the two above: nothing decides on it,
-        # so it belongs behind the write rather than in front of it. See step 8b.
+        # DELIBERATELY THE LAST READS OF THE TICK, unlike the two above: nothing decides on
+        # them, so they belong behind the write rather than in front of it. See step 8b.
+        "voltages": voltages,
         "temps": temps,
         # Read at steps 8c/8d, each `None` whenever its gate had not elapsed this tick or its
         # read failed -- an absent field means "not read this tick", never "nothing wrong".

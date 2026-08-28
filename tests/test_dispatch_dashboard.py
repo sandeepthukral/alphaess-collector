@@ -54,6 +54,11 @@ def _allowed_last_windows(field: str) -> set[str]:
 TEMPS = {"min_cell_temp_c": 18.4, "min_cell_temp_pack": 1, "min_cell_temp_cell": 7,
          "max_cell_temp_c": 23.7, "max_cell_temp_pack": 3, "max_cell_temp_cell": 12}
 
+# Same reasoning as TEMPS: present in both fixtures so a voltage panel is checked against an
+# allowlist this repo actually publishes.
+VOLTAGES = {"min_cell_voltage_v": 3.298, "min_cell_voltage_pack": 3, "min_cell_voltage_cell": 7,
+           "max_cell_voltage_v": 3.312, "max_cell_voltage_pack": 1, "max_cell_voltage_cell": 12}
+
 # The health-poller's hourly/weekly fixtures, same reasoning as TEMPS above. Built by calling
 # the real decode functions on an all-zero block rather than hand-typing 64 field names, so
 # this allowlist can't drift from what `registers.py` actually produces if a block's size ever
@@ -79,7 +84,7 @@ def published_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z",
         reason="discharge 4500 W to 20.0%", live=True, live_soc_pct=41.2,
-        write_verified=True, actual_battery_w=-4300.0, temps=TEMPS,
+        write_verified=True, actual_battery_w=-4300.0, voltages=VOLTAGES, temps=TEMPS,
         faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
         inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG)
 
@@ -101,8 +106,8 @@ def degraded_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z", read_error="timed out",
         decision_kind="idle", reason="live SoC unreadable", live=True,
-        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0, temps=TEMPS,
-        faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
+        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0, voltages=VOLTAGES,
+        temps=TEMPS, faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
         inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG)
 
 
@@ -273,6 +278,8 @@ class TestConditionalFields:
         assert conditional_fields() == (
             {"expires_at", "slot_start", "slot_action", "plan_run",
              "verified", "soc_pct", "actual_battery_w",
+             "min_cell_voltage_v", "min_cell_voltage_pack",
+             "max_cell_voltage_v", "max_cell_voltage_pack",
              "min_cell_temp_c", "min_cell_temp_pack",
              "max_cell_temp_c", "max_cell_temp_pack",
              "max_charge_power_w", "max_discharge_power_w"}

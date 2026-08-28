@@ -34,6 +34,10 @@ def block(*, start=1, power_w=-4500, soc_pct=20.0, mode=2, duration=300) -> list
 TEMPS = {"min_cell_temp_c": 18.4, "min_cell_temp_pack": 1, "min_cell_temp_cell": 7,
          "max_cell_temp_c": 23.7, "max_cell_temp_pack": 3, "max_cell_temp_cell": 12}
 
+# One decoded voltage block, as `registers.decode_voltage_block` returns it.
+VOLTAGES = {"min_cell_voltage_v": 3.298, "min_cell_voltage_pack": 3, "min_cell_voltage_cell": 7,
+           "max_cell_voltage_v": 3.312, "max_cell_voltage_pack": 1, "max_cell_voltage_cell": 12}
+
 
 def state_of(**kw) -> tuple[dict, list[int]]:
     words = block(**kw)
@@ -263,6 +267,35 @@ class TestWhatTheDispatcherKnows:
     def test_a_degraded_point_with_no_temperatures_publishes_none(self):
         assert not [k for k in build_degraded_fields(read_error="timed out", temps=None)
                     if "cell_temp" in k]
+
+    def test_the_cell_voltages_are_carried(self):
+        """`registers.VOLTAGE_BLOCK`, decoded and published the same way as the temperatures
+        immediately above -- a separate read, a separate field group."""
+        s, words = state_of()
+        f = build_fields(s, words, NOW, voltages=VOLTAGES)
+        assert f["min_cell_voltage_v"] == 3.298
+        assert f["min_cell_voltage_pack"] == 3
+        assert f["max_cell_voltage_v"] == 3.312
+        assert f["max_cell_voltage_pack"] == 1
+
+    def test_the_voltage_cell_ids_are_decoded_but_not_published(self):
+        s, words = state_of()
+        f = build_fields(s, words, NOW, voltages=VOLTAGES)
+        assert "min_cell_voltage_cell" not in f and "max_cell_voltage_cell" not in f
+
+    def test_unread_voltages_publish_no_fields_at_all(self):
+        s, words = state_of()
+        f = build_fields(s, words, NOW, voltages=None)
+        assert not [k for k in f if "cell_voltage" in k]
+
+    def test_a_degraded_point_still_carries_the_voltages_when_that_read_worked(self):
+        f = build_degraded_fields(read_error="block read failed", voltages=VOLTAGES)
+        assert f["min_cell_voltage_v"] == 3.298
+        assert f["max_cell_voltage_pack"] == 1
+
+    def test_a_degraded_point_with_no_voltages_publishes_none(self):
+        assert not [k for k in build_degraded_fields(read_error="timed out", voltages=None)
+                    if "cell_voltage" in k]
 
     def test_the_fault_words_are_carried(self):
         """`registers.decode_fault_block`'s output merged straight in -- every raw word,

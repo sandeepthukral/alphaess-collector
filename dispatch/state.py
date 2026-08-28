@@ -46,6 +46,7 @@ def _decision_fields(
     live_soc_pct: float | None,
     write_verified: bool | None,
     actual_battery_w: float | None = None,
+    voltages: dict | None = None,
     temps: dict | None = None,
     faults: dict | None = None,
     limits_hourly: tuple[int | None, int | None] | None = None,
@@ -96,6 +97,14 @@ def _decision_fields(
     # the two can be compared on the same point without a sign flip or a cross-series join.
     if actual_battery_w is not None:
         fields["actual_battery_w"] = float(actual_battery_w)
+    # `registers.VOLTAGE_BLOCK`, read alongside temps at the same point in the tick and gated
+    # the same way -- absent means the block could not be read or decoded to a plausible
+    # voltage. Same MIN/MAX-across-all-packs shape as temps, cell IDs decoded but not published.
+    if voltages is not None:
+        fields["min_cell_voltage_v"] = float(voltages["min_cell_voltage_v"])
+        fields["min_cell_voltage_pack"] = int(voltages["min_cell_voltage_pack"])
+        fields["max_cell_voltage_v"] = float(voltages["max_cell_voltage_v"])
+        fields["max_cell_voltage_pack"] = int(voltages["max_cell_voltage_pack"])
     # `registers.TEMP_BLOCK`, the tick's LAST read -- taken after the write and the verify,
     # because nothing decides on a temperature and an observability read has no business
     # delaying a command (`scheduler.py` step 8b). Gated for the same
@@ -187,6 +196,7 @@ def build_fields(
     live_soc_pct: float | None = None,
     write_verified: bool | None = None,
     actual_battery_w: float | None = None,
+    voltages: dict | None = None,
     temps: dict | None = None,
     faults: dict | None = None,
     limits_hourly: tuple[int | None, int | None] | None = None,
@@ -220,7 +230,7 @@ def build_fields(
         "target_soc_pct": float(state["target_soc_pct"]),
         "duration_s": int(state["duration_s"]),
         **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
-                          actual_battery_w, temps, faults, limits_hourly, firmware,
+                          actual_battery_w, voltages, temps, faults, limits_hourly, firmware,
                           inverter_fw, system_config),
     }
 
@@ -258,6 +268,7 @@ def build_degraded_fields(
     live_soc_pct: float | None = None,
     write_verified: bool | None = None,
     actual_battery_w: float | None = None,
+    voltages: dict | None = None,
     temps: dict | None = None,
     faults: dict | None = None,
     limits_hourly: tuple[int | None, int | None] | None = None,
@@ -298,7 +309,7 @@ def build_degraded_fields(
     fields: dict[str, int | float | str] = {
         "read_error": read_error or "inverter unreadable",
         **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
-                          actual_battery_w, temps, faults, limits_hourly, firmware,
+                          actual_battery_w, voltages, temps, faults, limits_hourly, firmware,
                           inverter_fw, system_config),
     }
     if slot:

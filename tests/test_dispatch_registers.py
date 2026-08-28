@@ -175,6 +175,88 @@ class TestDecodeBlock:
             R.decode_block([0] * 8)
 
 
+class TestDecodeVoltageBlock:
+    """0x0105-0x010A. All six words are unsigned -- no signed/unsigned split to get wrong,
+    unlike the temp block immediately below it."""
+
+    def _block(self, *, min_v=3.312, max_v=3.298, min_pack=1, min_cell=7,
+               max_pack=3, max_cell=12):
+        """Six words as the inverter returns them, raw = V * 1000."""
+        words = [0] * 6
+        words[R.REG_MIN_CELL_VOLTAGE_PACK - R.REG_MIN_CELL_VOLTAGE_PACK] = min_pack
+        words[R.REG_MIN_CELL_VOLTAGE_CELL - R.REG_MIN_CELL_VOLTAGE_PACK] = min_cell
+        words[R.REG_MIN_CELL_VOLTAGE - R.REG_MIN_CELL_VOLTAGE_PACK] = round(min_v * 1000)
+        words[R.REG_MAX_CELL_VOLTAGE_PACK - R.REG_MIN_CELL_VOLTAGE_PACK] = max_pack
+        words[R.REG_MAX_CELL_VOLTAGE_CELL - R.REG_MIN_CELL_VOLTAGE_PACK] = max_cell
+        words[R.REG_MAX_CELL_VOLTAGE - R.REG_MIN_CELL_VOLTAGE_PACK] = round(max_v * 1000)
+        return words
+
+    def test_decodes_a_known_block(self):
+        assert R.decode_voltage_block(self._block()) == {
+            "min_cell_voltage_v": 3.312, "min_cell_voltage_pack": 1, "min_cell_voltage_cell": 7,
+            "max_cell_voltage_v": 3.298, "max_cell_voltage_pack": 3, "max_cell_voltage_cell": 12,
+        }
+
+    def test_the_ids_stay_unsigned(self):
+        voltages = R.decode_voltage_block(self._block(min_pack=0xFFFF, max_pack=0x8000))
+        assert voltages["min_cell_voltage_pack"] == 0xFFFF
+        assert voltages["max_cell_voltage_pack"] == 0x8000
+
+    def test_wrong_word_count_raises(self):
+        with pytest.raises(ValueError, match="expected 6 words"):
+            R.decode_voltage_block([0] * 5)
+
+
+class TestVoltagePlausible:
+    """The scale guard. `registers.VOLTAGE_PLAUSIBLE_V` is not a health threshold -- it is the
+    check that the address (see TODO.md #12, now resolved) and the x0.001 scale are the right
+    ones."""
+
+    def _voltages(self, min_v, max_v):
+        return {"min_cell_voltage_v": min_v, "min_cell_voltage_pack": 1,
+                "min_cell_voltage_cell": 1,
+                "max_cell_voltage_v": max_v, "max_cell_voltage_pack": 1,
+                "max_cell_voltage_cell": 2}
+
+    def test_a_normal_reading_passes(self):
+        assert R.voltage_plausible(self._voltages(3.298, 3.312))
+
+    def test_a_scale_wrong_by_a_factor_of_ten_is_rejected(self):
+        assert not R.voltage_plausible(self._voltages(32.98, 33.12))
+
+    def test_min_above_max_is_rejected(self):
+        assert not R.voltage_plausible(self._voltages(3.5, 3.1))
+
+    @pytest.mark.parametrize("voltage", [1.0, 5.0])
+    def test_the_bounds_are_inclusive(self, voltage):
+        assert R.voltage_plausible(self._voltages(voltage, voltage))
+
+    @pytest.mark.parametrize("voltage", [0.999, 5.001])
+    def test_just_outside_the_bounds_is_rejected(self, voltage):
+        assert not R.voltage_plausible(self._voltages(voltage, voltage))
+
+    def test_an_all_zero_block_is_rejected(self):
+        """Same tell as the temp block: an unsupported range or a dead BMS returns six zero
+        words, which decode to 0.0 V in pack 0 -- caught by the pack ID, not the voltage range,
+        since 0.0 V does at least fall outside VOLTAGE_PLAUSIBLE_V on its own already."""
+        assert not R.voltage_plausible(R.decode_voltage_block([0] * 6))
+
+    def test_a_zero_pack_id_is_rejected_even_beside_a_sane_voltage(self):
+        voltages = self._voltages(3.298, 3.312)
+        voltages["min_cell_voltage_pack"] = 0
+        assert not R.voltage_plausible(voltages)
+
+    def test_a_wild_pack_id_is_rejected(self):
+        voltages = self._voltages(3.298, 3.312)
+        voltages["max_cell_voltage_pack"] = 0xFFFF
+        assert not R.voltage_plausible(voltages)
+
+    def test_the_cell_ids_are_not_checked(self):
+        voltages = self._voltages(3.298, 3.312)
+        voltages["min_cell_voltage_cell"] = 0xFFFF
+        assert R.voltage_plausible(voltages)
+
+
 class TestDecodeTempBlock:
     """0x010B-0x0110. Six words whose signedness is not uniform: the two temperatures are
     signed, the four pack/cell IDs are not."""

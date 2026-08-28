@@ -67,6 +67,32 @@ REG_PV_METER = 161         # 0x00A1  2 words, signed, W. AC-coupled PV meter.
                            #         and read 0 forever on this site, which is an
                            #         AC-coupled install behind APsystems micro-inverters.
 
+# --- battery cell voltage, 0x0105-0x010A --------------------------------------------------
+# Six contiguous registers, immediately below the temperature block and read as its own
+# separate block (see TEMP_BLOCK below) -- same fleet-extremes shape, pack/cell/value-times-two.
+#
+# THE ADDRESS IS 0x0105, NOT 0x0106. `registers.py` carried a comment here (see TODO.md #12,
+# now resolved) citing Alpha2MQTT for `0x0106`-`0x010A`, 5 words -- the same comment that
+# diagnosed the temp block's OWN scale as a copy-paste from this one. That 5-word claim is
+# short by exactly one register: AlphaESS's own "Parameter address table" (via
+# `ha-alphaess-modbus`) lists six registers here, pack ID/cell ID/value twice over, and its
+# boundary lines up exactly with this repo's own 2026-08-27 live confirmation of TEMP_BLOCK at
+# 0x010B -- the six registers immediately below it can only start at 0x0105. Scale is
+# `0.001V/bit`, which Alpha2MQTT and the official table agree on even though they disagree on
+# the start address.
+REG_MIN_CELL_VOLTAGE_PACK = 261   # 0x0105  1 word,  unsigned, pack holding the lowest cell
+REG_MIN_CELL_VOLTAGE_CELL = 262   # 0x0106  1 word,  unsigned, cell within that pack
+REG_MIN_CELL_VOLTAGE = 263        # 0x0107  1 word,  unsigned, raw / 1000 -> volts
+REG_MAX_CELL_VOLTAGE_PACK = 264   # 0x0108  1 word,  unsigned, pack holding the highest cell
+REG_MAX_CELL_VOLTAGE_CELL = 265   # 0x0109  1 word,  unsigned, cell within that pack
+REG_MAX_CELL_VOLTAGE = 266        # 0x010A  1 word,  unsigned, raw / 1000 -> volts
+
+VOLTAGE_BLOCK = (REG_MIN_CELL_VOLTAGE_PACK, 6)
+
+# Wide on purpose, same argument as TEMP_PLAUSIBLE_C: not a health threshold, a decode check.
+# A scale wrong by a factor of ten lands far outside it, and so does a genuinely dead cell.
+VOLTAGE_PLAUSIBLE_V = (1.0, 5.0)
+
 # --- battery cell temperature, 0x010B-0x0110 ---------------------------------------------
 # Six contiguous registers, read as one block alongside the measurements above.
 #
@@ -81,7 +107,7 @@ REG_PV_METER = 161         # 0x00A1  2 words, signed, W. AC-coupled PV meter.
 # wrong: read unsigned, a cell at -0.1 C publishes as +6553.5 C.
 #
 # ON THE SCALE. Alpha2MQTT comments all six as `0.001D/bit`, which is a copy-paste of the cell
-# VOLTAGE block immediately above them (0x0106-0x010A, `0.001V/bit`): at 0.001 a signed 16-bit
+# VOLTAGE block immediately above them (0x0105-0x010A, `0.001V/bit`): at 0.001 a signed 16-bit
 # register would top out at 32.7 C, which is not a range anyone specs a battery over.
 # `ha-alphaess-modbus` documents these as int16 x0.1 C, and that is what is used here. Same
 # standing as REG_POWER's word count above -- community inference, not ground truth -- so
@@ -305,6 +331,45 @@ def decode_block(words: list[int]) -> dict:
         "target_soc_pct": decode_soc(at(REG_SOC)),
         "duration_s": decode(at(REG_TIME, 2)),
     }
+
+
+def decode_voltage_block(words: list[int]) -> dict:
+    """A 6-word read of VOLTAGE_BLOCK -> decoded battery cell-voltage state.
+
+    All six words are unsigned -- unlike the temp block, there is no signed/unsigned split to
+    get wrong here, only the scale. See the block comment above VOLTAGE_BLOCK.
+    """
+    if len(words) != VOLTAGE_BLOCK[1]:
+        raise ValueError(f"expected {VOLTAGE_BLOCK[1]} words, got {len(words)}")
+    base = VOLTAGE_BLOCK[0]
+    def at(addr, n=1):
+        i = addr - base
+        return words[i:i + n]
+
+    return {
+        "min_cell_voltage_v": round(decode(at(REG_MIN_CELL_VOLTAGE)) * 0.001, 3),
+        "min_cell_voltage_pack": decode(at(REG_MIN_CELL_VOLTAGE_PACK)),
+        "min_cell_voltage_cell": decode(at(REG_MIN_CELL_VOLTAGE_CELL)),
+        "max_cell_voltage_v": round(decode(at(REG_MAX_CELL_VOLTAGE)) * 0.001, 3),
+        "max_cell_voltage_pack": decode(at(REG_MAX_CELL_VOLTAGE_PACK)),
+        "max_cell_voltage_cell": decode(at(REG_MAX_CELL_VOLTAGE_CELL)),
+    }
+
+
+def voltage_plausible(voltages: dict) -> bool:
+    """False when a decoded voltage block cannot be describing this battery.
+
+    Same three-part shape as `temps_plausible` -- range, pack ID, min <= max -- and the same
+    reason for the pack-ID check: an all-zero block decodes to a perfectly in-range-looking
+    0.0 V in pack 0, and 0 is not an ID this hardware reports (PACK_ID_RANGE).
+    """
+    lo, hi = VOLTAGE_PLAUSIBLE_V
+    pack_lo, pack_hi = PACK_ID_RANGE
+    return (lo <= voltages["min_cell_voltage_v"] <= hi
+            and lo <= voltages["max_cell_voltage_v"] <= hi
+            and voltages["min_cell_voltage_v"] <= voltages["max_cell_voltage_v"]
+            and pack_lo <= voltages["min_cell_voltage_pack"] <= pack_hi
+            and pack_lo <= voltages["max_cell_voltage_pack"] <= pack_hi)
 
 
 def decode_temp_block(words: list[int]) -> dict:

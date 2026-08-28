@@ -15,10 +15,12 @@ SCOPE IS SMALLER THAN THE ORIGINAL HANDOVER ASKED FOR, on purpose. The health-po
 (#129) only ever shipped what had unambiguous register addressing: cell temperature (already
 existed), the fault/warning block as raw hex, the already-read power limits republished under
 health-dashboard field names, and the weekly firmware/inverter-firmware/system-config blocks as
-raw hex. Cell voltage, SoH, remaining time, daily energy and lifetime cycles are all still
-unconfirmed register layouts (TODO.md items 12-13) and `dispatch/state.py` never publishes
-them. A panel querying a field that is never written is not "no data yet", it is the exact
-mistake `tests/test_dispatch_dashboard.py::TestFieldContract::test_every_field_filter_names_a_field_we_publish`
+raw hex. Cell voltage (TODO.md item 12) was added once its address discrepancy resolved --
+see `dispatch/registers.py`'s VOLTAGE_BLOCK comment. SoH, remaining time, daily energy and
+lifetime cycles are still unconfirmed register layouts (TODO.md item 13) and
+`dispatch/state.py` never publishes them. A panel querying a field that is never written is
+not "no data yet", it is the exact mistake
+`tests/test_dispatch_dashboard.py::TestFieldContract::test_every_field_filter_names_a_field_we_publish`
 exists to catch -- so those panels are deferred to the same follow-up PR that adds their
 backend fields, rather than shipped now pointed at names nothing writes.
 
@@ -319,7 +321,31 @@ panels.append(stat(
     no_value="unreadable"))
 
 # =========================================================================================
-# Row 2, y=4 -- the week's thermal story
+# Row 1b, y=4 -- cell voltage, same tick cadence as row 1's temperature tiles
+# =========================================================================================
+#
+# No thresholds copied from anywhere -- alphaess-dashboard.json has never had a voltage panel
+# to copy from. `text` is deliberately neutral rather than a guessed red/green ladder: this
+# repo has no basis yet for what counts as a concerning cell voltage on this hardware, and an
+# invented threshold would be a health judgment dressed up as a fact.
+panels.append(stat(
+    12, "Min cell voltage",
+    "The lowest cell across the whole battery, tagged with which pack it is in. See "
+    "dispatch/registers.py's VOLTAGE_BLOCK comment for the address this reads and how it was "
+    "confirmed.",
+    HEALTH_LAST_TICK % "min_cell_voltage_v", "volt", 3, 0, 12,
+    [{"color": "text", "value": None}], y=4,
+    no_value="unreadable"))
+
+panels.append(stat(
+    13, "Max cell voltage",
+    "The highest cell across the whole battery, tagged with which pack it is in.",
+    HEALTH_LAST_TICK % "max_cell_voltage_v", "volt", 3, 12, 12,
+    [{"color": "text", "value": None}], y=4,
+    no_value="unreadable"))
+
+# =========================================================================================
+# Row 2, y=8 -- the week's thermal story
 # =========================================================================================
 #
 # DUPLICATED VERBATIM from alphaess-dashboard.json's panel id 30, query and series overrides
@@ -376,7 +402,7 @@ panels.append({
                 {"id": "displayName", "value": "max cell"}]),
         ],
     },
-    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 4},
+    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
     "id": 6,
     "options": {
         "legend": {"calcs": [], "displayMode": "list", "placement": "bottom",
@@ -396,7 +422,7 @@ panels.append({
 })
 
 # =========================================================================================
-# Row 3, y=12 -- the inverter's own ceilings, over time
+# Row 3, y=16 -- the inverter's own ceilings, over time
 # =========================================================================================
 panels.append(timeseries(
     7, "Charge / discharge power limits",
@@ -404,7 +430,7 @@ panels.append(timeseries(
     "time -- rather than jumping back up on the next hourly read -- is the inverter derating "
     "itself, which is worth noticing well before it shows up as a shortfall on the Dispatch "
     "dashboard.",
-    [target(LIMITS_HISTORY)], 0, 12, 24, 8, "watt",
+    [target(LIMITS_HISTORY)], 0, 16, 24, 8, "watt",
     [series_override("max charge", [
         {"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]),
      series_override("max discharge", [
@@ -412,7 +438,7 @@ panels.append(timeseries(
     fill=0))
 
 # =========================================================================================
-# Row 4, y=20 -- faults and warnings, raw
+# Row 4, y=24 -- faults and warnings, raw
 # =========================================================================================
 #
 # RAW WORDS ONLY. `registers.py`'s FAULT_BLOCK comment, and TODO.md item 15, explain why: a
@@ -427,10 +453,10 @@ panels.append(raw_table(
     "derived 'faults active' count -- only the raw words, to be checked against the AlphaESS "
     "app's own display.",
     raw_table_query("-3h", FAULT_FIELDS, "fault_raw_", "faults"),
-    0, 20, 24, 10))
+    0, 24, 24, 10))
 
 # =========================================================================================
-# Row 5, y=30 -- weekly tripwires, raw
+# Row 5, y=34 -- weekly tripwires, raw
 # =========================================================================================
 #
 # -10D RANGE, matching the poller's weekly gate (`WEEKLY_HEALTH_REFRESH_S`,
@@ -443,21 +469,21 @@ panels.append(raw_table(
     "weekly. Which word is which named value is not confirmed anywhere in this repo yet "
     "(TODO.md item 14), so this is the raw words rather than named fields.",
     raw_table_query("-10d", FIRMWARE_FIELDS, "firmware_raw_", "firmware"),
-    0, 30, 8, 10))
+    0, 34, 8, 10))
 
 panels.append(raw_table(
     10, "Inverter firmware (raw)",
     "INVERTER_FW_BLOCK, 0x0640-0x0653 (inverter master/slave firmware and serial), read "
     "weekly. Same raw-hex treatment as Firmware versions, and for the same reason.",
     raw_table_query("-10d", INVERTER_FW_FIELDS, "inverter_fw_raw_", "inverter_fw"),
-    8, 30, 8, 10))
+    8, 34, 8, 10))
 
 panels.append(raw_table(
     11, "System config (raw)",
     "SYSTEM_CONFIG_BLOCK, 0x0800-0x080F (max feed-into-grid %, PV capacity settings, system "
     "mode, battery-ready flag), read weekly. Same raw-hex treatment, and for the same reason.",
     raw_table_query("-10d", SYSTEM_CONFIG_FIELDS, "system_config_raw_", "system_config"),
-    16, 30, 8, 10))
+    16, 34, 8, 10))
 
 
 dashboard = {
@@ -507,7 +533,10 @@ dashboard = {
     #    deferred to the PR that adds their backend fields (TODO.md items 12-13) -- a dashboard
     #    panel naming a field dispatch/state.py never writes is exactly what
     #    test_every_field_filter_names_a_field_we_publish exists to catch.
-    "version": 1,
+    # 2: min/max cell voltage stats (row 1b, ids 12-13), now that TODO.md item 12's address
+    #    discrepancy is resolved and dispatch/state.py publishes min_cell_voltage_v/
+    #    max_cell_voltage_v. Every row from 2 down moves 4 rows to make room.
+    "version": 2,
     "weekStart": "",
 }
 
