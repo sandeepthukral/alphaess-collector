@@ -295,6 +295,75 @@ class TestTempsPlausible:
         assert R.temps_plausible(temps)
 
 
+class TestDecodeFaultBlock:
+    """0x0131-0x0146. No bit is named -- see the block comment above FAULT_BLOCK -- so this is
+    a raw passthrough plus a nonzero word count, not a scale/sign test like the temp block."""
+
+    def test_an_all_zero_block_has_no_active_faults(self):
+        fields = R.decode_fault_block([0] * 22)
+        assert fields["active_fault_count"] == 0
+        assert fields["fault_raw_0131"] == 0
+        assert fields["fault_raw_0146"] == 0
+
+    def test_counts_words_not_bits(self):
+        """A word with several bits set still counts once -- the count answers "how many
+        registers have something set", not "how many individual conditions are active",
+        because nothing here knows what a given bit means."""
+        words = [0] * 22
+        words[0] = 0b1011  # three bits set in one word
+        words[5] = 1
+        fields = R.decode_fault_block(words)
+        assert fields["active_fault_count"] == 2
+
+    def test_every_word_is_keyed_by_its_own_hex_address(self):
+        words = list(range(22))
+        fields = R.decode_fault_block(words)
+        assert fields["fault_raw_0131"] == 0
+        assert fields["fault_raw_0132"] == 1
+        assert fields["fault_raw_0146"] == 21
+
+    def test_wrong_word_count_raises(self):
+        with pytest.raises(ValueError, match="expected 22 words"):
+            R.decode_fault_block([0] * 21)
+
+
+class TestWeeklyRawBlocks:
+    """Firmware/serial/system-config blocks. Addressing is given cleanly by the register map;
+    which word is which named field is not, so these stay raw passthroughs -- see the block
+    comments above FIRMWARE_BLOCK/INVERTER_FW_BLOCK/SYSTEM_CONFIG_BLOCK."""
+
+    def test_decode_firmware_block_keys_by_hex_address(self):
+        fields = R.decode_firmware_block(list(range(6)))
+        assert fields == {
+            "firmware_raw_0115": 0, "firmware_raw_0116": 1, "firmware_raw_0117": 2,
+            "firmware_raw_0118": 3, "firmware_raw_0119": 4, "firmware_raw_011a": 5,
+        }
+
+    def test_decode_firmware_block_wrong_word_count_raises(self):
+        with pytest.raises(ValueError, match="expected 6 words"):
+            R.decode_firmware_block([0] * 5)
+
+    def test_decode_inverter_fw_block_keys_by_hex_address(self):
+        fields = R.decode_inverter_fw_block(list(range(20)))
+        assert fields["inverter_fw_raw_0640"] == 0
+        assert fields["inverter_fw_raw_0653"] == 19
+        assert len(fields) == 20
+
+    def test_decode_inverter_fw_block_wrong_word_count_raises(self):
+        with pytest.raises(ValueError, match="expected 20 words"):
+            R.decode_inverter_fw_block([0] * 19)
+
+    def test_decode_system_config_block_keys_by_hex_address(self):
+        fields = R.decode_system_config_block(list(range(16)))
+        assert fields["system_config_raw_0800"] == 0
+        assert fields["system_config_raw_080f"] == 15
+        assert len(fields) == 16
+
+    def test_decode_system_config_block_wrong_word_count_raises(self):
+        with pytest.raises(ValueError, match="expected 16 words"):
+            R.decode_system_config_block([0] * 15)
+
+
 class TestDescribe:
     def test_rows_carry_both_raw_and_meaning(self):
         """Half the value of the dashboard panel is checking a decode against the spec

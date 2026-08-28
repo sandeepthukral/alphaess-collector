@@ -135,6 +135,34 @@ POWER_OFFSET = 32000
 # 27 * 0.392 = 10.58 both round to 11. Do not treat it as confirmation.
 SOC_STEP = 0.4
 
+# --- health poller: fault/warning block, 0x0131-0x0146 -----------------------------------
+# Twenty-two contiguous registers, immediately after the inverter limits above. No bit-level
+# meaning is published here -- AlphaESS has not documented a fault/warning bit map anywhere
+# this repo has found, and guessing one risks mislabeling a real fault as benign, or vice
+# versa. Every word is republished raw, keyed by its own hex address, alongside a simple
+# nonzero count: enough to say "something is set" and point at exactly which register, without
+# inventing what it means.
+REG_FAULT_WARNING_START = 305   # 0x0131  22 words, raw hex, no decode
+FAULT_BLOCK = (REG_FAULT_WARNING_START, 22)
+
+# --- health poller: weekly tripwire blocks ------------------------------------------------
+# Firmware, serial numbers, and system configuration barely change -- a missed read costs
+# nothing here, unlike the hourly/tick tiers above. Like the fault block, these are republished
+# as raw words rather than decoded fields: which word within each block holds which named value
+# (BMU firmware version, max feed-into-grid %, ...) is not confirmed against any reference this
+# repo has, so inventing field boundaries risks the same "translation from memory" mistake this
+# module's docstring opens with. See TODO.md for the follow-up that decodes these properly.
+REG_BMU_FW_START = 277           # 0x0115  6 words: BMU/LMU/ISO firmware, battery
+                                  #         number/capacity/type
+FIRMWARE_BLOCK = (REG_BMU_FW_START, 6)
+
+REG_INVERTER_FW_START = 1600     # 0x0640  20 words: inverter master/slave firmware + serial
+INVERTER_FW_BLOCK = (REG_INVERTER_FW_START, 20)
+
+REG_SYSTEM_CONFIG_START = 2048   # 0x0800  16 words: max feed %, PV capacity settings, system
+                                  #         mode, battery-ready flag
+SYSTEM_CONFIG_BLOCK = (REG_SYSTEM_CONFIG_START, 16)
+
 
 class DispatchMode:
     """Only the modes with observed behaviour are named."""
@@ -328,6 +356,50 @@ def temps_plausible(temps: dict) -> bool:
             and temps["min_cell_temp_c"] <= temps["max_cell_temp_c"]
             and pack_lo <= temps["min_cell_temp_pack"] <= pack_hi
             and pack_lo <= temps["max_cell_temp_pack"] <= pack_hi)
+
+
+def decode_fault_block(words: list[int]) -> dict:
+    """A 22-word read of FAULT_BLOCK -> raw words, hex-keyed, plus a nonzero count.
+
+    No fault or warning bit is named -- see the block comment above FAULT_BLOCK for why. Every
+    word is kept so a real event is at least visible and locatable even though it is not yet
+    interpretable; `active_fault_count` is the one derived value, cheap and unambiguous
+    (a word count, not a bit count) precisely because it needs no knowledge of what any bit
+    means to be correct.
+    """
+    if len(words) != FAULT_BLOCK[1]:
+        raise ValueError(f"expected {FAULT_BLOCK[1]} words, got {len(words)}")
+    base = FAULT_BLOCK[0]
+    fields = {f"fault_raw_{base + i:04x}": word for i, word in enumerate(words)}
+    fields["active_fault_count"] = sum(1 for word in words if word != 0)
+    return fields
+
+
+def decode_firmware_block(words: list[int]) -> dict:
+    """A 6-word read of FIRMWARE_BLOCK -> raw words, hex-keyed. See FIRMWARE_BLOCK's comment:
+    which word is which named field is not confirmed, so nothing here is decoded."""
+    if len(words) != FIRMWARE_BLOCK[1]:
+        raise ValueError(f"expected {FIRMWARE_BLOCK[1]} words, got {len(words)}")
+    base = FIRMWARE_BLOCK[0]
+    return {f"firmware_raw_{base + i:04x}": word for i, word in enumerate(words)}
+
+
+def decode_inverter_fw_block(words: list[int]) -> dict:
+    """A 20-word read of INVERTER_FW_BLOCK -> raw words, hex-keyed. See INVERTER_FW_BLOCK's
+    comment."""
+    if len(words) != INVERTER_FW_BLOCK[1]:
+        raise ValueError(f"expected {INVERTER_FW_BLOCK[1]} words, got {len(words)}")
+    base = INVERTER_FW_BLOCK[0]
+    return {f"inverter_fw_raw_{base + i:04x}": word for i, word in enumerate(words)}
+
+
+def decode_system_config_block(words: list[int]) -> dict:
+    """A 16-word read of SYSTEM_CONFIG_BLOCK -> raw words, hex-keyed. See SYSTEM_CONFIG_BLOCK's
+    comment."""
+    if len(words) != SYSTEM_CONFIG_BLOCK[1]:
+        raise ValueError(f"expected {SYSTEM_CONFIG_BLOCK[1]} words, got {len(words)}")
+    base = SYSTEM_CONFIG_BLOCK[0]
+    return {f"system_config_raw_{base + i:04x}": word for i, word in enumerate(words)}
 
 
 def describe(state: dict) -> list[tuple[str, str, int, str]]:

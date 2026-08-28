@@ -47,6 +47,11 @@ def _decision_fields(
     write_verified: bool | None,
     actual_battery_w: float | None = None,
     temps: dict | None = None,
+    faults: dict | None = None,
+    limits_hourly: tuple[int | None, int | None] | None = None,
+    firmware: dict | None = None,
+    inverter_fw: dict | None = None,
+    system_config: dict | None = None,
 ) -> dict[str, int | float | str]:
     """What the DISPATCHER knows about this tick, as opposed to what the inverter said.
 
@@ -108,6 +113,32 @@ def _decision_fields(
         fields["min_cell_temp_pack"] = int(temps["min_cell_temp_pack"])
         fields["max_cell_temp_c"] = float(temps["max_cell_temp_c"])
         fields["max_cell_temp_pack"] = int(temps["max_cell_temp_pack"])
+    # `registers.FAULT_BLOCK`, hourly-gated (`scheduler.py` step 8c). No fault/warning bit is
+    # named -- see that block's comment -- so every word is published as-is, hex-keyed, plus
+    # the one derived value that needs no bit-level knowledge to be correct: a nonzero count.
+    if faults is not None:
+        fields.update({k: int(v) for k, v in faults.items()})
+    # The inverter's own charge/discharge ceiling, already read hourly by `run()`'s
+    # LIMITS_REFRESH_S for the clamp in `slots.clamp` -- republished here under the health
+    # dashboard's field names rather than re-read, so this is the one field in this function
+    # that can be present without a register having been touched THIS tick. Each half is
+    # independently absent when `Inverter.limits()` itself could not read it.
+    if limits_hourly is not None:
+        max_charge, max_discharge = limits_hourly
+        if max_charge is not None:
+            fields["max_charge_power_w"] = int(max_charge)
+        if max_discharge is not None:
+            fields["max_discharge_power_w"] = int(max_discharge)
+    # `registers.FIRMWARE_BLOCK`/`INVERTER_FW_BLOCK`/`SYSTEM_CONFIG_BLOCK`, weekly-gated
+    # (`scheduler.py` step 8d) -- a tripwire, not a trend. Same raw-hex treatment as `faults`
+    # and for the same reason: which word holds which named value is not confirmed anywhere in
+    # this repo, so nothing here is decoded into a named field yet.
+    if firmware is not None:
+        fields.update({k: int(v) for k, v in firmware.items()})
+    if inverter_fw is not None:
+        fields.update({k: int(v) for k, v in inverter_fw.items()})
+    if system_config is not None:
+        fields.update({k: int(v) for k, v in system_config.items()})
     return fields
 
 
@@ -157,6 +188,11 @@ def build_fields(
     write_verified: bool | None = None,
     actual_battery_w: float | None = None,
     temps: dict | None = None,
+    faults: dict | None = None,
+    limits_hourly: tuple[int | None, int | None] | None = None,
+    firmware: dict | None = None,
+    inverter_fw: dict | None = None,
+    system_config: dict | None = None,
 ) -> dict:
     """One `dispatch_state` point's fields. Pure -- every value is a function of the inputs.
 
@@ -184,7 +220,8 @@ def build_fields(
         "target_soc_pct": float(state["target_soc_pct"]),
         "duration_s": int(state["duration_s"]),
         **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
-                          actual_battery_w, temps),
+                          actual_battery_w, temps, faults, limits_hourly, firmware,
+                          inverter_fw, system_config),
     }
 
     # `expires_at` is when the dead man's switch runs out if nothing is written again. It is
@@ -222,6 +259,11 @@ def build_degraded_fields(
     write_verified: bool | None = None,
     actual_battery_w: float | None = None,
     temps: dict | None = None,
+    faults: dict | None = None,
+    limits_hourly: tuple[int | None, int | None] | None = None,
+    firmware: dict | None = None,
+    inverter_fw: dict | None = None,
+    system_config: dict | None = None,
 ) -> dict:
     """One `dispatch_state` point for a tick that decided but could not read the inverter.
 
@@ -244,7 +286,9 @@ def build_degraded_fields(
     the decision was made against, and dropping it because some other read failed would throw
     away a value that was successfully obtained. `actual_battery_w` is a third, separate read
     for the same reason -- the dispatch block can fail while the battery-power register still
-    answers -- and the cell temperatures are a fourth.
+    answers -- and the cell temperatures are a fourth. The health-poller fields (faults,
+    limits, firmware, system config) are independent reads too, on their own gates, so a
+    failed dispatch-block read has no bearing on whether they made it onto this point.
 
     Not merged into `build_fields()` with optional arguments: that function's contract is
     "every value is a function of a readback", and a version of it that sometimes has no
@@ -254,7 +298,8 @@ def build_degraded_fields(
     fields: dict[str, int | float | str] = {
         "read_error": read_error or "inverter unreadable",
         **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
-                          actual_battery_w, temps),
+                          actual_battery_w, temps, faults, limits_hourly, firmware,
+                          inverter_fw, system_config),
     }
     if slot:
         fields["slot_start"] = int(
