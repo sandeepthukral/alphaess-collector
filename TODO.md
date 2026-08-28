@@ -134,6 +134,15 @@ cross-checking the AlphaESS app's own fault/warning display, identify which word
 genuinely always-zero-when-healthy, and only then add a derived count — scoped to just those
 words, not the whole block — back to `decode_fault_block`.
 
+Also raised in the same review, and worth deciding alongside this rather than separately: the
+block is sampled once an hour (`HEALTH_REFRESH_S`, `scheduler.py` step 8c), with no latching,
+so a fault that raises and clears again inside that hour is never observed at all -- the
+dashboard would show clean the whole time. The hourly cadence itself was the handover's own
+choice, not something to second-guess before the block's contents are even confirmed, but once
+items 12-15 settle what these words actually mean, it's worth asking then whether a genuinely
+fault-carrying word should be sampled every tick (like the temp block) or latched sticky
+("seen nonzero since last hourly publish") rather than read only at the instant the gate fires.
+
 ## Docs
 
 **8. `DEPLOY.md`'s "The two battery-plan dashboards are generated, not exported" is out of

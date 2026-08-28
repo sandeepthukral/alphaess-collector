@@ -136,10 +136,11 @@ POWER_OFFSET = 32000
 SOC_STEP = 0.4
 
 # --- health poller: fault/warning block, 0x0131-0x0146 -----------------------------------
-# Twenty-two contiguous registers, immediately after the inverter limits above. No bit-level
-# meaning is published here -- AlphaESS has not documented a fault/warning bit map anywhere
-# this repo has found, and guessing one risks mislabeling a real fault as benign, or vice
-# versa. Every word is republished raw, keyed by its own hex address.
+# Twenty-two contiguous registers, a few addresses past the inverter limits above -- 0x012E,
+# 0x012F and 0x0130 sit unused in between, not part of this block. No bit-level meaning is
+# published here -- AlphaESS has not documented a fault/warning bit map anywhere this repo has
+# found, and guessing one risks mislabeling a real fault as benign, or vice versa. Every word
+# is republished raw, keyed by its own hex address.
 #
 # NO DERIVED "nonzero word count" EITHER, and that is deliberate, not an oversight: this range
 # is not confirmed to be fault/warning bits exclusively. If even one word in it is a normally-
