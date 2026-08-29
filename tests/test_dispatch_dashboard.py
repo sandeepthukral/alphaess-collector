@@ -319,6 +319,41 @@ class TestConditionalFields:
             assert "dispatch_active" in q, (
                 f"{dash}: the countdown is not gated on a command being live")
 
+    def test_the_commanded_target_cannot_run_off_a_stale_register(self):
+        """The mirror image of the trap this class is named for, and the reason it belongs
+        beside it: `target_soc_pct` is written on EVERY tick, so no `exists` guard can catch
+        it -- and it is still meaningless most of the time.
+
+        0x0886 is a register, not a command. `scheduler.release()` writes only REG_START=0
+        and leaves the rest of the block standing, and a Mode 3 hold never writes a target at
+        all, so a plain `last()` reports a target for a battery nothing is driving toward. It
+        read a confident `0 %` beside a plan table saying the SoC after this interval should
+        be 10 %: two numbers that looked like a disagreement and were a dead register next to
+        a live forecast.
+
+        `mode == 2` is the half a `dispatch_active` check alone would miss. An active Mode 3
+        hold is a live command that carries no target (`slots.py:228`), so gating on liveness
+        alone would still show the stale one -- the register is only the command's target
+        while a SoC-target command is what is live.
+        """
+        found = _panels_reading("target_soc_pct")
+        assert found, "no stat reads `target_soc_pct` -- the guard found nothing"
+        for dashboard, title, panel in found:
+            query = " ".join(t["query"] for t in panel["targets"])
+            assert "dispatch_active" in query, (
+                f"{dashboard} / {title}: the target is not gated on a command being live")
+            assert '_field == "mode"' in query and "mode == 2" in query, (
+                f"{dashboard} / {title}: the target is not gated on Mode 2, so an active "
+                f"hold -- which writes no target -- still shows the last one")
+            defaults = panel["fieldConfig"]["defaults"]
+            base = next(s for s in defaults["thresholds"]["steps"] if s["value"] is None)
+            assert base["color"] != "red", (
+                f"{dashboard} / {title}: the base step colours noValue, and noValue here "
+                f"means 'nothing is driving a target' -- the whole of a dry-run day")
+            assert defaults.get("noValue"), (
+                f"{dashboard} / {title}: an unlabelled blank reads as a broken panel; say "
+                f"which absence this is")
+
 
 class TestTheGeneratorsAgree:
     """Two generators now build dispatch panels, and they share no module.
