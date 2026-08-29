@@ -105,6 +105,16 @@ through the **Energy Losses** dashboard
 InfluxDB's own UI is also available at http://localhost:8086 (login with
 `INFLUX_ADMIN_USER`/`INFLUX_ADMIN_PASSWORD`).
 
+### Container logs
+
+The **NAS → Container Logs** dashboard shows the logs of every container on the host,
+across every compose project, with a saved filter for warnings and errors — `docker
+logs` for everything at once. It reads Loki, which is run by the separate
+[**nas-observability**](https://github.com/sandeepthukral/nas-observability) stack; this
+repo provides the datasource, the dashboard and the error alert rule. A project needs no
+logging configuration to appear there. See
+[DEPLOY.md, "Container logs"](DEPLOY.md#container-logs).
+
 ## Verify sign conventions
 
 Before trusting dashboards, check what signs your system actually reports for

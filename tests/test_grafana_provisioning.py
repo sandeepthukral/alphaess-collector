@@ -37,6 +37,11 @@ DS_UID = "alphaess"
 # Panels whose datasource is one of Grafana's built-ins rather than InfluxDB.
 BUILTIN_UIDS = {"-- Grafana --", "-- Mixed --", "-- Dashboard --", "__expr__"}
 
+# The log store, provisioned beside InfluxDB. Its dashboard and alert live in this repo
+# while the loki/alloy services live in nas-observability; see the NAS section at the
+# bottom of this file.
+LOKI_UID = "loki"
+
 
 def test_dashboards_were_found():
     """Guard against the glob silently matching nothing.
@@ -596,7 +601,7 @@ ALERT_FILES = sorted((PROVISIONING / "alerting").glob("*.yml"))
 
 def test_alert_rules_were_found():
     """Same failure mode as the dashboard glob: match nothing, test nothing, pass."""
-    assert len(ALERT_FILES) == 2
+    assert len(ALERT_FILES) == 3
 
 
 @pytest.mark.parametrize("path", ALERT_FILES, ids=lambda p: p.name)
@@ -609,7 +614,10 @@ def test_alert_rule_names_its_datasource(path):
         for query in rule["data"]
     ]
     assert uids, f"expected {path.name} to carry queries"
-    assert all(uid == DS_UID or uid in BUILTIN_UIDS for uid in uids), uids
+    # `loki` alongside `alphaess`: the container-log rule queries the log store rather
+    # than InfluxDB. Both are named explicitly, which is the property this test exists
+    # for -- neither is allowed to be the default.
+    assert all(uid in (DS_UID, LOKI_UID) or uid in BUILTIN_UIDS for uid in uids), uids
 
 
 def test_alert_rule_uids_are_unique():
@@ -623,7 +631,13 @@ def test_alert_rule_uids_are_unique():
 
 
 def test_dashboard_provider_and_alert_folder_agree():
-    """Grafana matches the folder by title, so the files must agree exactly."""
+    """Grafana matches the folder by title, so the files must agree exactly.
+
+    Two folders now: AlphaESS for this project, NAS for the host-wide container logs,
+    which cover every project on the machine and would be misfiled under AlphaESS. The
+    set is pinned rather than counted so a third folder appearing by typo -- "Nas",
+    "NAS " -- fails here instead of quietly becoming a fourth folder in the UI.
+    """
     providers = yaml.safe_load(
         (PROVISIONING / "dashboards" / "dashboards.yml").read_text(encoding="utf-8")
     )["providers"]
@@ -631,7 +645,7 @@ def test_dashboard_provider_and_alert_folder_agree():
     for path in ALERT_FILES:
         folders |= {g["folder"]
                     for g in yaml.safe_load(path.read_text(encoding="utf-8"))["groups"]}
-    assert folders == {"AlphaESS"}
+    assert folders == {"AlphaESS", "NAS"}
 
 
 def test_status_panel_and_staleness_alert_share_a_threshold():
@@ -777,3 +791,172 @@ def test_the_dispatch_action_table_says_it_is_not_the_command():
     _, plan = _panels_by_title("alphaess-battery-plan.json")
     description = plan["What dispatch would do, interval by interval"]["description"]
     assert "actual SoC" in description
+
+
+# --------------------------------------------------------------------------------------
+# NAS-wide container logs (Loki).
+#
+# The `loki` and `alloy` services live in the nas-observability repo; the datasource, the
+# dashboard and the alert rule live here, because Grafana provisioning cannot be owned by
+# two repos at once. That split is exactly why these need tests: nothing in either repo
+# fails loudly when the two halves disagree.
+#
+# grafana/nas/nas-logs.json is deliberately in a SUBDIRECTORY so the DASHBOARDS glob above
+# does not pick it up -- it queries Loki, not InfluxDB, so every rule in this file about
+# ${DS_ALPHAESS} and Flux is wrong for it. It gets its own checks below instead.
+# --------------------------------------------------------------------------------------
+
+NAS_DASHBOARD = REPO / "grafana" / "nas" / "nas-logs.json"
+NAS_ALERT = PROVISIONING / "alerting" / "nas-log-errors.yml"
+
+# Two things set the level and they disagree on case: Alloy parses the Python services
+# explicitly and keeps Python's spelling (WARNING, ERROR), while Loki's own
+# discover_log_levels heuristic classifies everything else in lowercase (warn, error).
+CASE_INSENSITIVE = "(?i)"
+
+
+def test_the_nas_dashboard_is_not_in_the_alphaess_glob():
+    """Guards the arrangement the rest of these tests depend on.
+
+    Moved up to grafana/, nas-logs.json joins DASHBOARDS and fails half the file at once:
+    it names `uid: loki` rather than ${DS_ALPHAESS}, and it is mounted to a different path
+    than dashboard-src. The failures would be real but would read as bugs in the dashboard
+    rather than as it being in the wrong folder.
+    """
+    assert NAS_DASHBOARD.exists()
+    assert NAS_DASHBOARD not in DASHBOARDS
+
+
+def test_the_loki_datasource_is_provisioned_and_not_default():
+    """The dashboard and the alert rule both name `uid: loki`; nothing else creates it.
+
+    isDefault is checked for every datasource by test_no_datasource_claims_isdefault, but
+    it is worth naming the consequence for this one specifically: a log store winning the
+    default would make every InfluxDB panel that ever relies on it query logs, and Grafana
+    would report that as an empty panel rather than an error.
+    """
+    doc = yaml.safe_load((PROVISIONING / "datasources" / "loki.yml").read_text("utf-8"))
+    (ds,) = doc["datasources"]
+    assert ds["uid"] == LOKI_UID
+    assert ds["type"] == "loki"
+    assert not ds.get("isDefault")
+    # The service name on alphaess-net, not the NAS's IP -- the same rule DEPLOY.md,
+    # "Sharing the stack" states for INFLUX_URL.
+    assert ds["url"] == "http://loki:3100"
+
+
+def test_the_nas_dashboard_is_mounted_at_its_own_path():
+    """Same failure as test_every_dashboard_is_mounted, different path.
+
+    This one cannot share that test: dashboard-src exists only so the entrypoint's sed can
+    substitute ${DS_ALPHAESS}, and a Loki dashboard put through it would be provisioned
+    into the AlphaESS folder by the wrong provider.
+    """
+    compose = (REPO / "docker-compose.yml").read_text(encoding="utf-8")
+    mount = "./grafana/nas/nas-logs.json:/etc/grafana/dashboards-nas/nas-logs.json:ro"
+    assert mount in compose, "nas-logs.json is not mounted into Grafana"
+
+
+def test_the_nas_provider_and_alert_agree_on_the_folder():
+    """Grafana matches a provisioned folder by title, so a typo puts the dashboard and the
+    alert that links to it in two different folders -- both present, neither wrong-looking.
+
+    The same coupling the AlphaESS provider's own comment warns about, one folder along.
+    """
+    providers = yaml.safe_load(
+        (PROVISIONING / "dashboards" / "dashboards.yml").read_text("utf-8"))
+    nas = [p for p in providers["providers"] if p["name"] == "nas"]
+    assert len(nas) == 1, [p["name"] for p in providers["providers"]]
+    assert nas[0]["options"]["path"] == "/etc/grafana/dashboards-nas"
+
+    alert = yaml.safe_load(NAS_ALERT.read_text("utf-8"))
+    assert alert["groups"][0]["folder"] == nas[0]["folder"] == "NAS"
+
+
+def test_every_nas_panel_names_the_loki_datasource():
+    """The default-datasource rule the AlphaESS dashboards are held to, applied here.
+
+    Worth restating rather than assuming: this dashboard was written by hand against a
+    datasource that did not exist yet, which is the situation in which a panel most easily
+    ends up with none.
+    """
+    dash = json.loads(NAS_DASHBOARD.read_text(encoding="utf-8"))
+    unnamed = []
+    for panel in dash["panels"]:
+        for node in [panel, *panel.get("targets", [])]:
+            ds = node.get("datasource")
+            uid = ds.get("uid") if isinstance(ds, dict) else ds
+            if uid not in (LOKI_UID, *BUILTIN_UIDS):
+                unnamed.append((panel.get("title"), uid))
+    assert unnamed == []
+
+
+def test_nas_panel_ids_are_unique():
+    """Grafana tolerates a duplicate panel id silently; see test_panel_ids_are_unique."""
+    ids = [p["id"] for p in json.loads(NAS_DASHBOARD.read_text())["panels"]]
+    assert len(ids) == len(set(ids)), f"duplicate panel ids {sorted(ids)}"
+
+
+def test_no_two_nas_panels_overlap_in_the_grid():
+    """Two panels claiming a cell is resolved by Grafana moving one, so what deploys is not
+    what the file describes. Same check as the AlphaESS dashboards get."""
+    occupied: dict[tuple[int, int], int] = {}
+    for panel in json.loads(NAS_DASHBOARD.read_text())["panels"]:
+        g = panel["gridPos"]
+        for y in range(g["y"], g["y"] + g["h"]):
+            for x in range(g["x"], g["x"] + g["w"]):
+                clash = occupied.get((x, y))
+                assert clash is None, (
+                    f"panels {clash} and {panel['id']} both occupy cell (x={x}, y={y})")
+                occupied[(x, y)] = panel["id"]
+
+
+def _detected_level_queries():
+    """Every query in this repo that filters on log severity, as (where, query) pairs."""
+    found = []
+    dash = json.loads(NAS_DASHBOARD.read_text(encoding="utf-8"))
+    for panel in dash["panels"]:
+        for target in panel.get("targets", []):
+            if "detected_level" in target.get("expr", ""):
+                found.append((f"nas-logs.json/{panel['title']}", target["expr"]))
+    alert = yaml.safe_load(NAS_ALERT.read_text("utf-8"))
+    for rule in alert["groups"][0]["rules"]:
+        for query in rule["data"]:
+            expr = query.get("model", {}).get("expr", "")
+            if "detected_level" in expr:
+                found.append((f"nas-log-errors.yml/{rule['uid']}", expr))
+    return found
+
+
+def test_every_severity_filter_is_case_insensitive():
+    """`detected_level = "error"` silently sees only half the errors on the NAS.
+
+    Alloy attaches the level for the Python services in this repo by parsing their
+    `%(levelname)s` directly, so those arrive as ERROR. Everything else -- Grafana,
+    InfluxDB, any third-party image -- is classified by Loki's own heuristic, which emits
+    lowercase. Match one spelling and the other's errors are simply absent: no error, no
+    empty panel, just a shorter list that looks complete.
+
+    This is the failure mode the whole log stack exists to prevent, so it gets a test
+    rather than a comment.
+    """
+    queries = _detected_level_queries()
+    assert queries, "no severity filters found -- has the query shape changed?"
+    missing = [where for where, q in queries if CASE_INSENSITIVE not in q]
+    assert missing == [], f"severity filter is case-sensitive in: {missing}"
+
+
+def test_the_log_error_alert_treats_no_data_as_healthy():
+    """The one setting on this rule that is easy to get backwards.
+
+    `count_over_time` returns no series when nothing matched, so "no errors in five
+    minutes" and "Loki is unreachable" arrive identically. noDataState: Alerting would
+    therefore fire continuously on a quiet, working NAS -- and a rule that is always red
+    is a rule nobody reads. Loki being down is covered by its own container healthcheck.
+    """
+    alert = yaml.safe_load(NAS_ALERT.read_text("utf-8"))
+    (rule,) = alert["groups"][0]["rules"]
+    assert rule["noDataState"] == "OK"
+    # And the debounce, which is what keeps a single transient ERROR from paging: the
+    # collector logs one on a failed poll and recovers on the next.
+    assert rule["for"] == "5m"

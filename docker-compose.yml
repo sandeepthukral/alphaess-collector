@@ -350,6 +350,13 @@ services:
       - ./grafana/alphaess-dispatch.json:/etc/grafana/dashboard-src/alphaess-dispatch.json:ro
       - ./grafana/alphaess-battery-score.json:/etc/grafana/dashboard-src/alphaess-battery-score.json:ro
       - ./grafana/alphaess-battery-health.json:/etc/grafana/dashboard-src/alphaess-battery-health.json:ro
+      # NAS-wide container logs, read from Loki (nas-observability repo). Mounted
+      # straight to /etc/grafana/dashboards-nas rather than into dashboard-src: the
+      # entrypoint's sed loop above exists only to substitute ${DS_ALPHAESS}, and this
+      # dashboard names `uid: loki` directly. Provisioned by the `nas` provider in
+      # grafana/provisioning/dashboards/dashboards.yml, into a NAS folder -- it covers
+      # every container on the host, not just this project's.
+      - ./grafana/nas/nas-logs.json:/etc/grafana/dashboards-nas/nas-logs.json:ro
     depends_on:
       influxdb:
         condition: service_healthy

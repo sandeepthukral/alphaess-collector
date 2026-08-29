@@ -1,0 +1,97 @@
+# Alerts when any container on the NAS logs an error.
+#
+# The companion to the two rules beside this one, and the opposite kind of check. Those
+# watch for data that should be arriving and is not; this one watches for lines that
+# should not be arriving and are. Between them: a container that has gone quiet, and a
+# container that is loudly failing while still writing.
+#
+# Reads Loki through the `loki` datasource (grafana/provisioning/datasources/loki.yml),
+# which is fed by the nas-observability stack. If that stack is not running this rule
+# sits in No Data, which is deliberately NOT an alerting state here -- see noDataState.
+#
+# DELIVERY IS NOT PROVISIONED, same as the two rules beside it. Grafana shows the rule
+# firing; getting that to your phone is a contact point, and DEPLOY.md, "Container logs"
+# describes the Uptime Kuma route -- a Json Query monitor polling Loki, which is the
+# direction that actually works with Kuma's push semantics.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: nas-logs
+    # Must match the folder of the `nas` dashboard provider in
+    # provisioning/dashboards/dashboards.yml, so the alert and the dashboard it sends you
+    # to are in the same place. Matched by title, so the two files must agree exactly.
+    folder: NAS
+    interval: 1m
+    rules:
+      - uid: nas-container-log-errors
+        title: Container logging errors
+        condition: C
+        # Five minutes of continuous errors, not one line. A single ERROR is routine --
+        # the collector logs one on a failed poll and recovers on the next -- and paging
+        # on it would train you to ignore this rule within a week. A container that is
+        # genuinely broken keeps producing them, so it clears this and a transient does
+        # not.
+        for: 5m
+        # NO DATA IS THE HEALTHY STATE HERE, and this is the one setting on this rule
+        # that is easy to get backwards. `count_over_time` returns no series at all when
+        # nothing matched, so "no errors in the last five minutes" and "Loki is down"
+        # arrive identically. Alerting on that would mean the rule fires constantly on a
+        # quiet, working NAS. Loki being down is covered by the container's own
+        # healthcheck instead.
+        noDataState: OK
+        execErrState: Alerting
+        labels:
+          service: nas-logs
+        annotations:
+          summary: >-
+            {{ $values.B.Value }} error lines logged on the NAS in the last 5 minutes.
+          description: >-
+            Open Dashboards -> NAS -> Container Logs and read the "Errors and warnings"
+            panel, which is the same query with the log bodies attached. The "Errors and
+            warnings by project" panel above it names the repo. `sudo docker logs` on
+            that container is still the fallback if you need lines from before Alloy
+            started collecting.
+        data:
+          # A: how many error-level lines each container produced, per 5-minute window.
+          #
+          # Case-insensitive, because two things set the level and they disagree on case:
+          # Alloy parses the Python services explicitly and keeps Python's spelling
+          # (ERROR), while Loki's own heuristic classifies everything else in lowercase
+          # (error). Matching only one spelling would silently halve what this rule sees.
+          #
+          # Warnings are deliberately excluded. They are routine on several of these
+          # containers -- pricing.py logs one for every day it excludes -- and including
+          # them would make this rule fire most nights for something that is working as
+          # designed.
+          - refId: A
+            relativeTimeRange:
+              from: 300
+              to: 0
+            datasourceUid: loki
+            model:
+              refId: A
+              queryType: range
+              expr: >-
+                sum(count_over_time({container=~".+"}
+                | detected_level =~ "(?i)(error|critical|fatal)" [5m]))
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          # C: any error at all. The threshold is 0 rather than a tolerance because the
+          # debounce is `for: 5m` above -- this rule's job is to notice errors that
+          # persist, not to decide how many errors are acceptable.
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]

@@ -1,0 +1,33 @@
+# Logs from every container on the NAS, collected by the nas-observability stack.
+#
+# That repo owns the `loki` and `alloy` services; this one owns Grafana, so the
+# datasource, the Container Logs dashboard (grafana/nas/nas-logs.json) and the error
+# alert rule are provisioned from here. Grafana provisioning cannot be owned by two
+# repos at once -- two files claiming the same datasource name is resolved by file load
+# order, silently.
+apiVersion: 1
+
+datasources:
+  - name: loki
+    uid: loki
+    type: loki
+    access: proxy
+    # Service name on alphaess-net, which nas-observability joins as external. Not the
+    # NAS's IP -- see the same reasoning on INFLUX_URL in DEPLOY.md, "Sharing the stack".
+    url: http://loki:3100
+
+    # Deliberately NOT isDefault, for the reason spelled out at length in influxdb.yml:
+    # two datasources claiming the default is the collision that fails invisibly, and a
+    # Loki datasource silently winning it would make every unqualified InfluxDB panel
+    # query a log store. Enforced by tests/test_grafana_provisioning.py.
+
+    # No token. Loki has no authentication of its own, which is exactly why the
+    # nas-observability compose file publishes no port for it -- it is reachable only
+    # from inside alphaess-net, and Grafana's own login is the gate in front of it.
+
+    # No jsonData needed. Alloy attaches the severity as structured metadata named
+    # `detected_level`, which Grafana's Logs panel recognises and colours by on its own.
+    # nas-observability starts independently of this stack, so `depends_on` cannot bridge
+    # them. Grafana starting first is harmless: the datasource fails its health check
+    # until Loki answers, then recovers on its own. `restart: unless-stopped` on both
+    # sides is what makes the start order irrelevant.
