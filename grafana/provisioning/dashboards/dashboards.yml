@@ -27,3 +27,22 @@ providers:
     allowUiUpdates: true
     options:
       path: /var/lib/grafana/dashboards
+
+  # Container logs from the whole NAS, not just this project -- so it does not belong in
+  # the AlphaESS folder above. Its own provider, its own folder.
+  #
+  # A SEPARATE PATH FROM THE ONE ABOVE, and not /var/lib/grafana/dashboards. That path is
+  # written by the entrypoint's sed loop, which exists only to substitute ${DS_ALPHAESS}
+  # in the AlphaESS dashboards. grafana/nas/nas-logs.json names `uid: loki` directly and
+  # needs no substitution, so it is bind-mounted read-only straight to where Grafana
+  # reads it.
+  #
+  # The same warning as above applies: changing this file does NOT move dashboards that
+  # already exist, and Grafana skips a provisioned dashboard whose checksum is unchanged.
+  # Bump the top-level "version" in nas-logs.json to force it to be re-read.
+  - name: nas
+    folder: NAS
+    type: file
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/dashboards-nas

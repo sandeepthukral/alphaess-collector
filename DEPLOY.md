@@ -1183,6 +1183,13 @@ Three things worth knowing before you write that file:
   project that needs a different retention than `alphaess`'s infinite one has no
   alternative to its own bucket.
 
+- **Its logs are already collected, and it does not have to do anything.** Alloy
+  reads every container on this NAS from the Docker daemon, so a new project shows up
+  in Grafana → NAS → Container Logs within about 15 seconds of starting, tagged with
+  its compose project name — no logging config, and not even a network to join. The
+  only requirement is that it logs to stdout/stderr under the default `json-file`
+  driver. See "Container logs" below.
+
 ### The `planning` bucket
 
 The first such project. 400-day retention, measurement `plan`, tag `plan_run`,
@@ -1505,3 +1512,121 @@ Provisioned rules route through the **default notification policy**. Point
 that at a real contact point (Alerting → Contact points), otherwise check 3
 fires into nothing. Checks 1 and 4 are unaffected — they do not go through
 Grafana.
+
+## Container logs
+
+Every container on this NAS logs to Docker's `json-file` driver and nowhere else, so an
+error is only ever found by someone who already suspected that container. The
+**nas-observability** repo fixes that: **Alloy** reads each container's log stream from
+the Docker daemon and **Loki** stores it for 30 days, and this repo's Grafana reads it.
+
+Nothing about how the containers log changes. `sudo docker logs <container>` still works
+and is still the fallback for when the log stack itself is what is down.
+
+### Starting it
+
+```sh
+cd /volume1/docker
+git clone <nas-observability> nas-observability
+cd nas-observability
+sudo docker compose up -d
+```
+
+`alphaess-net` must already exist, which it does whenever this stack has been started
+once. Then restart Grafana so it picks up the new datasource and dashboard:
+
+```sh
+cd /volume1/docker/alphaess-collector
+sudo docker compose up -d grafana
+```
+
+`up -d grafana`, not a bare `up -d` — the latter recreates the collector and costs a few
+minutes of samples.
+
+Open **Dashboards → NAS → Container Logs**. The "Errors and warnings" panel is the one
+this exists for.
+
+### What is collected
+
+**Every container on the NAS, in every compose project, with no configuration in that
+project.** Alloy asks the Docker daemon for the logs of everything it can see, so a
+container qualifies purely by running here — not by joining `alphaess-net`, not by having
+a Grafana, not by being named anywhere.
+
+Two things leave a container out, and both are silent:
+
+- **It writes to a logfile inside itself rather than to stdout/stderr.** `sudo docker logs
+  <container>` coming back empty is the tell.
+- **Its compose sets another log driver.** `json-file` and `local` are collected; `none`,
+  `syslog` and `gelf` are not:
+  ```sh
+  sudo docker inspect -f '{{.HostConfig.LogConfig.Type}}' <container>
+  ```
+
+Logs are not backfilled. Alloy starts from the current position, so anything written
+before it first ran, or while it was down, stays on disk and is reachable only through
+`docker logs`.
+
+### Which half lives where
+
+Grafana provisioning cannot be owned by two repos, so the feature is split:
+
+| Piece | Repo |
+|---|---|
+| `loki` and `alloy` services, their configs | nas-observability |
+| `grafana/provisioning/datasources/loki.yml` | here |
+| `grafana/nas/nas-logs.json` (the dashboard) | here |
+| `grafana/provisioning/alerting/nas-log-errors.yml` | here |
+
+The dashboard queries `container`, `project` and `service` — labels set in
+nas-observability's `config.alloy`. Renaming one there breaks the queries here, and
+nothing checks that across the two repos.
+
+### Notification
+
+`nas-log-errors.yml` provisions the rule only, like the two rules beside it: Grafana shows
+**Container logging errors** firing after five continuous minutes of error-level lines,
+and delivery is yours to wire up.
+
+**For Uptime Kuma, poll rather than push.** A Kuma *push* monitor goes red when a ping
+stops arriving, so a Grafana contact point that fires only during an alert produces a
+monitor that is red whenever things are fine — backwards, and it takes a while to notice
+why. Use a **HTTP(s) - Json Query** monitor instead, pointed at Loki:
+
+- URL: `http://loki:3100/loki/api/v1/query`
+- Query parameter `query`:
+  `sum(count_over_time({container=~".+"} | detected_level =~ "(?i)(error|critical|fatal)" [5m]))`
+- Json Query: `$.data.result[0].value[1]`, expected value `0`
+
+Kuma must be on `alphaess-net` to resolve `loki`. This inverts the direction — Kuma polls,
+nothing has to push — and red then means what it looks like it means.
+
+The alternative is a normal Grafana contact point (email, ntfy, a webhook) attached to the
+default notification policy, which is what the note at the end of "Monitoring that the
+collector is actually collecting" already describes.
+
+### Severity is matched case-insensitively, on purpose
+
+Two things classify a line and they disagree on case. Alloy parses the Python services in
+this repo directly, so their level arrives spelled as Python spells it (`ERROR`); Loki's
+own heuristic handles everything else and emits lowercase (`error`). Any query you write
+by hand must therefore use:
+
+```
+| detected_level =~ "(?i)(warn|warning|error|critical|fatal)"
+```
+
+`detected_level = "error"` returns half the errors on the NAS, with nothing to say so.
+`tests/test_grafana_provisioning.py::test_every_severity_filter_is_case_insensitive`
+pins this for the committed queries.
+
+### Retention
+
+30 days, set in `loki-config.yaml` as `retention_period: 720h`. That only takes effect
+because `compactor.retention_enabled: true` is set beside it — retention is enforced by
+the compactor, and the limit alone is silently ignored. Confirm both landed:
+
+```sh
+sudo docker compose exec loki wget -qO- http://localhost:3100/config | grep -A3 retention
+sudo docker system df -v | grep loki
+```
