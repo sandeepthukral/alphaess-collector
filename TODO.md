@@ -22,6 +22,35 @@ and renumbering would break every reference to it in a commit message or a PR.
 `plan.run_sort_key` exists precisely because these tags are not sortable as strings: runs
 before 2026-07-30 carry `+02:00` where later ones carry `Z`. Use it.
 
+**18. A heartbeat that cannot reach Kuma is invisible everywhere except the container log.**
+On 2026-08-29 the Kuma host moved to a new IP. `.env` was updated but `collector` was never
+`up -d`'d, so it kept pushing to the old address and every ping timed out from 23:56 onward —
+hundreds of `WARNING alphaess-collector: Heartbeat ping failed: ... connect timeout=5` lines,
+and nothing else. Grafana's "Collector status" stayed green the whole time, correctly: that
+panel is the age of the newest `power_readings.soc_percent` sample
+(`alphaess-collector-health.json` panel "Collector status", same query in
+`alphaess-dashboard.json`), collection and the Influx writes were healthy, and it is not
+supposed to know anything about the outbound push. The gap is that *nothing else* knows
+either. `send_heartbeat` (`collector/collector.py:407`) swallows every exception into a
+`log.warning` and writes no `collector_health` point, so no panel can go red and no alert can
+fire on "the watchdog is unreachable" — the failure mode where the dead-man's switch is dead
+and the dashboard says ALL OK. Kuma's own push monitor should have caught it from the far side
+(zero pings for hours → DOWN + notify); confirm whether it did, because if it did not, the
+notification path is a second, larger hole.
+
+Two fixes, worth doing together:
+
+- Stop hard-coding an IP. Point every `*_HEARTBEAT_URL` at a DNS or Tailscale name for the
+  Kuma host so the next IP change costs nothing. Note that the same stale IP is in
+  `EFFICIENCY_HEARTBEAT_URL` and all seven dispatch URLs (`PLAN_INFLUX_`, `SLOTS_WRITTEN_`,
+  `SLOTS_FRESH_`, `DISPATCHER_ALIVE_`, `DISPATCH_CONFIRMED_`, `INVERTER_NOT_HIJACKED_`,
+  `SOC_FLOOR_`), and compose reads env only at container start, so every service needs the
+  restart, not just the collector.
+- Record the failure. Write a `collector_health` point with `event="heartbeat_failed"` from
+  that except branch and put a stat tile plus an alert on it, so "monitoring is broken" is a
+  visible state rather than something you find by reading `docker logs`. Keep it best-effort:
+  a failing heartbeat must still never disturb collection.
+
 ---
 
 ## Dispatch
