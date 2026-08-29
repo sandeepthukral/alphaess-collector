@@ -1516,9 +1516,10 @@ Grafana.
 ## Container logs
 
 Every container on this NAS logs to Docker's `json-file` driver and nowhere else, so an
-error is only ever found by someone who already suspected that container. The
-**nas-observability** repo fixes that: **Alloy** reads each container's log stream from
-the Docker daemon and **Loki** stores it for 30 days, and this repo's Grafana reads it.
+error is only ever found by someone who already suspected that container.
+[**nas-observability**](https://github.com/sandeepthukral/nas-observability) fixes
+that: **Alloy** reads each container's log stream from the Docker daemon and **Loki**
+stores it for 30 days, and this repo's Grafana reads it.
 
 Nothing about how the containers log changes. `sudo docker logs <container>` still works
 and is still the fallback for when the log stack itself is what is down.
@@ -1527,7 +1528,7 @@ and is still the fallback for when the log stack itself is what is down.
 
 ```sh
 cd /volume1/docker
-git clone <nas-observability> nas-observability
+git clone https://github.com/sandeepthukral/nas-observability.git
 cd nas-observability
 sudo docker compose up -d
 ```
@@ -1573,7 +1574,7 @@ Grafana provisioning cannot be owned by two repos, so the feature is split:
 
 | Piece | Repo |
 |---|---|
-| `loki` and `alloy` services, their configs | nas-observability |
+| `loki` and `alloy` services, their configs | [nas-observability](https://github.com/sandeepthukral/nas-observability) |
 | `grafana/provisioning/datasources/loki.yml` | here |
 | `grafana/nas/nas-logs.json` (the dashboard) | here |
 | `grafana/provisioning/alerting/nas-log-errors.yml` | here |
