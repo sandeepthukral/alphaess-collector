@@ -1077,3 +1077,57 @@ class TestMagnitudeShortfall:
             cache = self._two_ticks(tmp_path, monkeypatch, battery_power_w=0, dry_run=True)
         assert cache["shorted"] is False
         assert not any("magnitude shortfall" in r.message for r in caplog.records)
+
+
+class TestLoopPacing:
+    """`next_deadline` is `run()`'s clock, extracted so it can be tested without a loop.
+
+    The bug it fixes is silent by construction: the dead man's switch is 5x the interval, so
+    a loop running slow keeps the battery under control and nothing goes red. It was found
+    only by reading timestamps in a log opened for a different reason -- one unroutable
+    heartbeat URL spending 5 s in `urlopen` every tick, and a control loop quietly running at
+    65 s instead of 60.
+    """
+
+    INTERVAL = 60.0
+
+    def test_the_period_is_the_interval_not_the_interval_plus_the_work(self):
+        """The whole point. A tick that starts at its deadline and takes 5 s must leave the
+        next one due 60 s after the FIRST started, not 60 s after it finished."""
+        assert scheduler.next_deadline(1000.0, 1005.0, self.INTERVAL) == 1060.0
+
+    def test_a_slow_tick_does_not_shorten_the_next_sleep_below_zero(self):
+        """A tick that overruns lands past its own next deadline. The loop must not be handed
+        a deadline in the past and fire immediately -- `run()` clamps the wait at 0, and this
+        pins the other half: the deadline itself moves forward."""
+        assert scheduler.next_deadline(1000.0, 1075.0, self.INTERVAL) > 1075.0
+
+    def test_missed_intervals_are_skipped_not_replayed(self):
+        """NO BURST CATCH-UP. Five minutes lost in one tick means four skipped intervals, and
+        replaying them would fire five Modbus writes back-to-back at the inverter that was
+        just too slow to answer -- the failure feeding itself. One tick, at the next phase
+        boundary -- and strictly the NEXT one, so a tick landing exactly on a boundary sleeps
+        a full interval rather than firing on a zero-length wait."""
+        assert scheduler.next_deadline(1000.0, 1290.0, self.INTERVAL) == 1300.0
+        assert scheduler.next_deadline(1000.0, 1300.0, self.INTERVAL) == 1360.0
+
+    def test_the_phase_survives_a_skip(self):
+        """Deadlines stay on the original grid, so a single slow tick does not permanently
+        re-time the loop onto a new offset. Every deadline this returns is a whole number of
+        intervals from where the loop started."""
+        for now in (1000.0, 1030.0, 1061.0, 1119.9, 1500.0, 1e6):
+            out = scheduler.next_deadline(1000.0, now, self.INTERVAL)
+            assert (out - 1000.0) % self.INTERVAL == 0, now
+            assert out > now
+
+    def test_a_tick_finishing_early_still_waits(self):
+        """The common case, and the one a naive `max(0, ...)` rewrite would break: a fast
+        tick must leave the deadline where it was rather than pulling it forward."""
+        assert scheduler.next_deadline(1000.0, 1000.5, self.INTERVAL) == 1060.0
+
+    def test_the_failsafe_margin_still_covers_a_skipped_tick(self):
+        """`slots.DISPATCH_DURATION_S` is written 5x the interval so the loop may miss four
+        ticks and still hold the command. Skipping rather than bursting spends that margin;
+        this asserts the two constants still agree that it is there to spend."""
+        import slots as S
+        assert S.DISPATCH_DURATION_S >= 5 * S.REFRESH_INTERVAL_S
