@@ -851,6 +851,13 @@ from(bucket: "planning")
 # cannot tell them apart, because the difference is `import_wh`, which is not plotted anywhere.
 # This table runs the classifier instead of asking the eye to infer it.
 #
+# The translator has one `hold` action; this table splits it three ways, on the grid legs the
+# translator does not need and a reader does. `hold` says only "the battery is frozen", and at
+# 03:00 that means the house is running on imported grid -- nothing crosses the meter towards
+# it. Labelling every hold "surplus goes to grid" described the afternoon case and mislabelled
+# the whole night, which is most of the rows. The split is presentation only: all three are the
+# same `hold`, and translator.py:classify is unchanged.
+#
 # It is a second implementation of dispatch/translator.py:classify, which is a real cost: the
 # two can drift. The alternative was worse. slots.json lives on a volume inside the dispatch
 # container and is not in InfluxDB, so Grafana cannot read the translator's own output, and
@@ -885,8 +892,12 @@ from(bucket: "planning")
         else if r.soc_wh >= float(v: ${capacity_wh}) - 50.0 and r.import_wh <= 10.0
              and (r.export_wh > 10.0 or r.pv_forecast_wh > 10.0) then
           "self -- full, still harvesting"
+        else if r.export_wh > 10.0 then
+          "hold -- surplus goes to grid"
+        else if r.import_wh > 10.0 then
+          "hold -- grid covers load"
         else
-          "hold -- surplus goes to grid",
+          "hold -- battery idle",
       soc_pct: r.soc_wh / float(v: ${capacity_wh}) * 100.0,
       charge_wh: r.charge_wh,
       import_wh: r.import_wh,
@@ -903,9 +914,14 @@ panels.append({
                    "graph above is ambiguous, which is most of the time: that graph steps, so "
                    "a flat segment is just one interval and tells you nothing, and a rising "
                    "one could be either 'charge' or 'self'. "
-                   "'hold' is the row to look for - the battery is frozen at 0 W and any "
-                   "solar beyond the house load is exported, whatever the price. A run of "
-                   "'hold' rows through the afternoon is surplus being given away. "
+                   "'hold' is the row to look for - the battery is frozen at 0 W, so "
+                   "whatever the house needs comes from the grid and whatever solar it does "
+                   "not need goes to the grid, at whatever the price is. The three 'hold' "
+                   "rows are that one state seen from different sides: 'surplus goes to "
+                   "grid' is solar being given away, worth chasing when it runs through the "
+                   "afternoon; 'grid covers load' is the overnight shape, where the battery "
+                   "has nothing to give and the house is bought from the meter; 'battery "
+                   "idle' is a frozen battery with the meter near zero on both legs. "
                    "'self' means the battery is simply released to self-consumption, either "
                    "because the plan moves energy without touching the grid or because it is "
                    "full and would otherwise spill. "
