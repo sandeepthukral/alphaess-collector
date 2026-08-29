@@ -833,7 +833,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "The setpoint the dispatcher just wrote, charging-positive. Repeats 'Commanded against actual' below as a single number, for the phone-in-the-kitchen glance that chart is too wide for.",
+      "description": "The setpoint the dispatcher just wrote, charging-positive. Only shown while a command is actually live: 0x0881 keeps its last value through a release, so 'silent' means nothing is commanded, not 0 W. Repeats 'Commanded against actual' below as a single number, for the phone-in-the-kitchen glance that chart is too wide for.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -886,7 +886,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"setpoint_w\")\n  |> last()\n",
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"setpoint_w\" or r._field == \"dispatch_active\"))\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> filter(fn: (r) => exists r.setpoint_w and exists r.dispatch_active\n                   and r.dispatch_active != 0)\n  |> map(fn: (r) => ({ _time: r._time, _value: float(v: r.setpoint_w) }))\n  |> yield(name: \"commanded power\")\n",
           "refId": "A"
         }
       ],
@@ -963,7 +963,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "How far short of the commanded MAGNITUDE the battery is actually running, as a percentage so it keeps meaning the same thing if the planner's tuned discharge speed changes. MEASURED 2026-08-24: sustained discharge at 4,700 W settled 6-7% under for a full 149-minute session while every other tile on this page stayed green. Negative means the battery is exceeding its setpoint, which charge sessions do routinely and is not a fault. 'no command' is the resting state: hold and self both write a setpoint under 50 W, which this ignores rather than divide by.",
+      "description": "How far short of the commanded MAGNITUDE the battery is actually running, as a percentage so it keeps meaning the same thing if the planner's tuned discharge speed changes. MEASURED 2026-08-24: sustained discharge at 4,700 W settled 6-7% under for a full 149-minute session while every other tile on this page stayed green. Negative means the battery is exceeding its setpoint, which charge sessions do routinely and is not a fault. 'no command' is the resting state: hold and self both write a setpoint under 50 W, which this ignores rather than divide by; so does a release, which leaves the last setpoint standing in the register and is gated on separately.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1024,7 +1024,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "mag = (v) => if v < 0.0 then -v else v\n\nfrom(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"setpoint_w\" or r._field == \"actual_battery_w\"))\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> filter(fn: (r) => exists r.setpoint_w and exists r.actual_battery_w\n                   and mag(v: float(v: r.setpoint_w)) > 50.0)\n  |> map(fn: (r) => ({ _time: r._time, _value:\n       100.0 * (mag(v: float(v: r.setpoint_w)) - mag(v: float(v: r.actual_battery_w)))\n       / mag(v: float(v: r.setpoint_w)) }))\n  |> keep(columns: [\"_value\"])\n",
+          "query": "mag = (v) => if v < 0.0 then -v else v\n\nfrom(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"setpoint_w\" or r._field == \"actual_battery_w\"\n                     or r._field == \"dispatch_active\"))\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> filter(fn: (r) => exists r.setpoint_w and exists r.actual_battery_w\n                   and exists r.dispatch_active and r.dispatch_active != 0\n                   and mag(v: float(v: r.setpoint_w)) > 50.0)\n  |> map(fn: (r) => ({ _time: r._time, _value:\n       100.0 * (mag(v: float(v: r.setpoint_w)) - mag(v: float(v: r.actual_battery_w)))\n       / mag(v: float(v: r.setpoint_w)) }))\n  |> keep(columns: [\"_value\"])\n",
           "refId": "A"
         }
       ],
@@ -1738,6 +1738,6 @@
   "timezone": "browser",
   "title": "Dispatch",
   "uid": "alphaess-dispatch",
-  "version": 5,
+  "version": 6,
   "weekStart": ""
 }

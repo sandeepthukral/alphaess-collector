@@ -319,6 +319,52 @@ class TestConditionalFields:
             assert "dispatch_active" in q, (
                 f"{dash}: the countdown is not gated on a command being live")
 
+    # (field, does a live command always carry one?) -- the second half is the difference
+    # between the two panels, and it is not symmetry. A Mode 3 hold is a live command for
+    # 0 W, so `setpoint_w` means something under any live mode; it carries no SoC target, so
+    # `target_soc_pct` means something only under Mode 2.
+    STALE_UNTIL_COMMANDED = (("target_soc_pct", True), ("setpoint_w", False))
+
+    def test_a_commanded_value_cannot_run_off_a_stale_register(self):
+        """The mirror image of the trap this class is named for, and the reason it belongs
+        beside it: these fields are written on EVERY tick, so no `exists` guard can catch
+        them -- and they are still meaningless most of the time.
+
+        They are REGISTERS, not commands. `scheduler.release()` writes only REG_START=0 and
+        leaves the rest of the block standing, so both keep the last command's values after
+        the command is gone. `target_soc_pct` read a confident `0 %` beside a plan table
+        saying the SoC after that interval should be 10 %; `setpoint_w` is the worse of the
+        two, because a stale `-2,500 W` sitting beside a live `Battery Power now` of `0 W` is
+        exactly the shape its own description calls out as the inverter accepting a command
+        and not honouring it. A false fault, in the panel pair built to catch a real one.
+
+        DRIVEN OFF A TABLE, because the first version of this guard named one field and was
+        therefore green for the panel next door with the same bug in it -- the same way
+        `_panels_reading` exists because naming one panel title missed its copy. A field that
+        goes stale on release belongs on the table, and the table is what the loop reads.
+        """
+        for field, needs_mode in self.STALE_UNTIL_COMMANDED:
+            found = _panels_reading(field)
+            assert found, f"no stat reads `{field}` -- the guard found nothing"
+            for dashboard, title, panel in found:
+                query = " ".join(t["query"] for t in panel["targets"])
+                assert "dispatch_active" in query, (
+                    f"{dashboard} / {title}: {field} is not gated on a command being live")
+                if needs_mode:
+                    assert '_field == "mode"' in query and "mode == 2" in query, (
+                        f"{dashboard} / {title}: {field} is not gated on Mode 2, so an "
+                        f"active hold -- which writes no target -- still shows the last one")
+                defaults = panel["fieldConfig"]["defaults"]
+                base = next(st for st in defaults["thresholds"]["steps"]
+                            if st["value"] is None)
+                assert base["color"] != "red", (
+                    f"{dashboard} / {title}: the base step colours noValue, and noValue "
+                    f"here means 'nothing is commanded' -- a normal rest, and the whole of "
+                    f"a dry-run day")
+                assert defaults.get("noValue"), (
+                    f"{dashboard} / {title}: an unlabelled blank reads as a broken panel; "
+                    f"say which absence this is")
+
 
 class TestTheGeneratorsAgree:
     """Two generators now build dispatch panels, and they share no module.

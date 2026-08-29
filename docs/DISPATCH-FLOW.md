@@ -63,7 +63,8 @@ flowchart TD
     O --> TEMP["read min/max cell voltage & temp<br/>published only, never decides"]
     TEMP --> HEALTH["hourly/weekly health gates<br/>fault block + firmware/config<br/>published only, never decides"]
     HEALTH --> PUB["publish dispatch_state → InfluxDB<br/>heartbeat → Kuma"]
-    PUB --> A
+    PUB --> WAIT["wait until the NEXT deadline<br/>next_deadline(): due 60s after the last tick was DUE,<br/>not after it finished · overrun skips whole intervals"]
+    WAIT --> A
 
     classDef release fill:#e5f4ec,stroke:#1f8f56,color:#166a3f;
     classDef hold fill:#eceef0,stroke:#6b7280,color:#374151;
@@ -79,6 +80,21 @@ flowchart TD
 
 `dispatch/slots.py:231-323` (decide) and `:326-367` (clamp). The charge/discharge "target
 reached" outcomes release if `surplus_w > 0`, else hold.
+
+The loop's period is the interval, not the interval plus the work (`scheduler.next_deadline`).
+The tick talks to an inverter and to Kuma, so sleeping a flat 60s after it re-times the loop by
+however slow those are: one unroutable heartbeat URL held `urlopen` for its 5s timeout every
+tick and the loop ran at 65s (measured 2026-08-30), losing a tick every twelve minutes without
+tripping anything — the dead man's switch is 5x the interval and absorbed it. An overrunning
+tick skips whole intervals rather than firing back-to-back to catch up, because a burst of
+Modbus writes into an inverter already too slow to answer is the failure feeding itself.
+
+The margin that buys is **three missed ticks, not four**, though the 5x ratio between
+`REFRESH_INTERVAL_S` and `DISPATCH_DURATION_S` reads like four. Every commanding tick re-arms
+the switch, so a command written at t0 has its next write due at t0 + (missed+1)x60: t0+240
+after three misses, t0+300 after four — the expiry instant itself, and past it in practice
+because the write ends a tick that reads the inverter first. Past three, the inverter reverts
+to self-consumption on its own and the next command starts from a released battery.
 
 ## Planning-time classification: `classify()`
 

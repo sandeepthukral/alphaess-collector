@@ -925,6 +925,40 @@ def build_publisher(url: str, token: str, org: str, bucket: str, sys_sn: str):
         client.write_api(write_options=SYNCHRONOUS), bucket, sys_sn)
 
 
+def next_deadline(deadline: float, now: float, interval: float) -> float:
+    """The instant the next tick should START, given the one that just ran was due at
+    `deadline`. Pure, and on a MONOTONIC clock -- see `run()` for the caller.
+
+    THE LOOP'S PERIOD IS THE INTERVAL, NOT THE INTERVAL PLUS THE WORK. Sleeping a flat 60 s
+    after each tick makes the real period 60 s plus however long the tick took, and the tick
+    talks to an inverter and to Kuma over the network. Measured 2026-08-30: one unroutable
+    heartbeat URL sat on its 5 s timeout every tick and the loop ran at 65-66 s (00:16:38,
+    00:17:44, 00:18:49, 00:19:54), losing a tick every twelve minutes. Nothing was broken
+    enough to notice -- the dead man's switch is 5x the interval and absorbed it -- and that
+    is exactly why it went unseen: a slow dependency silently re-times the control loop.
+    `reliability.py:28` hardcodes TICK_S = 60 and reads the gap between ticks, so the drift
+    also shows up as phantom findings in a report about something else entirely.
+
+    NO BURST CATCH-UP when a tick overruns. Returning a deadline already in the past would
+    make the loop fire back-to-back until it caught up, which is a stampede of Modbus writes
+    at the moment the inverter is already too slow to answer -- the failure feeding itself.
+    Skipped intervals are skipped: the deadline advances in whole steps to the next one in
+    the future, so the loop keeps its phase and misses ticks rather than doubling up.
+
+    WHAT THAT COSTS, EXACTLY: three consecutive misses are survivable, not four. Every
+    commanding tick re-arms the 300 s switch, so a command written at t0 has its next write
+    due at t0 + (missed+1)*60 -- t0+240 after three misses, t0+300 after four, which is the
+    expiry instant itself and in practice just past it, since the write ends a tick that
+    reads the inverter first. Beyond three misses the inverter reverts to self-consumption on
+    its own and the loop's next command starts from a released battery. That is a worse
+    outcome than a late tick and a better one than a burst of Modbus writes into an inverter
+    already too slow to answer, which is what replaying the backlog would produce.
+    """
+    if now < deadline:
+        return deadline
+    return deadline + (int((now - deadline) // interval) + 1) * interval
+
+
 async def run(ip, port, slave_id, slots_path, dry_run, once, interval, retention,
               publisher=None):
     client = AsyncModbusTcpClient(ip, port=port)
@@ -947,6 +981,11 @@ async def run(ip, port, slave_id, slots_path, dry_run, once, interval, retention
     cache["limits_read_at"] = dt.datetime.now(dt.UTC)
     log.info("inverter limits: charge=%s W discharge=%s W", *cache["limits"])
 
+    # The first tick is due now; every one after it is due `interval` after the last was DUE,
+    # not after the last one finished.
+    loop = asyncio.get_running_loop()
+    deadline = loop.time()
+
     try:
         while not stop.is_set():
             try:
@@ -967,10 +1006,15 @@ async def run(ip, port, slave_id, slots_path, dry_run, once, interval, retention
                 log.exception("tick failed, continuing: %s", e)
             if once:
                 break
-            # Sleep on the stop event rather than asyncio.sleep, so SIGTERM releases dispatch
+            # PACED ON A DEADLINE, not on a sleep after the work -- see `next_deadline` for
+            # what a flat sleep costs. The clock is the event loop's, which is monotonic:
+            # wall-clock time on this NAS is NTP-disciplined and a step adjustment across a
+            # sleep would either stall the loop for the size of the step or fire it early.
+            deadline = next_deadline(deadline, loop.time(), interval)
+            # Wait on the stop event rather than asyncio.sleep, so SIGTERM releases dispatch
             # immediately instead of after up to a full interval.
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=interval)
+                await asyncio.wait_for(stop.wait(), timeout=max(0.0, deadline - loop.time()))
     finally:
         try:
             await inv.release()

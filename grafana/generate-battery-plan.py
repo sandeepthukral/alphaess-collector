@@ -574,14 +574,45 @@ panels.append(stat(
 # encoder, so nothing has to be negated here. `decimals` stays unset for the reason the
 # comment on that panel gives: `watt` self-scales, and pinning decimals gives either
 # "850.00 W" or "2 kW".
+# GATED ON A LIVE COMMAND, for the reason panel 22 below is: 0x0881/0x0882 are registers, and
+# `release()` writes only REG_START=0 (`scheduler.py:266`), so the wattage stands after the
+# command that set it is gone. This panel makes that worse than panel 22 does, because its
+# description tells the operator what a gap means: a dispatcher that discharged at -2,500 W
+# and then released reads `-2,500 W` beside a `Battery Power now` of 0 W, which is precisely
+# the shape of "the inverter accepted the command and did not honour it". A false fault, in
+# the one panel pair built to detect a real one.
+#
+# NO `mode` CLAUSE, unlike panel 22. Every live mode carries a setpoint -- a Mode 3 hold IS a
+# command for 0 W -- so `dispatch_active` alone is the whole question here. The extra clause
+# there is not symmetry to copy: it is there because a hold carries no SoC TARGET.
+#
+# THE BASE STEP GOES NEUTRAL, AND THAT COSTS THE SIGN COLOURING. Grafana paints `noValue`
+# with the base step (panel 23's comment records how that was learned), and red was the base
+# here so that discharge read red. Gating without this change would paint the em-dash red and
+# make every released minute look like a fault -- swapping a wrong number for a wrong colour.
+# Discharge is now neutral and charge stays green; the sign is still in the number, and
+# `Battery Power now` next door keeps the red/green pairing for the value that is always live.
 panels.append(stat(
     21, "Commanded power",
     "The setpoint written to 0x0881, in the same sign convention as Battery Power now: "
-    "positive charging, negative discharging. Compare the two - a large gap between "
-    "commanded and actual means the inverter accepted the command and did not honour it.",
-    DISPATCH_LAST % "setpoint_w", "watt", None, 8, 4,
-    [{"color": "red", "value": None}, {"color": "green", "value": 0}],
-    y=4))
+    "positive charging, negative discharging. Only shown while a command is actually live: "
+    "0x0881 keeps its last value through a release, so an em-dash means nothing is "
+    "commanded - a normal resting state, not a fault. A large gap between this and Battery "
+    "Power now means the inverter accepted the command and did not honour it.",
+    '''from(bucket: "alphaess")
+  |> range(start: -5m)
+  |> filter(fn: (r) => r._measurement == "dispatch_state"
+                   and (r._field == "setpoint_w" or r._field == "dispatch_active"))
+  |> last()
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> group()
+  |> filter(fn: (r) => exists r.setpoint_w and exists r.dispatch_active
+                   and r.dispatch_active != 0)
+  |> map(fn: (r) => ({ _time: r._time, _value: float(v: r.setpoint_w) }))
+  |> yield(name: "commanded power")
+''', "watt", None, 8, 4,
+    [{"color": "text", "value": None}, {"color": "green", "value": 0}],
+    y=4, no_value="\u2014"))
 
 # The one panel in this row that reads the battery rather than the command -- placed between
 # the setpoint and its target so the actual SoC sits next to what the dispatcher is trying to
@@ -599,13 +630,48 @@ panels.append(stat(
     [{"color": "text", "value": None}],
     y=4))
 
+# GATED THE SAME WAY PANEL 23 AND THE `commanded` SERIES ON PANEL 5 ARE, and for the same
+# reason: 0x0886 is a REGISTER, not a command. A release writes only REG_START=0
+# (`scheduler.py:266`), leaving the rest of the block exactly as it was, and a Mode 3 hold
+# never writes a target at all -- so `last()` on its own reports a target for a battery
+# nothing is driving toward. Read at 00:16 on 2026-08-30 that was a confident `0 %` sitting
+# beside a plan table saying the SoC after this interval should be 10 %, two numbers that
+# looked like a disagreement and were in fact a dead register next to a live forecast.
+#
+# `dispatch_active != 0 and mode == 2` is the test, from the same pivot the timeseries uses:
+# a target only means anything while a Mode 2 (SoC-target) command is live. Mode 2 is
+# `DispatchMode.SOC_TARGET`, the one branch of `slots.decide` that carries a target
+# (`slots.py:322`); the FOLLOW commands beside it pass none and land on the register as 0.
+#
+# DROPPED, NOT NULLED -- the opposite of panel 5's choice, and the difference is the mark. A
+# line needs an explicit null to break it; a stat needs no rows, so `noValue` can render. So
+# this filters where the series maps to `debug.null`.
+#
+# NO TARGET IS NOT A FAULT, so the base step stays neutral: Grafana paints `noValue` with the
+# base step, and this panel reads em-dash for the whole of a dry-run day and every minute the
+# battery is released. Same reasoning as panel 23's `no command`, written out there in full.
 panels.append(stat(
     22, "Commanded target SoC",
-    "Where the current command is driving the battery (0x0886). Only meaningful while a "
-    "Mode 2 command is live - a hold writes no target, so this holds whatever was last set.",
-    DISPATCH_LAST % "target_soc_pct", "percent", 0, 16, 4,
+    "Where the current command is driving the battery (0x0886). Only shown while a Mode 2 "
+    "command is actually live: 0x0886 keeps its last value through a hold and through a "
+    "release, so an em-dash means nothing is driving the battery to a target - a normal "
+    "resting state, not a fault. Compare with Current SoC beside it.",
+    '''from(bucket: "alphaess")
+  |> range(start: -5m)
+  |> filter(fn: (r) => r._measurement == "dispatch_state"
+                   and (r._field == "target_soc_pct" or r._field == "mode"
+                     or r._field == "dispatch_active"))
+  |> last()
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> group()
+  |> filter(fn: (r) => exists r.target_soc_pct and exists r.mode
+                   and exists r.dispatch_active
+                   and r.dispatch_active != 0 and r.mode == 2)
+  |> map(fn: (r) => ({ _time: r._time, _value: float(v: r.target_soc_pct) }))
+  |> yield(name: "commanded target")
+''', "percent", 0, 16, 4,
     [{"color": "text", "value": None}],
-    y=4))
+    y=4, no_value="\u2014"))
 
 # Counting down from the dispatcher's own `expires_at` rather than from the inverter's
 # duration register, which section 5.1 records counting down erratically - observed reading
@@ -1381,7 +1447,17 @@ dashboard = {
     #     instead of two full-width ones; 8 grows to h=10 so the row has a flat bottom. Every
     #     panel from 5 down moves up. The battery cell temperature panels live on the
     #     Overview dashboard, not here.
-    "version": 18,
+    # 19: Commanded target SoC (22) is gated on a live Mode 2 command, the same pivot Command
+    #     expires in (23) and the SoC chart's `commanded` series already use. 0x0886 holds its
+    #     last value through a hold and a release, so a plain last() reported a target for a
+    #     battery nothing was driving -- a flat 0 % beside a plan table saying 10 %. It now
+    #     reads an em-dash whenever no target is live.
+    # 20: Commanded power (21) gets the same gate, on dispatch_active alone -- every live mode
+    #     carries a setpoint, so no mode clause. It had the worse half of the same bug: a
+    #     stale -2,500 W beside a live 0 W is exactly what its own description calls a command
+    #     the inverter did not honour. Its base threshold step turns neutral so the em-dash is
+    #     not red, which costs the red on discharge; the sign is still in the number.
+    "version": 20,
     "weekStart": "",
 }
 

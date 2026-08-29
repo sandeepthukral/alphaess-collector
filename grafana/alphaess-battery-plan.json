@@ -655,7 +655,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "The setpoint written to 0x0881, in the same sign convention as Battery Power now: positive charging, negative discharging. Compare the two - a large gap between commanded and actual means the inverter accepted the command and did not honour it.",
+      "description": "The setpoint written to 0x0881, in the same sign convention as Battery Power now: positive charging, negative discharging. Only shown while a command is actually live: 0x0881 keeps its last value through a release, so an em-dash means nothing is commanded - a normal resting state, not a fault. A large gap between this and Battery Power now means the inverter accepted the command and did not honour it.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -663,11 +663,12 @@
           },
           "decimals": null,
           "mappings": [],
+          "noValue": "\u2014",
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "red",
+                "color": "text",
                 "value": null
               },
               {
@@ -711,7 +712,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"setpoint_w\")\n  |> last()\n",
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"setpoint_w\" or r._field == \"dispatch_active\"))\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> filter(fn: (r) => exists r.setpoint_w and exists r.dispatch_active\n                   and r.dispatch_active != 0)\n  |> map(fn: (r) => ({ _time: r._time, _value: float(v: r.setpoint_w) }))\n  |> yield(name: \"commanded power\")\n",
           "refId": "A"
         }
       ],
@@ -787,7 +788,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Where the current command is driving the battery (0x0886). Only meaningful while a Mode 2 command is live - a hold writes no target, so this holds whatever was last set.",
+      "description": "Where the current command is driving the battery (0x0886). Only shown while a Mode 2 command is actually live: 0x0886 keeps its last value through a hold and through a release, so an em-dash means nothing is driving the battery to a target - a normal resting state, not a fault. Compare with Current SoC beside it.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -795,6 +796,7 @@
           },
           "decimals": 0,
           "mappings": [],
+          "noValue": "\u2014",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -839,7 +841,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"target_soc_pct\")\n  |> last()\n",
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"target_soc_pct\" or r._field == \"mode\"\n                     or r._field == \"dispatch_active\"))\n  |> last()\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> filter(fn: (r) => exists r.target_soc_pct and exists r.mode\n                   and exists r.dispatch_active\n                   and r.dispatch_active != 0 and r.mode == 2)\n  |> map(fn: (r) => ({ _time: r._time, _value: float(v: r.target_soc_pct) }))\n  |> yield(name: \"commanded target\")\n",
           "refId": "A"
         }
       ],
@@ -2184,6 +2186,6 @@
   "timezone": "browser",
   "title": "Battery Plan",
   "uid": "alphaess-battery-plan",
-  "version": 18,
+  "version": 20,
   "weekStart": ""
 }

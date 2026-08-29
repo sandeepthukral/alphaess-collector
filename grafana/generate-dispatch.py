@@ -291,11 +291,13 @@ SHORTFALL = '''mag = (v) => if v < 0.0 then -v else v
 from(bucket: "alphaess")
   |> range(start: -5m)
   |> filter(fn: (r) => r._measurement == "dispatch_state"
-                   and (r._field == "setpoint_w" or r._field == "actual_battery_w"))
+                   and (r._field == "setpoint_w" or r._field == "actual_battery_w"
+                     or r._field == "dispatch_active"))
   |> last()
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> group()
   |> filter(fn: (r) => exists r.setpoint_w and exists r.actual_battery_w
+                   and exists r.dispatch_active and r.dispatch_active != 0
                    and mag(v: float(v: r.setpoint_w)) > 50.0)
   |> map(fn: (r) => ({ _time: r._time, _value:
        100.0 * (mag(v: float(v: r.setpoint_w)) - mag(v: float(v: r.actual_battery_w)))
@@ -597,12 +599,28 @@ panels.append(stat(
 # 149-minute session with `verified` green the whole time. That gap is what these three tiles
 # exist to catch, and none of Row A can see it.
 
+# GATED ON A LIVE COMMAND, byte-identical to Battery Plan's panel 21 -- 0x0881 is a register
+# and `scheduler.release()` writes only REG_START=0, so it stands after the command that set
+# it is gone. `silent` was already the right word for the absence; without the gate it was
+# unreachable, because a register that keeps its last value is never absent.
 panels.append(stat(
     15, "Commanded now",
-    "The setpoint the dispatcher just wrote, charging-positive. Repeats 'Commanded against "
-    "actual' below as a single number, for the phone-in-the-kitchen glance that chart is too "
-    "wide for.",
-    DISPATCH_LAST % "setpoint_w", "watt", 2, 0, 8,
+    "The setpoint the dispatcher just wrote, charging-positive. Only shown while a command "
+    "is actually live: 0x0881 keeps its last value through a release, so 'silent' means "
+    "nothing is commanded, not 0 W. Repeats 'Commanded against actual' below as a single "
+    "number, for the phone-in-the-kitchen glance that chart is too wide for.",
+    '''from(bucket: "alphaess")
+  |> range(start: -5m)
+  |> filter(fn: (r) => r._measurement == "dispatch_state"
+                   and (r._field == "setpoint_w" or r._field == "dispatch_active"))
+  |> last()
+  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> group()
+  |> filter(fn: (r) => exists r.setpoint_w and exists r.dispatch_active
+                   and r.dispatch_active != 0)
+  |> map(fn: (r) => ({ _time: r._time, _value: float(v: r.setpoint_w) }))
+  |> yield(name: "commanded power")
+''', "watt", 2, 0, 8,
     [{"color": "text", "value": None}],
     y=8, no_value="silent"))
 
@@ -624,7 +642,8 @@ panels.append(stat(
     "full 149-minute session while every other tile on this page stayed green. Negative "
     "means the battery is exceeding its setpoint, which charge sessions do routinely and is "
     "not a fault. 'no command' is the resting state: hold and self both write a setpoint "
-    "under 50 W, which this ignores rather than divide by.",
+    "under 50 W, which this ignores rather than divide by; so does a release, which leaves "
+    "the last setpoint standing in the register and is gated on separately.",
     SHORTFALL, "percent", 1, 16, 8,
     # Matches `slots.SHORTFALL_PCT` (5%) and twice it for red -- keep the two in sync by hand,
     # the same trade `generate-battery-score.py:29` makes for every constant shared this way.
@@ -967,7 +986,13 @@ dashboard = {
     #    dashboard's 'Battery Power' tile by nothing but rounding (4.8 kW showing as "5").
     # 5: 'Why' is left-justified with a pinned value size instead of auto-fit, which shrank
     #    its longer reason sentences to near-unreadable size.
-    "version": 5,
+    # 6: 'Commanded now' and 'Shortfall' are gated on a live command. 0x0881 keeps its last
+    #    value through a release, so the tile reported a setpoint for a battery nothing was
+    #    commanding -- and 'silent' was unreachable, because a stale register is never absent.
+    #    Shortfall had the worse half: it DIVIDES by that setpoint, so a release after a
+    #    -2,500 W discharge read 100% short and went red while the battery sat correctly at
+    #    0 W. Its 50 W floor never caught this -- it excludes hold and self, not a release.
+    "version": 6,
     "weekStart": "",
 }
 
