@@ -1103,11 +1103,16 @@ class TestLoopPacing:
         assert scheduler.next_deadline(1000.0, 1075.0, self.INTERVAL) > 1075.0
 
     def test_missed_intervals_are_skipped_not_replayed(self):
-        """NO BURST CATCH-UP. Five minutes lost in one tick means four skipped intervals, and
-        replaying them would fire five Modbus writes back-to-back at the inverter that was
-        just too slow to answer -- the failure feeding itself. One tick, at the next phase
-        boundary -- and strictly the NEXT one, so a tick landing exactly on a boundary sleeps
-        a full interval rather than firing on a zero-length wait."""
+        """NO BURST CATCH-UP. Replaying a backlog would fire one Modbus write per skipped
+        interval, back-to-back, at the inverter that was just too slow to answer -- the
+        failure feeding itself. One tick instead, at the next phase boundary, and strictly
+        the NEXT one, so a tick landing exactly on a boundary sleeps a full interval rather
+        than firing on a zero-length wait.
+
+        The 290 s example is deliberately past the failsafe margin: by then the command has
+        already expired (see the test below), so the choice is between one write to a
+        released battery and five. It is not the case this is tuned for -- that is a tick or
+        two of slippage -- but it is the case that decides the design."""
         assert scheduler.next_deadline(1000.0, 1290.0, self.INTERVAL) == 1300.0
         assert scheduler.next_deadline(1000.0, 1300.0, self.INTERVAL) == 1360.0
 
@@ -1125,9 +1130,21 @@ class TestLoopPacing:
         tick must leave the deadline where it was rather than pulling it forward."""
         assert scheduler.next_deadline(1000.0, 1000.5, self.INTERVAL) == 1060.0
 
-    def test_the_failsafe_margin_still_covers_a_skipped_tick(self):
-        """`slots.DISPATCH_DURATION_S` is written 5x the interval so the loop may miss four
-        ticks and still hold the command. Skipping rather than bursting spends that margin;
-        this asserts the two constants still agree that it is there to spend."""
+    def test_the_failsafe_margin_is_three_missed_ticks_not_four(self):
+        """The 5x ratio between the two constants reads like four missed ticks. It is three,
+        and skipping rather than bursting is what spends that margin, so the number wants
+        pinning rather than restating.
+
+        Every commanding tick re-arms the switch, so a command written at t0 has its next
+        write due at t0 + (missed+1)*interval. Three misses land at t0+240 with a minute in
+        hand; four land at t0+300, which is expiry itself -- and later than that in practice,
+        because the write ends a tick that reads the inverter first. `>=` is deliberate on
+        the second assertion: landing exactly on the expiry instant is already a loss.
+        """
         import slots as S
-        assert S.DISPATCH_DURATION_S >= 5 * S.REFRESH_INTERVAL_S
+        survivable = 3
+        assert (survivable + 1) * S.REFRESH_INTERVAL_S < S.DISPATCH_DURATION_S, (
+            "three missed ticks no longer fit inside the dead man's switch")
+        assert (survivable + 2) * S.REFRESH_INTERVAL_S >= S.DISPATCH_DURATION_S, (
+            "the margin grew past three missed ticks -- the comments in slots.py, "
+            "scheduler.next_deadline and docs/DISPATCH-FLOW.md all state three")

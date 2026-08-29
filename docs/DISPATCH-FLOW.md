@@ -86,9 +86,15 @@ The tick talks to an inverter and to Kuma, so sleeping a flat 60s after it re-ti
 however slow those are: one unroutable heartbeat URL held `urlopen` for its 5s timeout every
 tick and the loop ran at 65s (measured 2026-08-30), losing a tick every twelve minutes without
 tripping anything — the dead man's switch is 5x the interval and absorbed it. An overrunning
-tick skips whole intervals rather than firing back-to-back to catch up: `DISPATCH_DURATION_S`
-is written 5x `REFRESH_INTERVAL_S` precisely so four missed ticks are survivable, and a burst
-of Modbus writes into an inverter that is already too slow to answer is not.
+tick skips whole intervals rather than firing back-to-back to catch up, because a burst of
+Modbus writes into an inverter already too slow to answer is the failure feeding itself.
+
+The margin that buys is **three missed ticks, not four**, though the 5x ratio between
+`REFRESH_INTERVAL_S` and `DISPATCH_DURATION_S` reads like four. Every commanding tick re-arms
+the switch, so a command written at t0 has its next write due at t0 + (missed+1)x60: t0+240
+after three misses, t0+300 after four — the expiry instant itself, and past it in practice
+because the write ends a tick that reads the inverter first. Past three, the inverter reverts
+to self-consumption on its own and the next command starts from a released battery.
 
 ## Planning-time classification: `classify()`
 

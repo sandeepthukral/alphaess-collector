@@ -18,8 +18,14 @@ from registers import Command, DispatchMode
 
 # The dead man's switch is written 5x longer than the refresh interval. The GAP between them
 # is the failsafe margin -- how many ticks may be missed before the inverter reverts on its
-# own -- not a knob to shrink for its own sake. At 60/300 the loop can miss four consecutive
-# ticks and still hold the command.
+# own -- not a knob to shrink for its own sake.
+#
+# THAT MARGIN IS THREE TICKS, NOT FOUR, and the ratio reads like four. Every commanding tick
+# re-arms the switch, so a command written at t0 expires at t0+300 and the next write lands
+# at t0 + (missed+1)*60. Three missed ticks put it at t0+240, with a minute to spare; four
+# put it at t0+300 EXACTLY -- the instant of expiry, and in practice after it, since the
+# write happens at the end of a tick that reads the inverter first. So the fourth miss drops
+# the command and the battery reverts to self-consumption on its own.
 REFRESH_INTERVAL_S = 60
 DISPATCH_DURATION_S = 300
 

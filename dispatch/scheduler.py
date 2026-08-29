@@ -943,9 +943,16 @@ def next_deadline(deadline: float, now: float, interval: float) -> float:
     make the loop fire back-to-back until it caught up, which is a stampede of Modbus writes
     at the moment the inverter is already too slow to answer -- the failure feeding itself.
     Skipped intervals are skipped: the deadline advances in whole steps to the next one in
-    the future, so the loop keeps its phase and misses ticks rather than doubling up. Four
-    consecutive misses are survivable by construction (`slots.DISPATCH_DURATION_S` is 5x this
-    interval); a burst of writes into a struggling inverter is not.
+    the future, so the loop keeps its phase and misses ticks rather than doubling up.
+
+    WHAT THAT COSTS, EXACTLY: three consecutive misses are survivable, not four. Every
+    commanding tick re-arms the 300 s switch, so a command written at t0 has its next write
+    due at t0 + (missed+1)*60 -- t0+240 after three misses, t0+300 after four, which is the
+    expiry instant itself and in practice just past it, since the write ends a tick that
+    reads the inverter first. Beyond three misses the inverter reverts to self-consumption on
+    its own and the loop's next command starts from a released battery. That is a worse
+    outcome than a late tick and a better one than a burst of Modbus writes into an inverter
+    already too slow to answer, which is what replaying the backlog would produce.
     """
     if now < deadline:
         return deadline
