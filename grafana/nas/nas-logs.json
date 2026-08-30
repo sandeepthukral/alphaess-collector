@@ -8,7 +8,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 4,
   "editable": true,
   "refresh": "1m",
   "time": {
@@ -271,8 +271,7 @@
           "id": "extractFields",
           "options": {
             "source": "labels",
-            "replace": false,
-            "keepTime": true
+            "replace": false
           }
         },
         {
