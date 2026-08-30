@@ -8,7 +8,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "editable": true,
   "refresh": "1m",
   "time": {
@@ -276,20 +276,17 @@
           }
         },
         {
+          "id": "filterFieldsByName",
+          "options": {
+            "include": {
+              "pattern": "^(Time|container|Line)$"
+            }
+          }
+        },
+        {
           "id": "organize",
           "options": {
-            "excludeByName": {
-              "labels": true,
-              "tsNs": true,
-              "id": true,
-              "project": true,
-              "service": true,
-              "service_name": true,
-              "detected_level": true,
-              "instance": true,
-              "job": true,
-              "filename": true
-            },
+            "excludeByName": {},
             "indexByName": {
               "Time": 0,
               "container": 1,
