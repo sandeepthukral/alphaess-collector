@@ -8,7 +8,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 3,
+  "version": 5,
   "editable": true,
   "refresh": "1m",
   "time": {
@@ -244,7 +244,7 @@
       "id": 4,
       "type": "table",
       "title": "Errors and warnings",
-      "description": "The panel this dashboard exists for. Every WARNING and ERROR line from every container on the NAS, newest first. A table rather than a Logs panel so the container has a column of its own -- the Logs panel renders lines, not fields, and can only show labels inline at the end of the message. Case-insensitive because two sources set the level: Alloy's explicit parse of the Python services (WARNING) and Loki's own heuristic for everything else (warn).",
+      "description": "The panel this dashboard exists for. Every WARNING and ERROR line from every container on the NAS, newest first, with the level in its own colour-coded column so a routine warning is distinguishable from a real error at a glance. Case-insensitive because two sources set the level: Alloy's explicit parse of the Python services (WARNING) and Loki's own heuristic for everything else (warn).",
       "datasource": {
         "type": "loki",
         "uid": "loki"
@@ -271,15 +271,14 @@
           "id": "extractFields",
           "options": {
             "source": "labels",
-            "replace": false,
-            "keepTime": true
+            "replace": false
           }
         },
         {
           "id": "filterFieldsByName",
           "options": {
             "include": {
-              "pattern": "^(Time|container|Line)$"
+              "pattern": "^(Time|detected_level|container|Line)$"
             }
           }
         },
@@ -289,10 +288,12 @@
             "excludeByName": {},
             "indexByName": {
               "Time": 0,
-              "container": 1,
-              "Line": 2
+              "detected_level": 1,
+              "container": 2,
+              "Line": 3
             },
             "renameByName": {
+              "detected_level": "Level",
               "container": "Container",
               "Line": "Message"
             }
@@ -361,6 +362,74 @@
               {
                 "id": "custom.width",
                 "value": 190
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Level"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 78
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "WARNING": {
+                        "text": "warn",
+                        "color": "orange",
+                        "index": 0
+                      },
+                      "warning": {
+                        "text": "warn",
+                        "color": "orange",
+                        "index": 1
+                      },
+                      "warn": {
+                        "text": "warn",
+                        "color": "orange",
+                        "index": 2
+                      },
+                      "ERROR": {
+                        "text": "error",
+                        "color": "red",
+                        "index": 3
+                      },
+                      "error": {
+                        "text": "error",
+                        "color": "red",
+                        "index": 4
+                      },
+                      "CRITICAL": {
+                        "text": "crit",
+                        "color": "dark-red",
+                        "index": 5
+                      },
+                      "critical": {
+                        "text": "crit",
+                        "color": "dark-red",
+                        "index": 6
+                      },
+                      "fatal": {
+                        "text": "crit",
+                        "color": "dark-red",
+                        "index": 7
+                      }
+                    }
+                  }
+                ]
               }
             ]
           }

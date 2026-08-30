@@ -1,0 +1,12 @@
+Grafana logs an ERROR on every boot when this directory does not exist:
+
+  Failed to read plugin provisioning files from directory
+  path=/etc/grafana/provisioning/plugins error="no such file or directory"
+
+Harmless -- no plugin is provisioned this way; GF_INSTALL_PLUGINS in
+docker-compose.yml is what installs the ECharts panel -- but it is logged at
+error level, so it lands in the NAS Container Logs "Errors and warnings" panel
+twice per restart and crowds the one view that has to stay readable.
+
+An empty directory is enough to silence it. Git cannot track one, hence this
+file. Grafana only reads *.yaml/*.yml here, so this text is ignored.
