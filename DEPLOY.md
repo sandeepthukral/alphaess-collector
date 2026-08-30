@@ -1594,8 +1594,8 @@ nothing checks that across the two repos.
 ### Notification
 
 `nas-log-errors.yml` provisions the rule only, like the two rules beside it: Grafana shows
-**Container logging errors** firing after five continuous minutes of error-level lines,
-and delivery is yours to wire up.
+**Container logging errors** firing per-container after five continuous minutes of more
+than three error-level lines, and delivery is yours to wire up.
 
 **For Uptime Kuma, poll rather than push.** A Kuma *push* monitor goes red when a ping
 stops arriving, so a Grafana contact point that fires only during an alert produces a

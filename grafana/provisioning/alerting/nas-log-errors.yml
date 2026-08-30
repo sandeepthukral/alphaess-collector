@@ -45,15 +45,19 @@ groups:
           service: nas-logs
         annotations:
           summary: >-
-            {{ $values.B.Value }} error lines logged on the NAS in the last 5 minutes.
+            {{ $labels.container }}: {{ $values.B.Value }} error lines logged on the NAS
+            in the last 5 minutes.
           description: >-
             Open Dashboards -> NAS -> Container Logs and read the "Errors and warnings"
-            panel, which is the same query with the log bodies attached. The "Errors and
-            warnings by project" panel above it names the repo. `sudo docker logs` on
-            that container is still the fallback if you need lines from before Alloy
-            started collecting.
+            panel, which is the same query with the log bodies attached, filtered to
+            {{ $labels.container }}. `sudo docker logs` on that container is still the
+            fallback if you need lines from before Alloy started collecting.
         data:
           # A: how many error-level lines each container produced, per 5-minute window.
+          # Split `by (container)` so each container that breaches the threshold becomes
+          # its own alert instance, with its own label -- that's what lets the
+          # summary/description above name the offender instead of sending you to the
+          # dashboard just to find out which container is involved.
           #
           # Case-insensitive, because two things set the level and they disagree on case:
           # Alloy parses the Python services explicitly and keeps Python's spelling
@@ -73,7 +77,7 @@ groups:
               refId: A
               queryType: range
               expr: >-
-                sum(count_over_time({container=~".+"}
+                sum by (container) (count_over_time({container=~".+"}
                 | detected_level =~ "(?i)(error|critical|fatal)" [5m]))
           - refId: B
             datasourceUid: __expr__
@@ -82,9 +86,12 @@ groups:
               type: reduce
               expression: A
               reducer: last
-          # C: any error at all. The threshold is 0 rather than a tolerance because the
-          # debounce is `for: 5m` above -- this rule's job is to notice errors that
-          # persist, not to decide how many errors are acceptable.
+          # C: more than a couple errors, not any error at all. A container can log one
+          # or two ERROR lines on a single failed poll/retry and recover on its own --
+          # that's normal enough on this stack (see the collector's own retry logic)
+          # that gt 0 paged on noise. gt 3 combined with the `for: 5m` debounce above
+          # means this only fires for a container that is erroring repeatedly and
+          # continuously, not once or twice in passing.
           - refId: C
             datasourceUid: __expr__
             model:
@@ -94,4 +101,4 @@ groups:
               conditions:
                 - evaluator:
                     type: gt
-                    params: [0]
+                    params: [3]
