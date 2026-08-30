@@ -1564,9 +1564,17 @@ Two things leave a container out, and both are silent:
   sudo docker inspect -f '{{.HostConfig.LogConfig.Type}}' <container>
   ```
 
-Logs are not backfilled. Alloy starts from the current position, so anything written
-before it first ran, or while it was down, stays on disk and is reachable only through
-`docker logs`.
+**The first start replays history.** On an empty positions file Alloy reads each
+container's whole retained `json-file` log, not just new lines — so a container without a
+rotation cap hands over months at once. Loki refuses anything past
+`reject_old_samples_max_age` and Alloy logs a `400` per rejected batch. That looks alarming
+and is not: the valid entries in each batch are still stored, and it drains in about a
+minute. Observed on the first NAS start 2026-08-30, which replayed months of sonarr,
+radarr and teslamate history and left a 20 MB store.
+
+What is genuinely lost is anything older than the 30-day window, and anything written
+while Alloy is down that rotates away before it returns. `docker logs` is the only route
+to those.
 
 ### Which half lives where
 
@@ -1620,6 +1628,21 @@ by hand must therefore use:
 `detected_level = "error"` returns half the errors on the NAS, with nothing to say so.
 `tests/test_grafana_provisioning.py::test_every_severity_filter_is_case_insensitive`
 pins this for the committed queries.
+
+### Querying Loki by hand
+
+`exec` into **loki**, not alloy — Alloy's image is distroless and has no `wget`, so the
+obvious command fails with "executable file not found".
+
+```sh
+cd /volume1/docker/nas-observability
+sudo docker compose exec loki wget -qO- \
+  'http://localhost:3100/loki/api/v1/label/project/values'
+```
+
+That lists every compose project currently reaching Loki, which is the fastest check that
+collection is host-wide rather than just this stack. A project missing from it is one
+whose log driver needs checking, per "What is collected" above.
 
 ### Retention
 
