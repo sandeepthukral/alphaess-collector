@@ -2,32 +2,55 @@
   "uid": "nas-container-logs",
   "title": "Container Logs",
   "description": "Logs from every container on the NAS, whatever repo or compose project it came from. Collected by the nas-observability stack (Alloy -> Loki); this dashboard is only the reader.",
-  "tags": ["logs", "nas"],
+  "tags": [
+    "logs",
+    "nas"
+  ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "refresh": "1m",
-  "time": { "from": "now-6h", "to": "now" },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "templating": {
     "list": [
       {
         "name": "project",
         "label": "Project",
         "type": "query",
-        "datasource": { "type": "loki", "uid": "loki" },
-        "query": { "label": "project", "refId": "project", "type": 1 },
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
+        "query": {
+          "label": "project",
+          "refId": "project",
+          "type": 1
+        },
         "refresh": 2,
         "includeAll": true,
         "allValue": ".+",
         "multi": true,
-        "current": { "text": ["All"], "value": ["$__all"] }
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
       },
       {
         "name": "container",
         "label": "Container",
         "type": "query",
-        "datasource": { "type": "loki", "uid": "loki" },
+        "datasource": {
+          "type": "loki",
+          "uid": "loki"
+        },
         "query": {
           "label": "container",
           "stream": "{project=~\"$project\"}",
@@ -38,14 +61,24 @@
         "includeAll": true,
         "allValue": ".+",
         "multi": true,
-        "current": { "text": ["All"], "value": ["$__all"] }
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ]
+        }
       },
       {
         "name": "search",
         "label": "Contains",
         "type": "textbox",
         "query": "",
-        "current": { "text": "", "value": "" }
+        "current": {
+          "text": "",
+          "value": ""
+        }
       }
     ]
   },
@@ -55,18 +88,35 @@
       "type": "stat",
       "title": "Containers reporting",
       "description": "Distinct containers that have logged anything in the last 5 minutes. A drop here is Alloy having quietly stopped discovering something -- the failure that would otherwise look like a container simply being quiet.",
-      "datasource": { "type": "loki", "uid": "loki" },
-      "gridPos": { "h": 8, "w": 4, "x": 0, "y": 0 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "loki", "uid": "loki" },
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
           "queryType": "instant",
           "expr": "count(count by (container) (count_over_time({container=~\".+\"}[5m])))"
         }
       ],
       "options": {
-        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
         "colorMode": "value",
         "graphMode": "none",
         "textMode": "auto"
@@ -78,8 +128,14 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "green", "value": 1 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
             ]
           }
         },
@@ -91,24 +147,45 @@
       "type": "barchart",
       "title": "Errors and warnings by project",
       "description": "Which repo is unhappy. `project` is the compose project name, which Compose sets on every container it creates -- so a new repo appears here without configuring anything.",
-      "datasource": { "type": "loki", "uid": "loki" },
-      "gridPos": { "h": 8, "w": 10, "x": 4, "y": 0 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 4,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "loki", "uid": "loki" },
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
           "queryType": "range",
           "legendFormat": "{{project}}",
           "expr": "sum by (project) (count_over_time({container=~\"$container\", project=~\"$project\"} | detected_level =~ \"(?i)(warn|warning|error|critical|fatal)\" [$__auto]))"
         }
       ],
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
         "stacking": "normal",
         "xTickLabelRotation": 0
       },
       "fieldConfig": {
-        "defaults": { "unit": "short", "decimals": 0, "custom": { "axisLabel": "lines" } },
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "axisLabel": "lines"
+          }
+        },
         "overrides": []
       }
     },
@@ -117,68 +194,204 @@
       "type": "timeseries",
       "title": "Error rate by container",
       "description": "Errors only, no warnings -- warnings are routine on some of these containers and would hide a genuine error spike inside them.",
-      "datasource": { "type": "loki", "uid": "loki" },
-      "gridPos": { "h": 8, "w": 10, "x": 14, "y": 0 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 10,
+        "x": 14,
+        "y": 0
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "loki", "uid": "loki" },
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
           "queryType": "range",
           "legendFormat": "{{container}}",
           "expr": "sum by (container) (count_over_time({container=~\"$container\", project=~\"$project\"} | detected_level =~ \"(?i)(error|critical|fatal)\" [$__auto]))"
         }
       ],
       "options": {
-        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
-        "tooltip": { "mode": "multi", "sort": "desc" }
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "short",
           "decimals": 0,
-          "custom": { "drawStyle": "bars", "fillOpacity": 60, "axisLabel": "lines" }
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "axisLabel": "lines"
+          }
         },
         "overrides": []
       }
     },
     {
       "id": 4,
-      "type": "logs",
+      "type": "table",
       "title": "Errors and warnings",
-      "description": "The panel this dashboard exists for. Every WARNING and ERROR line from every container on the NAS, newest first. Case-insensitive because two sources set the level: Alloy's explicit parse of the Python services (WARNING) and Loki's own heuristic for everything else (warn).",
-      "datasource": { "type": "loki", "uid": "loki" },
-      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 8 },
+      "description": "The panel this dashboard exists for. Every WARNING and ERROR line from every container on the NAS, newest first. A table rather than a Logs panel so the container has a column of its own -- the Logs panel renders lines, not fields, and can only show labels inline at the end of the message. Case-insensitive because two sources set the level: Alloy's explicit parse of the Python services (WARNING) and Loki's own heuristic for everything else (warn).",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "loki", "uid": "loki" },
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
           "queryType": "range",
           "expr": "{container=~\"$container\", project=~\"$project\"} | detected_level =~ \"(?i)(warn|warning|error|critical|fatal)\" |= \"$search\""
         }
       ],
+      "transformations": [
+        {
+          "id": "extractFields",
+          "options": {
+            "source": "labels",
+            "replace": false,
+            "keepTime": true
+          }
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "labels": true,
+              "tsNs": true,
+              "id": true,
+              "project": true,
+              "service": true,
+              "service_name": true,
+              "detected_level": true,
+              "instance": true,
+              "job": true,
+              "filename": true
+            },
+            "indexByName": {
+              "Time": 0,
+              "container": 1,
+              "Line": 2
+            },
+            "renameByName": {
+              "container": "Container",
+              "Line": "Message"
+            }
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "Time",
+                "desc": true
+              }
+            ]
+          }
+        }
+      ],
       "options": {
-        "showTime": true,
-        "showLabels": false,
-        "showCommonLabels": false,
-        "wrapLogMessage": true,
-        "prettifyLogMessage": false,
-        "enableLogDetails": true,
-        "dedupStrategy": "none",
-        "sortOrder": "Descending"
+        "showHeader": true,
+        "cellHeight": "lg",
+        "footer": {
+          "show": false,
+          "reducer": [
+            "sum"
+          ],
+          "countRows": false,
+          "fields": ""
+        }
       },
-      "fieldConfig": { "defaults": {}, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "cellOptions": {
+              "type": "auto",
+              "wrapText": true
+            },
+            "align": "left",
+            "filterable": false,
+            "inspect": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Time"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 108
+              },
+              {
+                "id": "unit",
+                "value": "time:YYYY-MM-DD HH:mm:ss"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Container"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 190
+              }
+            ]
+          }
+        ]
+      }
     },
     {
       "id": 5,
       "type": "logs",
       "title": "All logs",
       "description": "The `docker logs` replacement: everything, at every level, filterable by the Container and Contains controls at the top. Use this once the panel above has told you which container to look at.",
-      "datasource": { "type": "loki", "uid": "loki" },
-      "gridPos": { "h": 13, "w": 24, "x": 0, "y": 19 },
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 13,
+        "w": 24,
+        "x": 0,
+        "y": 19
+      },
       "targets": [
         {
           "refId": "A",
-          "datasource": { "type": "loki", "uid": "loki" },
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
           "queryType": "range",
           "expr": "{container=~\"$container\", project=~\"$project\"} |= \"$search\""
         }
@@ -193,7 +406,10 @@
         "dedupStrategy": "none",
         "sortOrder": "Descending"
       },
-      "fieldConfig": { "defaults": {}, "overrides": [] }
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
     }
   ]
 }
