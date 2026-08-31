@@ -808,3 +808,186 @@ def test_the_service_receives_every_setting_it_reads():
                 "MIJNBATTERIJ_TOTALS_TTL_SECONDS", "MIJNBATTERIJ_CYCLES_OFFSET",
                 "BATTERY_CAPACITY_KWH"):
         assert f"{var}:" in block.group(1), f"{var} never reaches the container"
+
+
+# --------------------------------------------------------------------------
+# Telling an empty bucket from a dead collector, across a midnight
+# --------------------------------------------------------------------------
+
+class WindowedQueryApi:
+    """Answers the newest-sample probe only; collect() patches the loaders."""
+
+    def __init__(self, newest=None):
+        self.newest = newest
+
+    def query(self, flux):
+        if "last()" not in flux:
+            return []
+
+        newest = self.newest
+
+        class Rec:
+            @staticmethod
+            def get_time():
+                return newest
+
+        class Table:
+            records = [Rec()] if newest is not None else []
+
+        return [Table()]
+
+
+def test_an_outage_spanning_midnight_still_reports_stale(monkeypatch):
+    """The collector died at 22:00 and stayed dead. From 00:00 today's window is
+    empty, so a verdict drawn from that window alone says "no data at all" --
+    fresh install, wrong sys_sn, unscoped token -- at exactly the moment the
+    outage is longest and the answer is "stale"."""
+    now = dt.datetime(2026, 7, 17, 3, 0, tzinfo=UTC)         # 05:00 local
+    died = dt.datetime(2026, 7, 16, 20, 0, tzinfo=UTC)       # 22:00 local yesterday
+    _stub_influx(monkeypatch, [], [])
+
+    snap, outcome = mb.collect(WindowedQueryApi(newest=died), bucket="alphaess",
+                               sys_sn="SN", totals=mb.Totals(3600), config=config(),
+                               now=now)
+
+    assert (snap, outcome) == (None, "stale")
+
+
+def test_a_genuinely_empty_bucket_is_still_no_data(monkeypatch):
+    now = dt.datetime(2026, 7, 17, 3, 0, tzinfo=UTC)
+    _stub_influx(monkeypatch, [], [])
+
+    assert mb.collect(WindowedQueryApi(newest=None), bucket="alphaess", sys_sn="SN",
+                      totals=mb.Totals(3600), config=config(), now=now) == (None, "no-data")
+
+
+def test_the_seconds_after_midnight_are_not_an_alarm(monkeypatch):
+    """Between the local midnight and the day's first poll the window is empty
+    while the collector is perfectly healthy. ~30 s wide on a 300 s cycle is
+    about one hit every ten days -- a false alarm per fortnight if it were
+    treated as a fault."""
+    now = dt.datetime(2026, 7, 16, 22, 0, 10, tzinfo=UTC)    # 00:00:10 local
+    just_before = dt.datetime(2026, 7, 16, 21, 59, 50, tzinfo=UTC)
+    _stub_influx(monkeypatch, [], [])
+
+    assert mb.collect(WindowedQueryApi(newest=just_before), bucket="alphaess",
+                      sys_sn="SN", totals=mb.Totals(3600), config=config(),
+                      now=now) == (None, "day-start")
+
+
+# --------------------------------------------------------------------------
+# Partial price feed
+# --------------------------------------------------------------------------
+
+def test_a_price_feed_that_stopped_mid_day_sends_zero_not_a_fraction(monkeypatch):
+    """integrate_by_interval drops energy it has no price for, so a feed that
+    stopped at 08:00 returns eight hours of saving for a twenty-hour day -- a
+    plausible number, published publicly, with nothing to say it is a third of
+    the truth."""
+    now = dt.datetime(2026, 7, 17, 18, 0, tzinfo=UTC)        # 20:00 local
+    start = dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC)
+    samples = constant_samples(start, now, grid=1000.0, battery=-1000.0)
+    _stub_influx(monkeypatch, samples, hourly_intervals(start, 8))   # 8 h of 20
+
+    snap, _ = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                         totals=mb.Totals(3600), config=config(), now=now)
+
+    assert snap.payload["batteryResult"] == 0.0
+    assert snap.price_coverage == pytest.approx(0.4, abs=0.01)
+
+
+def test_a_fully_priced_day_still_reports_its_saving(monkeypatch):
+    """The coverage check must not swallow the normal case."""
+    now = dt.datetime(2026, 7, 17, 18, 0, tzinfo=UTC)
+    start = dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC)
+    samples = constant_samples(start, now, grid=1000.0, battery=-1000.0)
+    _stub_influx(monkeypatch, samples, hourly_intervals(start, 24))
+
+    snap, _ = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                         totals=mb.Totals(3600), config=config(), now=now)
+
+    assert snap.payload["batteryResult"] != 0.0
+    assert snap.price_coverage == pytest.approx(1.0)
+
+
+def test_the_price_coverage_reaches_the_status_point():
+    """So a zero batteryResult can be told from a genuinely break-even day."""
+    now = dt.datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
+    snap = mb.Snapshot(_payload(), sample(now), age_s=1.0, sample_count=2,
+                       price_coverage=0.4)
+    assert "price_coverage=0.4" in mb.status_point(snap, "SN", "ok", 200, now).to_line_protocol()
+
+
+# --------------------------------------------------------------------------
+# Empty string settings that are not numbers
+# --------------------------------------------------------------------------
+
+def test_an_empty_base_url_falls_back_instead_of_retrying_forever(monkeypatch):
+    """`MIJNBATTERIJ_BASE_URL=` leaves base_url "", every POST goes to
+    "/api/live" with no scheme, requests raises MissingSchema -- a
+    RequestException, so submit() wraps it into SubmitError and the loop retries
+    politely forever without naming the setting that is wrong."""
+    monkeypatch.setenv("MIJNBATTERIJ_BASE_URL", "")
+    assert mb.load_config()["base_url"] == mb.API_BASE
+
+
+def test_an_empty_mode_falls_back_to_the_conservative_value(monkeypatch):
+    monkeypatch.setenv("MIJNBATTERIJ_MODE", "")
+    assert mb.load_config()["mode"] == "self_consumption"
+
+
+# --------------------------------------------------------------------------
+# A cycle that raised must leave a trace
+# --------------------------------------------------------------------------
+
+def _loop_once(monkeypatch, write_api, heartbeats, *, raises=None, cycles=1):
+    monkeypatch.setenv("MIJNBATTERIJ_HEARTBEAT_URL", "http://kuma.invalid/push/x")
+    monkeypatch.setattr(mb, "send_heartbeat",
+                        lambda url, status="up", msg="OK": heartbeats.append((status, msg)))
+    if raises is not None:
+        def boom(*a, **k):
+            raise raises
+        monkeypatch.setattr(mb, "run_once", boom)
+    mb.run_loop(FakeQueryApi(), write_api, FakeSession(), bucket="alphaess",
+                sys_sn="SN", api_key="key", config=config(interval_s=0),
+                max_cycles=cycles)
+
+
+def test_an_influxdb_outage_is_recorded_not_just_logged(monkeypatch):
+    """collect() raises before there is anything to submit, so without a row the
+    Grafana panel shows a gap identical to the container not running -- which is
+    the one question mijnbatterij_submit exists to answer."""
+    write_api = RecordingWriteApi()
+    _loop_once(monkeypatch, write_api, [], raises=OSError("influxdb unreachable"))
+
+    assert len(write_api.points) == 1
+    assert "outcome=error" in write_api.points[0]
+    assert "submitted=0" in write_api.points[0]
+
+
+def test_a_run_of_unexpected_failures_pushes_the_heartbeat_down(monkeypatch):
+    """Matching both sibling paths: one blip is noise, a run of them is not."""
+    heartbeats = []
+    _loop_once(monkeypatch, RecordingWriteApi(), heartbeats,
+               raises=OSError("influxdb unreachable"), cycles=2)
+
+    assert [h[0] for h in heartbeats] == ["down"]
+    assert "influxdb unreachable" in heartbeats[0][1]
+
+
+def test_the_first_cycle_after_midnight_does_not_push_down(monkeypatch):
+    """day-start is a normal state that clears itself within one poll interval;
+    treating it as a fault is a false alarm roughly every ten days."""
+    heartbeats = []
+    monkeypatch.setattr(mb, "run_once", lambda *a, **k: (None, "day-start"))
+    _loop_once(monkeypatch, RecordingWriteApi(), heartbeats)
+
+    assert heartbeats == []
+
+
+def test_an_outage_does_push_down(monkeypatch):
+    heartbeats = []
+    monkeypatch.setattr(mb, "run_once", lambda *a, **k: (None, "stale"))
+    _loop_once(monkeypatch, RecordingWriteApi(), heartbeats)
+
+    assert heartbeats == [("down", "nothing submitted: stale")]

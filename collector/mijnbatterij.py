@@ -133,6 +133,18 @@ def _num_env(name: str, default: float, cast=float):
         return default
 
 
+def _str_env(name: str, default: str) -> str:
+    """A string setting, treating an EMPTY value as absent.
+
+    Same reasoning as _num_env, different symptom. `MIJNBATTERIJ_BASE_URL=` in
+    .env leaves base_url as "", every POST goes to "/api/live" with no scheme,
+    and requests raises MissingSchema -- a RequestException, so submit() wraps
+    it into SubmitError and the loop retries it politely forever without ever
+    naming the setting that is wrong.
+    """
+    return os.environ.get(name, "").strip() or default
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw = os.environ.get(name, "").strip().lower()
     if not raw:
@@ -221,6 +233,37 @@ from(bucket: "{bucket}")
   |> keep(columns: ["_time"])
   |> sort(columns: ["_time"])
 """
+
+
+_NEWEST_SAMPLE_FLUX = """
+from(bucket: "{bucket}")
+  |> range(start: -{lookback})
+  |> filter(fn: (r) => r._measurement == "{meas}" and r.sys_sn == "{sys_sn}"
+        and r._field == "soc_percent")
+  |> last()
+"""
+
+
+def newest_sample_time(query_api, bucket: str, sys_sn: str,
+                       lookback: str = "30d") -> dt.datetime | None:
+    """When power_readings last held anything, IGNORING the day window.
+
+    Needed to tell an empty bucket from a dead collector. collect() looks only
+    at today, so a collector that died at 22:00 and stayed dead leaves today's
+    window empty from midnight -- and a verdict drawn from that window alone
+    says "no data at all", i.e. fresh install / wrong sys_sn / unscoped token,
+    at precisely the moment the outage is longest and the true answer is
+    "stale". The diagnostic would invert exactly when it is most needed.
+    """
+    flux = _NEWEST_SAMPLE_FLUX.format(
+        bucket=bucket, meas=pricing.POWER_MEASUREMENT, sys_sn=sys_sn, lookback=lookback)
+    newest = None
+    for table in query_api.query(flux):
+        for rec in table.records:
+            when = rec.get_time()
+            if newest is None or when > newest:
+                newest = when
+    return newest
 
 
 def _sum_query(query_api, flux: str) -> float:
@@ -388,7 +431,7 @@ class Snapshot:
     payload the same way and the status point can record what was sent."""
 
     def __init__(self, payload: dict, latest: Sample, age_s: float, sample_count: int,
-                 skipped_s: float = 0.0):
+                 skipped_s: float = 0.0, price_coverage: float = 1.0):
         self.payload = payload
         self.latest = latest
         self.age_s = age_s
@@ -398,6 +441,10 @@ class Snapshot:
         # unknown amount, which is worth being able to see on a panel next to
         # the figure itself rather than inferring from a gap in power_readings.
         self.skipped_s = skipped_s
+        # Fraction of today so far that market_price actually covers. Below
+        # pricing.MIN_PRICE_COVERAGE, batteryResult was sent as 0 -- this is
+        # what tells that zero apart from a break-even day.
+        self.price_coverage = price_coverage
 
 
 class Totals:
@@ -445,19 +492,44 @@ def collect(query_api, *, bucket: str, sys_sn: str, totals: Totals, config: dict
     """Read today's samples and prices and build the payload.
 
     Returns (snapshot, outcome). A None snapshot comes with the reason it is
-    None, and the two reasons are not interchangeable: "no-data" is an empty
-    bucket -- a fresh install, a wrong sys_sn, a token that cannot read -- and
-    "stale" is a collector that stopped. One is a deployment mistake and the
-    other is an outage, they get fixed in different places, and a panel showing
-    only "nothing was submitted" cannot tell you which you have.
+    None, and the three reasons are not interchangeable:
+
+      no-data    power_readings holds nothing at all for this sys_sn -- a fresh
+                 install, a wrong serial, a token that cannot read.
+      stale      samples exist but the newest is older than stale_after_s: the
+                 collector stopped.
+      day-start  the day rolled over seconds ago and its first poll has not
+                 landed. Benign, clears itself, and deliberately not a fault.
+
+    The first two are fixed in different places, and a panel showing only
+    "nothing was submitted" cannot tell you which you have. Note that the
+    verdict is drawn from the newest sample ANYWHERE, not from today's window --
+    see newest_sample_time for why that distinction is the whole point.
     """
     now = dt.datetime.now(dt.UTC) if now is None else now
     start, end = today_window(now)
 
     samples = pricing.load_samples_influx(query_api, bucket, sys_sn, start, end)
     if not samples:
-        log.warning("No power_readings since %s, nothing to submit", start.isoformat())
-        return None, "no-data"
+        # An empty day window is three different things, and they are told apart
+        # by the newest sample ANYWHERE, not by the window that is empty.
+        newest = newest_sample_time(query_api, bucket, sys_sn)
+        if newest is None:
+            log.warning("power_readings holds nothing for sys_sn=%s -- check the "
+                        "serial and that the token can read the bucket", sys_sn)
+            return None, "no-data"
+        age = (now - newest).total_seconds()
+        if age > config["stale_after_s"]:
+            log.warning("No samples today; newest anywhere is %.0fs old -- the "
+                        "collector has been down since before midnight", age)
+            return None, "stale"
+        # Fresh sample, empty day: the first poll of the new day has not landed
+        # yet. Roughly 30 s wide, so on a 300 s cycle it is hit about once every
+        # ten days -- and it is a normal state, not a fault. Saying so keeps it
+        # out of the heartbeat instead of raising one false alarm per fortnight.
+        log.info("Day just rolled over and today's first sample (%.0fs old) is not "
+                 "in the window yet; nothing to submit this cycle", age)
+        return None, "day-start"
 
     latest = samples[-1]
     age = (now - latest.time).total_seconds()
@@ -474,14 +546,31 @@ def collect(query_api, *, bucket: str, sys_sn: str, totals: Totals, config: dict
 
     # Today's euro result, from the same model daily_cost will store tomorrow.
     # Prices come from the `market_price` rows refresh-prices.sh keeps ahead of
-    # the clock; an unpriced stretch contributes zero to both worlds, so a
-    # missing price feed shows as a flat result rather than a wrong one.
+    # the clock.
+    #
+    # CHECKED FOR COVERAGE, not merely for presence. integrate_by_interval drops
+    # energy in an interval it has no price for, so a feed that stopped at 08:00
+    # does not fail loudly at 20:00 -- it quietly returns eight hours of saving
+    # for a twenty-hour day, and publishes it. That is what
+    # pricing.MIN_PRICE_COVERAGE exists to catch, and it is the one gate check a
+    # partial day does NOT fail by construction: prices are published a day
+    # ahead, so the elapsed part of today should be fully priced or something is
+    # wrong. Short coverage sends 0 with a warning rather than a plausible
+    # fraction of the truth, and price_coverage lands on the status point so the
+    # zero can be told from a genuinely break-even day.
     intervals = pricing.load_prices_influx(query_api, bucket, start, end)
     local_day = start.astimezone(NL_TZ).date()
-    result_today = pricing.compute_day(samples, intervals, local_day)["saving"] \
-        if intervals else 0.0
-    if not intervals:
-        log.warning("No market_price rows for %s -- batteryResult sent as 0", local_day)
+    elapsed_s = (end - start).total_seconds()
+    price_coverage = (pricing.priced_seconds(intervals, start, end) / elapsed_s
+                      if elapsed_s > 0 else 0.0)
+    if price_coverage >= pricing.MIN_PRICE_COVERAGE:
+        result_today = pricing.compute_day(samples, intervals, local_day)["saving"]
+    else:
+        result_today = 0.0
+        log.warning("market_price covers only %.1f%% of %s so far (need %.1f%%) -- "
+                    "batteryResult sent as 0 rather than a partial day's saving. "
+                    "Check refresh-prices.sh",
+                    price_coverage * 100, local_day, pricing.MIN_PRICE_COVERAGE * 100)
 
     saving_total, discharge_total = totals.get(query_api, bucket, sys_sn, start,
                                                max_gap_s=config["max_gap_s"])
@@ -495,7 +584,8 @@ def collect(query_api, *, bucket: str, sys_sn: str, totals: Totals, config: dict
         load_balancing=config["load_balancing"],
         charge_positive=config["charge_positive"],
     )
-    return Snapshot(payload, latest, age, len(samples), skipped_s), "ok"
+    return Snapshot(payload, latest, age, len(samples), skipped_s,
+                    price_coverage), "ok"
 
 
 # --------------------------------------------------------------------------
@@ -609,6 +699,7 @@ def status_point(snapshot: Snapshot | None, sys_sn: str, outcome: str,
         point = point.field("sample_age_s", round(snapshot.age_s, 1))
         point = point.field("sample_count", float(snapshot.sample_count))
         point = point.field("gap_skipped_s", round(snapshot.skipped_s, 1))
+        point = point.field("price_coverage", round(snapshot.price_coverage, 4))
     return point
 
 
@@ -658,10 +749,10 @@ def load_config() -> dict:
         "max_gap_s": _num_env("MIJNBATTERIJ_MAX_SAMPLE_GAP_S", DEFAULT_MAX_SAMPLE_GAP_S),
         "capacity_kwh": capacity,
         "cycles_offset": _num_env("MIJNBATTERIJ_CYCLES_OFFSET", 0.0),
-        "mode": env("MIJNBATTERIJ_MODE", "self_consumption"),
+        "mode": _str_env("MIJNBATTERIJ_MODE", "self_consumption"),
         "load_balancing": _bool_env("MIJNBATTERIJ_LOAD_BALANCING", False),
         "charge_positive": _bool_env("MIJNBATTERIJ_CHARGE_POSITIVE", True),
-        "base_url": env("MIJNBATTERIJ_BASE_URL", API_BASE).rstrip("/"),
+        "base_url": _str_env("MIJNBATTERIJ_BASE_URL", API_BASE).rstrip("/"),
     }
 
 
@@ -705,8 +796,11 @@ def run_once(query_api, write_api, session, *, bucket: str, sys_sn: str,
 
 
 def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
-             api_key: str, config: dict) -> None:
+             api_key: str, config: dict, max_cycles: int | None = None) -> None:
+    """The submit loop. `max_cycles` exists so the failure paths below can be
+    tested without a signal or a clock -- production never passes it."""
     running = True
+    cycles_done = 0
 
     def stop(signum, _frame):
         nonlocal running
@@ -731,7 +825,14 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
                 query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
                 api_key=api_key, config=config, totals=totals, dry_run=False)
             consecutive_failures = 0
-            if snapshot is None:
+            if snapshot is not None:
+                send_heartbeat(heartbeat_url)
+            elif outcome == "day-start":
+                # The one benign empty cycle: the day rolled over seconds ago
+                # and its first poll has not landed. It clears itself within one
+                # poll interval, so it is neither a submission nor a fault.
+                pass
+            else:
                 # NOT a heartbeat "up". Nothing reached the platform, and this
                 # is the failure mode the monitor is there for: a collector
                 # outage submits nothing for hours while every cycle completes
@@ -740,8 +841,6 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
                 # backing off would not help, since the fault is upstream of
                 # this service and retrying costs one cheap query.
                 send_heartbeat(heartbeat_url, "down", f"nothing submitted: {outcome}")
-            else:
-                send_heartbeat(heartbeat_url)
         except SubmitError as exc:
             consecutive_failures += 1
             log.error("Submission failed (%d consecutive): %s", consecutive_failures, exc)
@@ -752,9 +851,18 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
             # noise, a run of them is the thing worth waking up for.
             if consecutive_failures >= 2:
                 send_heartbeat(heartbeat_url, "down", str(exc)[:200])
-        except Exception:
+        except Exception as exc:
             consecutive_failures += 1
             log.exception("Submission cycle failed (%d consecutive)", consecutive_failures)
+            # Leaves a trace, like both sibling paths. This is where an
+            # unreachable InfluxDB lands -- collect() raises before there is
+            # anything to submit -- and without a row the Grafana panel shows a
+            # gap identical to the container simply not running, which is the
+            # question mijnbatterij_submit exists to answer.
+            _write(write_api, bucket, status_point(
+                None, sys_sn, "error", None, dt.datetime.now(dt.UTC)))
+            if consecutive_failures >= 2:
+                send_heartbeat(heartbeat_url, "down", f"{type(exc).__name__}: {exc}"[:200])
 
         if config["rank_interval_s"] > 0 and time.monotonic() >= next_rank:
             # Bare `except Exception`, not `except SubmitError`. The rank is a
@@ -775,6 +883,10 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
             except Exception:
                 log.exception("Rank fetch raised; continuing to submit")
             next_rank = time.monotonic() + config["rank_interval_s"]
+
+        cycles_done += 1
+        if max_cycles is not None and cycles_done >= max_cycles:
+            break
 
         sleep_for = interval
         if consecutive_failures:

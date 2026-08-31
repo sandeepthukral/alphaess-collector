@@ -19,14 +19,17 @@ be published as live, and a missing price feed would be published as a real
 flowchart TD
     A["every MIJNBATTERIJ_INTERVAL_SECONDS (300)"] --> B["today_window(now)<br/>local NL midnight → now"]
     B --> C["pricing.load_samples_influx<br/>power_readings"]
-    C --> D{any samples?}
-    D -- no --> SKIP1["outcome=no-data<br/>(empty bucket: fresh install,<br/>wrong sys_sn, unscoped token)<br/>heartbeat DOWN"]
+    C --> D{any samples today?}
+    D -- no --> N["newest_sample_time()<br/>ignores the day window"]
+    N -- "nothing, ever" --> SKIP1["outcome=no-data<br/>(fresh install, wrong sys_sn,<br/>unscoped token)<br/>heartbeat DOWN"]
+    N -- "older than stale_after_s" --> SKIP2
+    N -- "fresh" --> DAY["outcome=day-start<br/>(first poll of the new day<br/>has not landed; benign)<br/>NO heartbeat"]
     D -- yes --> E{"age of newest sample<br/>&gt; MIJNBATTERIJ_STALE_AFTER_SECONDS (600)?"}
     E -- yes --> SKIP2["outcome=stale<br/>(a collector outage is not a reading)<br/>heartbeat DOWN"]
     E -- no --> F["battery_energy_kwh(samples)<br/>chargedToday / dischargedToday<br/>gaps &gt; MIJNBATTERIJ_MAX_SAMPLE_GAP_S skipped,<br/>counted into gap_skipped_s"]
     F --> G["pricing.load_prices_influx<br/>market_price"]
-    G --> H{any price intervals?}
-    H -- no --> Z["batteryResult = 0<br/>+ warning"]
+    G --> H{"priced_seconds / elapsed<br/>&gt;= pricing.MIN_PRICE_COVERAGE (0.999)?"}
+    H -- no --> Z["batteryResult = 0<br/>+ warning; price_coverage on the point"]
     H -- yes --> I["pricing.compute_day(...)['saving']<br/>gate() deliberately NOT applied"]
     Z --> J
     I --> J["Totals.get() — cached MIJNBATTERIJ_TOTALS_TTL_SECONDS<br/>Σ daily_cost.saving, Σ daily_energy.discharge_kwh_api"]
@@ -40,7 +43,7 @@ flowchart TD
     classDef skip fill:#eceef0,stroke:#6b7280,color:#374151;
     classDef bad fill:#fdecec,stroke:#c0392b,color:#8b2620;
     class OK ok;
-    class SKIP1,SKIP2,Z skip;
+    class SKIP1,SKIP2,Z,DAY skip;
     class ERR bad;
 ```
 
@@ -91,9 +94,39 @@ snapshot pushes the heartbeat **down** with its outcome as the reason, and does
 **not** count as a consecutive failure — backing off would not help, because the
 fault is upstream of this service, and retrying costs one cheap query.
 
-The two outcomes are kept apart on the point (`no-data` vs `stale`) because they
-are fixed in different places: an empty bucket is a wrong `sys_sn`, an unscoped
-token or a fresh install; a stale one is a collector outage.
+The outcomes are kept apart on the point because they are fixed in different
+places: `no-data` is a wrong `sys_sn`, an unscoped token or a fresh install;
+`stale` is a collector outage; `day-start` is neither.
+
+**The verdict comes from the newest sample anywhere, not from today's window.**
+A collector that died at 22:00 and stayed dead leaves today's window empty from
+midnight onwards, so a verdict drawn from that window alone would say "no data
+at all" — inverting the diagnostic at precisely the moment the outage is
+longest. `newest_sample_time()` looks past the window to decide.
+
+`day-start` covers the ~30 s between the local midnight and the day's first
+poll, where the window is empty and the collector is perfectly healthy. On a
+300 s cycle that is hit about once every ten days; treating it as a fault would
+be one false alarm a fortnight, so it pushes no heartbeat at all.
+
+A cycle that raises writes an `error` point too, and pushes down from the second
+in a row. That is where an unreachable InfluxDB lands — `collect()` raises
+before there is anything to submit — and without a row the panel shows a gap
+indistinguishable from the container not running.
+
+## Why the price feed is checked for coverage, not presence
+
+`integrate_by_interval` silently drops energy in an interval it has no price
+for. So a feed that stopped at 08:00 does not fail loudly at 20:00: it returns
+eight hours of saving for a twenty-hour day, and that number is entirely
+plausible.
+
+`pricing.MIN_PRICE_COVERAGE` is the gate that exists for this, and it is the one
+gate check a partial day does **not** fail by construction — day-ahead prices
+are published a day in advance, so the elapsed part of today should be fully
+priced or something is broken upstream. Below it, `batteryResult` is sent as 0
+with a warning rather than as a fraction of the truth, and `price_coverage` goes
+onto the status point so that zero can be told from a genuinely break-even day.
 
 ## Why the trapezoid stops at a gap
 

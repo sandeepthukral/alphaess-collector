@@ -790,8 +790,17 @@ sudo docker compose logs --tail 20 mijnbatterij
 ```
 
 Every cycle also writes a `mijnbatterij_submit` point — `submitted`,
-`status_code`, and the figures actually sent — so a rejection is visible in
-Grafana instead of only in a log that rotates. `MIJNBATTERIJ_HEARTBEAT_URL`
+`status_code`, `price_coverage`, `gap_skipped_s` and the figures actually sent —
+so a rejection is visible in Grafana instead of only in a log that rotates. The
+`outcome` tag says what happened: `ok`, `rejected`, `unreachable`, `error`,
+`stale` (the collector stopped), `no-data` (nothing in the bucket for this
+serial at all) or `day-start` (the benign seconds after midnight, before the
+day's first poll — the only one that pushes no heartbeat).
+
+A `batteryResult` of exactly 0 with `price_coverage` below 0.999 is not a
+break-even day: it means `market_price` does not cover the day so far, so the
+euro figure was suppressed rather than published as a fraction of itself. Check
+`refresh-prices.sh`. `MIJNBATTERIJ_HEARTBEAT_URL`
 takes an Uptime Kuma **Push** URL; the service pushes `down` from the second
 consecutive rejection, carrying the platform's own validation message as the
 reason. That message is worth reading: there is no published field-by-field
