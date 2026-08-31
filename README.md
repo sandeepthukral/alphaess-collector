@@ -353,7 +353,14 @@ is no signup API. Look at a payload before publishing anything, because the
 first submission is public:
 
 ```sh
+docker compose build mijnbatterij   # `run` reuses the existing image
 docker compose run --rm mijnbatterij python mijnbatterij.py --once --dry-run
+```
+
+Finished months go separately, to `/api/results/monthly`:
+
+```sh
+docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --dry-run
 ```
 
 Full setup, and the two fields that are guesses about an undocumented API

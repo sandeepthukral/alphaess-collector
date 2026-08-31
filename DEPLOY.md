@@ -743,6 +743,7 @@ filled in, naming the variable.
 The first submission is public. Look at it first, from the Mac or the NAS:
 
 ```sh
+sudo docker compose build mijnbatterij   # `run` never builds; see below
 sudo docker compose run --rm mijnbatterij python mijnbatterij.py --once --dry-run
 ```
 
@@ -813,11 +814,13 @@ the number of seconds `gap_skipped_s` on the `mijnbatterij_submit` point names.
 ### 3. Publish
 
 ```sh
-sudo docker compose up -d mijnbatterij
+sudo docker compose up -d --build mijnbatterij
 ```
 
 Not a bare `up -d`, which recreates the collector and cost 922 s of samples on
-2026-08-10.
+2026-08-10. `--build` because `up` reuses an existing image too: without it a
+pulled change starts nothing new, and the container comes up looking healthy
+while running the previous version.
 
 Verify it from InfluxDB rather than from the site, which caches:
 
@@ -849,8 +852,16 @@ month per call:
 
 ```sh
 cd /volume1/docker/alphaess-collector
+git pull
+sudo docker compose build mijnbatterij
 sudo docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --dry-run
 ```
+
+**`compose run` does not build.** It uses whatever image already exists, so a
+`git pull` on its own leaves you running the code from the last build — which
+surfaces as `error: unrecognized arguments: --monthly`, i.e. an image predating
+the flag rather than anything wrong with the command. `build` first whenever the
+source has moved.
 
 That prints the exact body and posts nothing. Read the two warnings it can emit
 before dropping `--dry-run`:
@@ -877,6 +888,11 @@ before dropping `--dry-run`:
   sudo docker compose run --rm collector python pricing.py --date 2026-08-31
   sudo docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08
   ```
+
+  `pricing.py` runs from the `collector` image, which is built separately from
+  `mijnbatterij`'s despite the shared `./collector` build context — Compose
+  builds one image per service. After a pull that touches `collector/`, build
+  both or neither will have the change.
 
 On 2026-09-01 this installation's August came to 31 days, 747.4 kWh charged,
 713.5 kWh discharged, €113.47 — with 2026-08-29 at €0.00 (gated, coverage 0.808
