@@ -842,6 +842,51 @@ consecutive rejection, carrying the platform's own validation message as the
 reason. That message is worth reading: there is no published field-by-field
 reference for this API, so it is the only description of the schema anyone has.
 
+### Backfilling finished months
+
+`/api/live` publishes today. Past months go through `/api/results/monthly`, one
+month per call:
+
+```sh
+cd /volume1/docker/alphaess-collector
+sudo docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --dry-run
+```
+
+That prints the exact body and posts nothing. Read the two warnings it can emit
+before dropping `--dry-run`:
+
+- **"had no daily_energy row and were integrated from power_readings"** — the
+  same repair the live path makes. Fine, and named so you can see which days
+  rest on the derived series rather than on AlphaESS's own totals.
+- **"have no stored daily_cost row and were sent with batteryResult 0.00"** —
+  the month's euro total is short by those days. Check *why* before publishing,
+  because the two causes have different answers:
+
+  ```sh
+  sudo docker compose run --rm collector \
+    python pricing.py --backfill 2026-08-29 2026-08-31 --dry-run
+  ```
+
+  A day reported `EXCLUDED (coverage …)` is gated and will never have a row —
+  it stays €0.00, deliberately, for the reason in
+  [docs/MIJNBATTERIJ-FLOW.md](docs/MIJNBATTERIJ-FLOW.md). A day that computes a
+  saving cleanly simply has not been written yet, because the nightly job has
+  not run since. Write it, then submit:
+
+  ```sh
+  sudo docker compose run --rm collector python pricing.py --date 2026-08-31
+  sudo docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08
+  ```
+
+On 2026-09-01 this installation's August came to 31 days, 747.4 kWh charged,
+713.5 kWh discharged, €113.47 — with 2026-08-29 at €0.00 (gated, coverage 0.808
+after a 35-minute outage) and five days' energy derived from `power_readings`.
+
+**Only whole past days are sent.** Today is capped out of the payload: it is
+still moving, and it belongs to `/api/live`. Re-running a month is safe and is
+how a day gets corrected once its nightly row lands — the platform takes the
+newest submission for that month.
+
 ### What `mode` should say — nothing, by default
 
 `MIJNBATTERIJ_MODE` is **blank** by default, which omits the field from the

@@ -183,3 +183,47 @@ total missing the whole day that just ended, while `discharged` for the new day
 has reset to ~0 — dropping `totalBatteryCycles` by a full day's throughput, and
 skipping the fill above that exists precisely to prevent that. A TTL alone
 cannot see a day boundary, so `Totals` compares `day_start` as well.
+
+## Backfilling months: `--monthly`
+
+`/api/live` carries today. `POST /api/results/monthly` carries finished months,
+built by `build_monthly()` from the same two sources the live path uses.
+
+```mermaid
+flowchart TD
+    A["--monthly 2026-08"] --> B["month_days(year, month, until=yesterday)"]
+    B --> C["daily_energy rows<br/>charge_kwh_api / discharge_kwh_api<br/>at ENERGY_MODEL_VERSION"]
+    B --> D["daily_cost rows<br/>saving at MODEL_VERSION"]
+    C --> E{row for this day?}
+    E -- yes --> F["use AlphaESS's own totals"]
+    E -- no --> G["energy_from_readings()<br/>integrate power_readings"]
+    G --> H{"anything there?"}
+    H -- no --> OMIT["day left out of `days` entirely"]
+    H -- yes --> F
+    F --> I{stored daily_cost row?}
+    I -- yes --> J["batteryResult = saving"]
+    I -- no --> K["batteryResult = 0.00<br/>day named in the report"]
+    J --> L["sum into month totals<br/>POST /api/results/monthly"]
+    K --> L
+
+    classDef skip fill:#eceef0,stroke:#6b7280,color:#374151;
+    class OMIT,K skip;
+```
+
+**Energy gaps are repaired, euro gaps are not.** A day `daily_energy` has no row
+for is integrated out of `power_readings`, exactly as the cycle count does —
+those gaps are real (five days in August 2026) and a month total that omits them
+is wrong rather than incomplete. A day `pricing.gate()` rejected is sent as
+€0.00 and never recomputed ungated, for the reason `stored_saving_total` gives:
+an estimate on a public leaderboard is a number no stored row can ever be
+reconciled against. Both sets of days are named in the log, so the shortfall is
+visible instead of absorbed.
+
+**A day with nothing anywhere is omitted from `days`, not sent as zero.** A zero
+day reads as "the battery did nothing"; the truth is "we were not watching", and
+the platform cannot tell those apart from a row of zeros.
+
+**Today is capped out.** `until` is yesterday. Today is still moving and belongs
+to `/api/live`; sending it here would publish a part-day as a whole one and then
+disagree with the live figure for the rest of the day. Re-running a month is how
+a day gets corrected once its nightly row lands.

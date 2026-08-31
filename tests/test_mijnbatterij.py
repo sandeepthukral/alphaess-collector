@@ -1046,3 +1046,114 @@ def test_a_rate_limit_is_not_called_permanent(monkeypatch, caplog):
     with caplog.at_level("ERROR"):
         _loop_once(monkeypatch, RecordingWriteApi(), [])
     assert "will repeat until a setting changes" not in caplog.text
+
+
+# --------------------------------------------------------------------------
+# Monthly backfill
+# --------------------------------------------------------------------------
+
+def _stub_month(monkeypatch, energy_rows, saving_rows, readings=(0.0, 0.0)):
+    def rows(query_api, bucket, meas, sys_sn, model_version, fields, start, stop):
+        return energy_rows if meas == "daily_energy" else saving_rows
+    monkeypatch.setattr(mb, "_daily_rows", rows)
+    monkeypatch.setattr(mb, "energy_from_readings", lambda *a, **k: readings)
+
+
+def _energy(day, charged, discharged):
+    return {day: {"charge_kwh_api": charged, "discharge_kwh_api": discharged}}
+
+
+def test_a_month_totals_its_days(monkeypatch):
+    energy = {**_energy(dt.date(2026, 8, 1), 29.2, 26.6),
+              **_energy(dt.date(2026, 8, 2), 29.7, 25.3)}
+    savings = {dt.date(2026, 8, 1): {"saving": 4.3435},
+               dt.date(2026, 8, 2): {"saving": 4.3372}}
+    _stub_month(monkeypatch, energy, savings)
+
+    payload, report = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                                       year=2026, month=8, until=dt.date(2026, 8, 2))
+
+    assert payload["yearMonth"] == "2026-08"
+    assert payload["batteryCharged"] == pytest.approx(58.9)
+    assert payload["batteryDischarged"] == pytest.approx(51.9)
+    assert payload["batteryResult"] == pytest.approx(8.6807)
+    assert set(payload["days"]) == {"01", "02"}
+    assert payload["days"]["01"]["batteryResult"] == 4.3435
+    assert report["filled"] == [] and report["unpriced"] == []
+
+
+def test_today_is_never_sent_as_a_finished_day(monkeypatch):
+    """Today is still moving and is what /api/live is for. Sending it here
+    publishes a part-day as a whole one, and then disagrees with the live figure
+    for the rest of the day."""
+    energy = {**_energy(dt.date(2026, 8, 30), 1.0, 1.0),
+              **_energy(dt.date(2026, 8, 31), 2.0, 2.0)}
+    _stub_month(monkeypatch, energy, {})
+
+    payload, _ = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                                  year=2026, month=8, until=dt.date(2026, 8, 30))
+
+    # The 31st is in `energy` and would be sent but for the `until` cap, so this
+    # fails if the cap is removed rather than passing on absence.
+    assert set(payload["days"]) == {"30"}
+
+
+def test_a_month_with_no_finished_days_yet_is_empty(monkeypatch):
+    """The 1st of a month: `until` is yesterday, which is last month."""
+    _stub_month(monkeypatch, {}, {})
+    payload, _ = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                                  year=2026, month=9, until=dt.date(2026, 8, 31))
+    assert payload == {}
+
+
+def test_a_day_without_a_daily_energy_row_is_integrated_from_readings(monkeypatch):
+    """Those gaps are real -- five days in August 2026 -- and a month total that
+    silently omits them is wrong rather than merely incomplete."""
+    _stub_month(monkeypatch, {}, {dt.date(2026, 8, 17): {"saving": 2.5}},
+                readings=(20.0, 18.0))
+
+    payload, report = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                                       year=2026, month=8, until=dt.date(2026, 8, 17))
+
+    assert payload["days"]["17"]["batteryCharged"] == 20.0
+    assert payload["days"]["17"]["batteryDischarged"] == 18.0
+    assert dt.date(2026, 8, 17) in report["filled"]
+
+
+def test_a_day_with_no_data_anywhere_is_left_out_entirely(monkeypatch):
+    """Sending it as a zero day reads as "the battery did nothing" rather than
+    "we were not watching", and the platform cannot tell those apart."""
+    _stub_month(monkeypatch, {}, {}, readings=(0.0, 0.0))
+
+    payload, report = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                                       year=2026, month=8, until=dt.date(2026, 8, 3))
+
+    assert payload["days"] == {}
+    assert report["filled"] == []
+
+
+def test_a_gated_day_is_sent_as_zero_euros_and_named(monkeypatch):
+    """Recomputing it ungated would put a number on a public leaderboard that no
+    stored row can ever be reconciled against -- the same call
+    stored_saving_total makes. Observed live: 2026-08-29, coverage 0.808."""
+    _stub_month(monkeypatch, _energy(dt.date(2026, 8, 29), 22.0, 19.0), {})
+
+    payload, report = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                                       year=2026, month=8, until=dt.date(2026, 8, 29))
+
+    assert payload["days"]["29"]["batteryResult"] == 0.0
+    assert payload["days"]["29"]["batteryDischarged"] == 19.0
+    assert report["unpriced"] == [dt.date(2026, 8, 29)]
+
+
+def test_the_monthly_payload_goes_to_the_results_endpoint():
+    session = FakeSession(FakeResponse(200))
+    mb.submit_monthly(session, "key-123", {"yearMonth": "2026-08"})
+    assert session.posts[0]["url"] == "https://api.mijnbatterij.nl/api/results/monthly"
+    assert session.posts[0]["headers"]["Authorization"] == "Bearer key-123"
+
+
+def test_the_live_endpoint_is_unchanged_by_the_refactor():
+    session = FakeSession(FakeResponse(200))
+    mb.submit(session, "key-123", {"batteryCharge": 50})
+    assert session.posts[0]["url"] == "https://api.mijnbatterij.nl/api/live"

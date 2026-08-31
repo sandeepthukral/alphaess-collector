@@ -48,6 +48,8 @@ Run modes:
     python mijnbatterij.py           # submit loop (production)
     python mijnbatterij.py --once    # build one payload, print it, submit
     python mijnbatterij.py --once --dry-run   # ... and do not submit
+    python mijnbatterij.py --monthly 2026-08  # backfill a finished month
+    python mijnbatterij.py --monthly 2026-07 2026-08 --dry-run
 """
 
 import argparse
@@ -73,6 +75,7 @@ log = logging.getLogger("mijnbatterij")
 API_BASE = "https://api.mijnbatterij.nl"
 LIVE_PATH = "/api/live"
 ME_PATH = "/api/me"
+MONTHLY_PATH = "/api/results/monthly"
 
 STATUS_MEASUREMENT = "mijnbatterij_submit"
 RANK_MEASUREMENT = "mijnbatterij_rank"
@@ -390,6 +393,129 @@ def stored_discharge_total(query_api, bucket: str, sys_sn: str, stop: dt.datetim
     return total
 
 
+_DAILY_BY_DAY_FLUX = """
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "{meas}" and r.sys_sn == "{sys_sn}"
+        and r.model_version == "{model_version}"
+        and contains(value: r._field, set: [{fields}]))
+  |> pivot(rowKey:["_time"], columnKey:["_field"], valueColumn:"_value")
+  |> sort(columns:["_time"])
+"""
+
+
+def _daily_rows(query_api, bucket: str, meas: str, sys_sn: str, model_version: str,
+                fields: tuple[str, ...], start: dt.datetime,
+                stop: dt.datetime) -> dict[dt.date, dict]:
+    """{local date -> {field: value}} for one measurement over a window."""
+    flux = _DAILY_BY_DAY_FLUX.format(
+        bucket=bucket, meas=meas, sys_sn=sys_sn, model_version=model_version,
+        fields=", ".join(f'"{f}"' for f in fields),
+        start=start.isoformat(), stop=stop.isoformat(),
+    )
+    rows: dict[dt.date, dict] = {}
+    for table in query_api.query(flux):
+        for rec in table.records:
+            day = rec.get_time().astimezone(NL_TZ).date()
+            rows[day] = {f: float(rec.values[f]) for f in fields if rec.values.get(f) is not None}
+    return rows
+
+
+def energy_from_readings(query_api, bucket: str, sys_sn: str, day: dt.date,
+                         max_gap_s: float = DEFAULT_MAX_SAMPLE_GAP_S,
+                         ) -> tuple[float, float]:
+    """One local day's (charged, discharged) kWh, integrated from power_readings."""
+    start, stop = pricing.day_window_utc(day)
+    samples = pricing.load_samples_influx(query_api, bucket, sys_sn, start, stop)
+    charged, discharged, _ = battery_energy_kwh(samples, max_gap_s)
+    return charged, discharged
+
+
+def month_days(year: int, month: int, until: dt.date) -> list[dt.date]:
+    """Every local day of the month up to and including `until`.
+
+    Capped at `until` -- the caller passes yesterday -- because these are
+    FINISHED days. Today is still moving and is what /api/live is for; sending
+    it here would publish a part-day as a whole one and then disagree with the
+    live figure for the rest of the day.
+    """
+    day = dt.date(year, month, 1)
+    out = []
+    while day.month == month and day <= until:
+        out.append(day)
+        day += dt.timedelta(days=1)
+    return out
+
+
+def build_monthly(query_api, *, bucket: str, sys_sn: str, year: int, month: int,
+                  until: dt.date, max_gap_s: float = DEFAULT_MAX_SAMPLE_GAP_S,
+                  ) -> tuple[dict, dict]:
+    """(payload, report) for POST /api/results/monthly.
+
+    Energy comes from daily_energy, and from power_readings for any day
+    daily_energy has no row for -- the same repair the live path makes, for the
+    same reason: those gaps are real here (four days in August 2026) and a month
+    total that silently omits them is wrong rather than merely incomplete.
+
+    EUROS COME FROM STORED daily_cost ROWS ONLY. A day pricing.gate() rejected
+    has no row and is published as 0.00 rather than recomputed ungated. That is
+    the same call stored_saving_total makes and for the same reason: an estimate
+    on a public leaderboard is a number no stored row can ever be reconciled
+    against. The report names those days so the shortfall is visible rather than
+    absorbed.
+    """
+    days = month_days(year, month, until)
+    if not days:
+        return {}, {"days": [], "filled": [], "unpriced": []}
+    start = pricing.day_window_utc(days[0])[0]
+    stop = pricing.day_window_utc(days[-1])[1]
+
+    energy = _daily_rows(query_api, bucket, "daily_energy", sys_sn, ENERGY_MODEL_VERSION,
+                         ("charge_kwh_api", "discharge_kwh_api"), start, stop)
+    savings = _daily_rows(query_api, bucket, pricing.DAILY_MEASUREMENT, sys_sn,
+                          MODEL_VERSION, ("saving",), start, stop)
+
+    out, filled, unpriced = {}, [], []
+    tot_charged = tot_discharged = tot_result = 0.0
+    for day in days:
+        row = energy.get(day)
+        if row and "charge_kwh_api" in row and "discharge_kwh_api" in row:
+            charged, discharged = row["charge_kwh_api"], row["discharge_kwh_api"]
+        else:
+            charged, discharged = energy_from_readings(
+                query_api, bucket, sys_sn, day, max_gap_s)
+            if charged or discharged:
+                filled.append(day)
+            else:
+                # No stored row and nothing in power_readings either: a day
+                # before the record begins, or a total collector outage. Left
+                # out of `days` entirely rather than sent as a zero day, which
+                # would read as "the battery did nothing" instead of "we were
+                # not watching".
+                continue
+        result = savings.get(day, {}).get("saving")
+        if result is None:
+            unpriced.append(day)
+            result = 0.0
+        out[f"{day.day:02d}"] = {
+            "batteryCharged": round(charged, 3),
+            "batteryDischarged": round(discharged, 3),
+            "batteryResult": round(result, 4),
+        }
+        tot_charged += charged
+        tot_discharged += discharged
+        tot_result += result
+
+    payload = {
+        "yearMonth": f"{year:04d}-{month:02d}",
+        "batteryCharged": round(tot_charged, 3),
+        "batteryDischarged": round(tot_discharged, 3),
+        "batteryResult": round(tot_result, 4),
+        "days": out,
+    }
+    return payload, {"days": sorted(out), "filled": filled, "unpriced": unpriced}
+
+
 def cycles(discharge_kwh: float, capacity_kwh: float, offset: float = 0.0) -> float:
     """Full-throughput-equivalent cycles: total kWh discharged / usable capacity.
 
@@ -615,17 +741,18 @@ class SubmitError(RuntimeError):
         self.status = status
 
 
-def submit(session: requests.Session, api_key: str, payload: dict,
-           base_url: str = API_BASE, timeout: float = DEFAULT_TIMEOUT_S) -> int:
-    """POST one live payload. Returns the HTTP status; raises SubmitError otherwise.
+def _post(session: requests.Session, api_key: str, path: str, payload: dict,
+          base_url: str = API_BASE, timeout: float = DEFAULT_TIMEOUT_S) -> int:
+    """POST one payload to `path`. Returns the HTTP status, or raises SubmitError.
 
     The response body is logged on failure, not just the status: there is no
     published field-by-field reference for this API, so the validation message
-    is the only description of the schema anyone has.
+    is the only description of the schema anyone has. That is not theoretical --
+    it is how the mode field was diagnosed.
     """
     try:
         resp = session.post(
-            f"{base_url}{LIVE_PATH}",
+            f"{base_url}{path}",
             headers={"Authorization": f"Bearer {api_key}",
                      "Content-Type": "application/json"},
             json=payload,
@@ -639,6 +766,18 @@ def submit(session: requests.Session, api_key: str, payload: dict,
         hint = " (check MIJNBATTERIJ_API_KEY)" if resp.status_code in (401, 403) else ""
         raise SubmitError(f"HTTP {resp.status_code}{hint}: {body}", resp.status_code)
     return resp.status_code
+
+
+def submit(session: requests.Session, api_key: str, payload: dict,
+           base_url: str = API_BASE, timeout: float = DEFAULT_TIMEOUT_S) -> int:
+    """POST one live payload."""
+    return _post(session, api_key, LIVE_PATH, payload, base_url, timeout)
+
+
+def submit_monthly(session: requests.Session, api_key: str, payload: dict,
+                   base_url: str = API_BASE, timeout: float = DEFAULT_TIMEOUT_S) -> int:
+    """POST one month's finished results."""
+    return _post(session, api_key, MONTHLY_PATH, payload, base_url, timeout)
 
 
 def fetch_rank(session: requests.Session, api_key: str, base_url: str = API_BASE,
@@ -811,6 +950,46 @@ def run_once(query_api, write_api, session, *, bucket: str, sys_sn: str,
     return snapshot, "ok"
 
 
+def run_monthly(query_api, write_api, session, *, bucket: str, sys_sn: str,
+                api_key: str, config: dict, months: list[tuple[int, int]],
+                dry_run: bool, now: dt.datetime | None = None) -> None:
+    """Backfill finished months to /api/results/monthly."""
+    now = dt.datetime.now(dt.UTC) if now is None else now
+    yesterday = now.astimezone(NL_TZ).date() - dt.timedelta(days=1)
+    for year, month in months:
+        payload, report = build_monthly(
+            query_api, bucket=bucket, sys_sn=sys_sn, year=year, month=month,
+            until=yesterday, max_gap_s=config["max_gap_s"])
+        if not payload or not payload["days"]:
+            log.warning("%04d-%02d: no finished days with data, nothing to send",
+                        year, month)
+            continue
+        log.info("%s: %d days, charged %.1f kWh, discharged %.1f kWh, result €%.2f",
+                 payload["yearMonth"], len(payload["days"]), payload["batteryCharged"],
+                 payload["batteryDischarged"], payload["batteryResult"])
+        if report["filled"]:
+            log.info("%s: %d day(s) had no daily_energy row and were integrated from "
+                     "power_readings: %s", payload["yearMonth"], len(report["filled"]),
+                     ", ".join(str(d) for d in report["filled"]))
+        if report["unpriced"]:
+            # Named rather than summarised: each is a day pricing.gate() threw
+            # out, so each is worth knowing about on its own.
+            log.warning("%s: %d day(s) have no stored daily_cost row and were sent "
+                        "with batteryResult 0.00: %s -- the month's euro total is "
+                        "short by whatever those days were worth",
+                        payload["yearMonth"], len(report["unpriced"]),
+                        ", ".join(str(d) for d in report["unpriced"]))
+        print(json.dumps(payload, indent=2))
+        if dry_run:
+            log.info("%s: dry run, not submitting", payload["yearMonth"])
+            continue
+        status = submit_monthly(session, api_key, payload,
+                                base_url=config["base_url"], timeout=config["timeout_s"])
+        _write(write_api, bucket, status_point(
+            None, sys_sn, "monthly-ok", status, dt.datetime.now(dt.UTC)))
+        log.info("%s: submitted (HTTP %d)", payload["yearMonth"], status)
+
+
 def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
              api_key: str, config: dict, max_cycles: int | None = None) -> None:
     """The submit loop. `max_cycles` exists so the failure paths below can be
@@ -935,12 +1114,22 @@ def main() -> None:
     parser.add_argument("--once", action="store_true",
                         help="Build one payload, print it, submit, and exit")
     parser.add_argument("--dry-run", action="store_true",
-                        help="Build and print one payload but do not submit (implies --once)")
+                        help="Build and print the payload but do not submit")
+    parser.add_argument("--monthly", nargs="+", metavar="YYYY-MM",
+                        help="Backfill finished months to /api/results/monthly and exit. "
+                             "Only whole past days are sent; today belongs to --once.")
     args = parser.parse_args()
+    months = []
+    for value in args.monthly or []:
+        try:
+            when = dt.datetime.strptime(value, "%Y-%m")
+        except ValueError:
+            parser.error(f"--monthly takes YYYY-MM, not {value!r}")
+        months.append((when.year, when.month))
     # A dry-run loop would be a container quietly doing nothing forever under
     # `restart: unless-stopped`, which is the shape of a service that looks
     # healthy and publishes nothing.
-    args.once = args.once or args.dry_run
+    args.once = args.once or (args.dry_run and not months)
 
     logging.basicConfig(
         level=os.environ.get("LOG_LEVEL", "INFO").upper(),
@@ -954,7 +1143,7 @@ def main() -> None:
     # Idle only when this is the long-running service. `--once` is someone at a
     # terminal waiting for an answer, and parking them in a sleep loop with a
     # message about idling reads as a hang -- they get the error instead.
-    if not api_key and not args.once:
+    if not api_key and not args.once and not months:
         log.info("MIJNBATTERIJ_API_KEY not set; submission disabled. Idling.")
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
         signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
@@ -993,7 +1182,11 @@ def main() -> None:
     session = requests.Session()
 
     try:
-        if args.once:
+        if months:
+            run_monthly(query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
+                        api_key=api_key, config=config, months=months,
+                        dry_run=args.dry_run)
+        elif args.once:
             run_once(query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
                      api_key=api_key, config=config, totals=Totals(config["totals_ttl_s"]),
                      dry_run=args.dry_run, verbose=True)
