@@ -756,12 +756,47 @@ carefully, because nothing downstream can catch them being wrong:
   payload silently disagrees with `power_readings`.
 - **`totalBatteryCycles`.** Computed as total kWh discharged (from
   `daily_energy`, at the current `model_version`) over usable capacity, so it
-  counts only what this collector has seen. Put whatever the pack did before
-  that into `MIJNBATTERIJ_CYCLES_OFFSET`, or the figure is "cycles since we
-  started measuring" published as a lifetime total. Days `daily_energy` has no
-  row for — not yet written, never served, or gated — are integrated out of
+  counts only what this collector has seen. Days `daily_energy` has no row for —
+  not yet written, never served, or gated — are integrated out of
   `power_readings` instead, so the counter cannot step backwards; the log names
   each one it fills.
+
+  **`MIJNBATTERIJ_CYCLES_OFFSET` is what the pack did BEFORE that record
+  begins, and nothing else.** It is added on top of everything measured, so
+  putting the figure the dry run prints into it counts that figure twice — 33.62
+  measured plus a 31.42 "offset" published 65.04, roughly double the truth, on a
+  public leaderboard. If you do not know the pre-collection number, leave it
+  `0`; a total that is honestly short is worth more than one that is silently
+  doubled.
+
+  To derive it, ask AlphaESS directly for the days before the record starts.
+  `getOneDateEnergyBySn` serves history from the install date and returns zeros
+  before it, so walking backwards finds both the first operating day and the
+  throughput that predates `daily_energy`:
+
+  ```sh
+  sudo docker compose run --rm collector python - <<'EOF'
+  import datetime as dt, os
+  from efficiency import fetch_day_energy
+  aid, sec, sn = (os.environ["ALPHAESS_APP_ID"], os.environ["ALPHAESS_APP_SECRET"],
+                  os.environ["ALPHAESS_SYS_SN"])
+  # The local days before your earliest daily_energy row.
+  total = 0.0
+  for d in range(1, 18):
+      day = dt.date(2026, 7, d)
+      dis = float((fetch_day_energy(aid, sec, sn, day) or {}).get("eDischarge") or 0)
+      total += dis
+      print(day, dis)
+  print("offset =", round(total / float(os.environ["BATTERY_CAPACITY_KWH"]), 2), "cycles")
+  EOF
+  ```
+
+  One call per day at `ALPHAESS_MIN_REQUEST_INTERVAL_S`, and that budget is
+  shared with the live collector — keep the range to the days that actually
+  predate the record. On this installation the answer was 0.37 cycles: the pack
+  first ran on 2026-07-16 and `daily_energy` starts at 2026-07-18, leaving two
+  days (10.30 kWh) that no row covers and that the fill will not invent, because
+  it deliberately does not reach back past the first stored day.
 - **`batteryResultTotal`.** The sum of stored `daily_cost.saving` at the
   current `model_version`, plus today so far. Days that failed
   `pricing.gate()` are absent from `daily_cost` and therefore from this total;
