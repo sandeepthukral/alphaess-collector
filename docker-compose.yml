@@ -201,7 +201,22 @@ services:
       # Read+write on alphaess: reads power_readings, market_price, daily_cost
       # and daily_energy; writes only its own mijnbatterij_submit and
       # mijnbatterij_rank status series.
-      INFLUX_TOKEN: ${INFLUX_TOKEN_MIJNBATTERIJ:?set INFLUX_TOKEN_MIJNBATTERIJ in .env -- see DEPLOY.md, "Scoped tokens"}
+      #
+      # `:-` AND NOT `:?`, UNLIKE EVERY OTHER TOKEN IN THIS FILE. A `:?` guard is
+      # stack-wide -- compose interpolates the whole file on every subcommand, so
+      # `sudo docker compose ps` and `restart grafana` both fail until it is set.
+      # That price is worth paying for a service the stack runs; this one is
+      # opt-in and idles without MIJNBATTERIJ_API_KEY, so a guard here would
+      # break every compose command on the NAS the moment this branch is pulled,
+      # for a feature nobody had switched on yet.
+      #
+      # Nothing is lost by leaving it empty: the reason the other tokens are
+      # guarded is that a missing one must not silently become the admin token,
+      # and an empty value is not the admin token -- it fails to authenticate.
+      # mijnbatterij.py refuses to start on an empty token WHEN an API key is
+      # set, which puts the error in the one service it concerns, at the moment
+      # it actually matters.
+      INFLUX_TOKEN: ${INFLUX_TOKEN_MIJNBATTERIJ:-}
       INFLUX_ORG: ${INFLUX_ORG:-home}
       INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

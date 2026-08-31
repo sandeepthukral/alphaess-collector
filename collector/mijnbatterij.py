@@ -89,6 +89,10 @@ DEFAULT_TOTALS_TTL_S = 3600
 # platform ranks installations against each other; a stale row published as
 # current is worse than a missing one.
 DEFAULT_STALE_AFTER_S = 600
+# Longest sample-to-sample gap that battery_energy_kwh will integrate across.
+# 3x the poll interval is the same line pricing.compute_day() draws between
+# cadence drift and a real outage, so the two agree on what counts as missing.
+DEFAULT_MAX_SAMPLE_GAP_S = 3 * pricing.POLL_INTERVAL_S
 
 
 def env(name: str, default: str | None = None) -> str:
@@ -123,20 +127,37 @@ def today_window(now: dt.datetime) -> tuple[dt.datetime, dt.datetime]:
     return start, now
 
 
-def battery_energy_kwh(samples: list[Sample]) -> tuple[float, float]:
-    """(charged_kwh, discharged_kwh) integrated over `samples`.
+def battery_energy_kwh(samples: list[Sample],
+                       max_gap_s: float = DEFAULT_MAX_SAMPLE_GAP_S,
+                       ) -> tuple[float, float, float]:
+    """(charged_kwh, discharged_kwh, skipped_s) integrated over `samples`.
 
     pbat is positive while discharging, so _accumulate's (import, export)
     buckets come back the other way round -- hence the swap on return. Reusing
     it rather than a fresh trapezoid loop is not tidiness: it splits an interval
     at the zero crossing, so a sample pair that flips from charge to discharge
     contributes to both totals instead of netting into one.
+
+    A PAIR SEPARATED BY MORE THAN max_gap_s IS SKIPPED, not interpolated. The
+    trapezoid between two samples assumes the power ramped between them, which
+    is true across 30 s and a fabrication across an outage: six hours missing
+    with the battery charging at 4 kW either side invents ~24 kWh of
+    chargedToday out of nothing. pricing.compute_day() has the same shape and
+    gets away with it because gate()'s max_gap_s check throws the whole day out
+    afterwards -- there is no such second line of defence here, because a live
+    figure is published the moment it is computed. Skipping under-reports the
+    outage instead, which is the direction that cannot invent energy, and
+    skipped_s says by how much it might have.
     """
     bucket = [0.0, 0.0]
+    skipped_s = 0.0
     for a, b in zip(samples, samples[1:]):
-        hours = (b.time - a.time).total_seconds() / 3600.0
-        _accumulate(bucket, hours, a.battery, b.battery)
-    return bucket[1] / 1000.0, bucket[0] / 1000.0
+        seconds = (b.time - a.time).total_seconds()
+        if seconds > max_gap_s:
+            skipped_s += seconds
+            continue
+        _accumulate(bucket, seconds / 3600.0, a.battery, b.battery)
+    return bucket[1] / 1000.0, bucket[0] / 1000.0, skipped_s
 
 
 # --------------------------------------------------------------------------
@@ -186,11 +207,63 @@ def stored_saving_total(query_api, bucket: str, sys_sn: str, stop: dt.datetime) 
     ))
 
 
-def stored_discharge_total(query_api, bucket: str, sys_sn: str, stop: dt.datetime) -> float:
-    """All-time kWh discharged, per AlphaESS's own daily totals."""
-    return _sum_query(query_api, _DISCHARGE_TOTAL_FLUX.format(
+_DAILY_ENERGY_PRESENT_FLUX = """
+from(bucket: "{bucket}")
+  |> range(start: {start}, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "daily_energy" and r.sys_sn == "{sys_sn}"
+        and r._field == "discharge_kwh_api")
+  |> limit(n:1)
+"""
+
+
+def has_daily_energy(query_api, bucket: str, sys_sn: str, day: dt.date) -> bool:
+    start, stop = pricing.day_window_utc(day)
+    flux = _DAILY_ENERGY_PRESENT_FLUX.format(
+        bucket=bucket, sys_sn=sys_sn, start=start.isoformat(), stop=stop.isoformat())
+    return any(table.records for table in query_api.query(flux))
+
+
+def discharge_from_readings(query_api, bucket: str, sys_sn: str, day: dt.date) -> float:
+    """One local day's kWh discharged, integrated from power_readings."""
+    start, stop = pricing.day_window_utc(day)
+    samples = pricing.load_samples_influx(query_api, bucket, sys_sn, start, stop)
+    return battery_energy_kwh(samples)[1]
+
+
+def stored_discharge_total(query_api, bucket: str, sys_sn: str, stop: dt.datetime,
+                           now: dt.datetime | None = None) -> float:
+    """All-time kWh discharged before `stop`, per AlphaESS's own daily totals.
+
+    WITH YESTERDAY FILLED IN FROM power_readings WHEN ITS ROW IS NOT THERE YET.
+    daily_energy is written by the nightly job at ~03:00, so between midnight
+    and then, yesterday's discharge is in no stored row -- while `discharged`
+    for today has just reset to zero. Summing only what is stored would make
+    totalBatteryCycles drop by about a full cycle every night and climb back
+    three hours later.
+
+    batteryResultTotal has the same hole and is left with it deliberately (see
+    stored_saving_total). The asymmetry is the point: a euro total that dips is
+    a number moving, and days it omits are days pricing.gate() judged
+    unpublishable. A LIFETIME CYCLE COUNTER THAT MOVES BACKWARDS IS PHYSICALLY
+    IMPOSSIBLE, so anything reading it downstream is entitled to treat that as
+    corrupt data rather than as a late batch job.
+
+    The fill also covers a day daily_energy never gets -- one AlphaESS did not
+    serve, or that efficiency.gate() rejected -- which would otherwise be a
+    permanent under-count rather than a passing dip.
+    """
+    total = _sum_query(query_api, _DISCHARGE_TOTAL_FLUX.format(
         bucket=bucket, sys_sn=sys_sn, stop=stop.isoformat(),
     ))
+    now = dt.datetime.now(dt.UTC) if now is None else now
+    yesterday = now.astimezone(NL_TZ).date() - dt.timedelta(days=1)
+    if not has_daily_energy(query_api, bucket, sys_sn, yesterday):
+        filled = discharge_from_readings(query_api, bucket, sys_sn, yesterday)
+        log.info("daily_energy has no row for %s yet; filled %.2f kWh from "
+                 "power_readings so the cycle count does not go backwards",
+                 yesterday, filled)
+        total += filled
+    return total
 
 
 def cycles(discharge_kwh: float, capacity_kwh: float, offset: float = 0.0) -> float:
@@ -235,11 +308,17 @@ class Snapshot:
     """One submission's inputs, kept together so run_once and run_loop build the
     payload the same way and the status point can record what was sent."""
 
-    def __init__(self, payload: dict, latest: Sample, age_s: float, sample_count: int):
+    def __init__(self, payload: dict, latest: Sample, age_s: float, sample_count: int,
+                 skipped_s: float = 0.0):
         self.payload = payload
         self.latest = latest
         self.age_s = age_s
         self.sample_count = sample_count
+        # Seconds of today that battery_energy_kwh refused to integrate across.
+        # Non-zero means chargedToday/dischargedToday are under-reported by an
+        # unknown amount, which is worth being able to see on a panel next to
+        # the figure itself rather than inferring from a gap in power_readings.
+        self.skipped_s = skipped_s
 
 
 class Totals:
@@ -264,25 +343,36 @@ class Totals:
 
 
 def collect(query_api, *, bucket: str, sys_sn: str, totals: Totals, config: dict,
-            now: dt.datetime | None = None) -> Snapshot | None:
-    """Read today's samples and prices and build the payload. None if there is
-    nothing worth sending (no samples at all, or the newest one is stale)."""
+            now: dt.datetime | None = None) -> tuple[Snapshot | None, str]:
+    """Read today's samples and prices and build the payload.
+
+    Returns (snapshot, outcome). A None snapshot comes with the reason it is
+    None, and the two reasons are not interchangeable: "no-data" is an empty
+    bucket -- a fresh install, a wrong sys_sn, a token that cannot read -- and
+    "stale" is a collector that stopped. One is a deployment mistake and the
+    other is an outage, they get fixed in different places, and a panel showing
+    only "nothing was submitted" cannot tell you which you have.
+    """
     now = dt.datetime.now(dt.UTC) if now is None else now
     start, end = today_window(now)
 
     samples = pricing.load_samples_influx(query_api, bucket, sys_sn, start, end)
     if not samples:
         log.warning("No power_readings since %s, nothing to submit", start.isoformat())
-        return None
+        return None, "no-data"
 
     latest = samples[-1]
     age = (now - latest.time).total_seconds()
     if age > config["stale_after_s"]:
         log.warning("Newest sample is %.0fs old (> %ds), skipping submission",
                     age, config["stale_after_s"])
-        return None
+        return None, "stale"
 
-    charged, discharged = battery_energy_kwh(samples)
+    charged, discharged, skipped_s = battery_energy_kwh(samples, config["max_gap_s"])
+    if skipped_s:
+        log.warning("Skipped %.0fs of gaps > %.0fs; chargedToday/dischargedToday "
+                    "under-report today by an unknown amount",
+                    skipped_s, config["max_gap_s"])
 
     # Today's euro result, from the same model daily_cost will store tomorrow.
     # Prices come from the `market_price` rows refresh-prices.sh keeps ahead of
@@ -306,7 +396,7 @@ def collect(query_api, *, bucket: str, sys_sn: str, totals: Totals, config: dict
         load_balancing=config["load_balancing"],
         charge_positive=config["charge_positive"],
     )
-    return Snapshot(payload, latest, age, len(samples))
+    return Snapshot(payload, latest, age, len(samples), skipped_s), "ok"
 
 
 # --------------------------------------------------------------------------
@@ -363,15 +453,28 @@ def fetch_rank(session: requests.Session, api_key: str, base_url: str = API_BASE
     if resp.status_code >= 400:
         raise SubmitError(f"HTTP {resp.status_code}: {(resp.text or '')[:500]}",
                           resp.status_code)
+    # Defensive about shape, not just about parsing. Nothing published
+    # describes this response, so a list body, a null resultToday or a rank
+    # rendered as a string are all possibilities -- and an AttributeError or
+    # ValueError raised here is a crash in a service whose actual job is the
+    # submission loop. An unreadable rank is worth a warning, never an outage.
     try:
-        today = (resp.json() or {}).get("resultToday") or {}
+        body = resp.json()
     except ValueError as exc:
         raise SubmitError(f"unparseable /api/me body: {exc}") from exc
+    today = body.get("resultToday") if isinstance(body, dict) else None
+    if not isinstance(today, dict):
+        log.warning("/api/me carried no resultToday object (got %s)", type(today).__name__)
+        return {}
     ranks = {}
     for key, field in (("overallRank", "overall_rank"), ("providerRank", "provider_rank")):
         value = today.get(key)
-        if value is not None:
+        if value is None:
+            continue
+        try:
             ranks[field] = float(value)
+        except (TypeError, ValueError):
+            log.warning("/api/me %s is not a number: %r", key, value)
     return ranks
 
 
@@ -406,6 +509,7 @@ def status_point(snapshot: Snapshot | None, sys_sn: str, outcome: str,
             point = point.field(field, float(p[key]))
         point = point.field("sample_age_s", round(snapshot.age_s, 1))
         point = point.field("sample_count", float(snapshot.sample_count))
+        point = point.field("gap_skipped_s", round(snapshot.skipped_s, 1))
     return point
 
 
@@ -451,6 +555,8 @@ def load_config() -> dict:
         "totals_ttl_s": float(env("MIJNBATTERIJ_TOTALS_TTL_SECONDS",
                                   str(DEFAULT_TOTALS_TTL_S))),
         "rank_interval_s": int(env("MIJNBATTERIJ_RANK_INTERVAL_SECONDS", "3600")),
+        "max_gap_s": float(env("MIJNBATTERIJ_MAX_SAMPLE_GAP_S",
+                               str(DEFAULT_MAX_SAMPLE_GAP_S))),
         "capacity_kwh": capacity,
         "cycles_offset": float(env("MIJNBATTERIJ_CYCLES_OFFSET", "0") or 0),
         "mode": env("MIJNBATTERIJ_MODE", "self_consumption"),
@@ -462,27 +568,41 @@ def load_config() -> dict:
 
 def run_once(query_api, write_api, session, *, bucket: str, sys_sn: str,
              api_key: str, config: dict, totals: Totals, dry_run: bool,
-             verbose: bool = False) -> Snapshot | None:
+             verbose: bool = False) -> tuple[Snapshot | None, str]:
+    """One cycle. Returns (snapshot, outcome); raises SubmitError if the platform
+    rejected the submission.
+
+    EVERY status point is written here, including the one for a rejection --
+    the caller sees only the exception, and a rejection recorded without the
+    figures that caused it is the one case the measurement exists for. Debugging
+    a 422 from `submitted=0` alone means guessing what was in the body.
+    """
     now = dt.datetime.now(dt.UTC)
-    snapshot = collect(query_api, bucket=bucket, sys_sn=sys_sn, totals=totals,
-                       config=config, now=now)
+    snapshot, outcome = collect(query_api, bucket=bucket, sys_sn=sys_sn, totals=totals,
+                                config=config, now=now)
     if snapshot is None:
-        _write(write_api, bucket, status_point(None, sys_sn, "no-data", None, now))
-        return None
+        _write(write_api, bucket, status_point(None, sys_sn, outcome, None, now))
+        return None, outcome
     if verbose:
         print(json.dumps(snapshot.payload, indent=2))
     if dry_run:
         log.info("Dry run: not submitting")
-        return snapshot
-    status = submit(session, api_key, snapshot.payload,
-                    base_url=config["base_url"], timeout=config["timeout_s"])
+        return snapshot, "dry-run"
+    try:
+        status = submit(session, api_key, snapshot.payload,
+                        base_url=config["base_url"], timeout=config["timeout_s"])
+    except SubmitError as exc:
+        _write(write_api, bucket, status_point(
+            snapshot, sys_sn, "rejected" if exc.status else "unreachable",
+            exc.status, now))
+        raise
     _write(write_api, bucket, status_point(snapshot, sys_sn, "ok", status, now))
     log.info("Submitted: soc=%.1f%% power=%dW charged=%.2fkWh discharged=%.2fkWh "
              "result=€%.4f total=€%.2f",
              snapshot.payload["batteryCharge"], snapshot.payload["batteryPower"],
              snapshot.payload["chargedToday"], snapshot.payload["dischargedToday"],
              snapshot.payload["batteryResult"], snapshot.payload["batteryResultTotal"])
-    return snapshot
+    return snapshot, "ok"
 
 
 def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
@@ -508,16 +628,27 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
     while running:
         started = time.monotonic()
         try:
-            run_once(query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
-                     api_key=api_key, config=config, totals=totals, dry_run=False)
+            snapshot, outcome = run_once(
+                query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
+                api_key=api_key, config=config, totals=totals, dry_run=False)
             consecutive_failures = 0
-            send_heartbeat(heartbeat_url)
+            if snapshot is None:
+                # NOT a heartbeat "up". Nothing reached the platform, and this
+                # is the failure mode the monitor is there for: a collector
+                # outage submits nothing for hours while every cycle completes
+                # without error. Pushing up here would hold Kuma green through
+                # exactly that. Not counted as a consecutive failure either --
+                # backing off would not help, since the fault is upstream of
+                # this service and retrying costs one cheap query.
+                send_heartbeat(heartbeat_url, "down", f"nothing submitted: {outcome}")
+            else:
+                send_heartbeat(heartbeat_url)
         except SubmitError as exc:
             consecutive_failures += 1
             log.error("Submission failed (%d consecutive): %s", consecutive_failures, exc)
-            _write(write_api, bucket, status_point(
-                None, sys_sn, "rejected" if exc.status else "unreachable",
-                exc.status, dt.datetime.now(dt.UTC)))
+            # The status point was written by run_once, with the payload that
+            # was rejected still attached.
+            #
             # Down from the second failure, matching the collector: one blip is
             # noise, a run of them is the thing worth waking up for.
             if consecutive_failures >= 2:
@@ -527,6 +658,13 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
             log.exception("Submission cycle failed (%d consecutive)", consecutive_failures)
 
         if config["rank_interval_s"] > 0 and time.monotonic() >= next_rank:
+            # Bare `except Exception`, not `except SubmitError`. The rank is a
+            # decoration on a Grafana panel; the submissions are the job. This
+            # API has no published schema, so /api/me returning a list, a null
+            # `resultToday`, or a rank as a string are all live possibilities,
+            # and each raises something other than SubmitError -- which, from
+            # out here, would leave the process and be restarted forever by
+            # `restart: unless-stopped`, taking every submission down with it.
             try:
                 ranks = fetch_rank(session, api_key, config["base_url"], config["timeout_s"])
                 if ranks:
@@ -535,6 +673,8 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
                     log.info("Rank: %s", ranks)
             except SubmitError as exc:
                 log.warning("Rank fetch failed: %s", exc)
+            except Exception:
+                log.exception("Rank fetch raised; continuing to submit")
             next_rank = time.monotonic() + config["rank_interval_s"]
 
         sleep_for = interval
@@ -579,7 +719,21 @@ def main() -> None:
     sys_sn = env("ALPHAESS_SYS_SN")
     config = load_config()
 
-    client = InfluxDBClient(url=env("INFLUX_URL"), token=env("INFLUX_TOKEN"),
+    # INFLUX_TOKEN_MIJNBATTERIJ is `:-` in docker-compose.yml rather than `:?`,
+    # so that an unminted token cannot block every compose subcommand on the NAS
+    # for a service nobody has enabled (see the comment there). The cost of that
+    # choice is that an empty token arrives here instead of at `compose config`,
+    # and an empty token queries nothing and writes nothing -- which without
+    # this check looks exactly like a battery that never charges. Refuse to
+    # start instead, naming the variable and where the recipe is.
+    influx_token = env("INFLUX_TOKEN").strip()
+    if not influx_token:
+        log.error("MIJNBATTERIJ_API_KEY is set but INFLUX_TOKEN_MIJNBATTERIJ is empty. "
+                  "Mint it per DEPLOY.md, \"Scoped tokens\" -- without it this service "
+                  "can neither read power_readings nor record what it submitted.")
+        sys.exit(1)
+
+    client = InfluxDBClient(url=env("INFLUX_URL"), token=influx_token,
                             org=env("INFLUX_ORG"))
     query_api = client.query_api()
     write_api = client.write_api(write_options=SYNCHRONOUS)

@@ -20,10 +20,10 @@ flowchart TD
     A["every MIJNBATTERIJ_INTERVAL_SECONDS (300)"] --> B["today_window(now)<br/>local NL midnight → now"]
     B --> C["pricing.load_samples_influx<br/>power_readings"]
     C --> D{any samples?}
-    D -- no --> SKIP1["log, write mijnbatterij_submit<br/>outcome=no-data, submit nothing"]
+    D -- no --> SKIP1["outcome=no-data<br/>(empty bucket: fresh install,<br/>wrong sys_sn, unscoped token)<br/>heartbeat DOWN"]
     D -- yes --> E{"age of newest sample<br/>&gt; MIJNBATTERIJ_STALE_AFTER_SECONDS (600)?"}
-    E -- yes --> SKIP2["submit nothing<br/>(a collector outage is not a reading)"]
-    E -- no --> F["battery_energy_kwh(samples)<br/>chargedToday / dischargedToday"]
+    E -- yes --> SKIP2["outcome=stale<br/>(a collector outage is not a reading)<br/>heartbeat DOWN"]
+    E -- no --> F["battery_energy_kwh(samples)<br/>chargedToday / dischargedToday<br/>gaps &gt; MIJNBATTERIJ_MAX_SAMPLE_GAP_S skipped,<br/>counted into gap_skipped_s"]
     F --> G["pricing.load_prices_influx<br/>market_price"]
     G --> H{any price intervals?}
     H -- no --> Z["batteryResult = 0<br/>+ warning"]
@@ -34,7 +34,7 @@ flowchart TD
     K --> L["POST /api/live<br/>Bearer MIJNBATTERIJ_API_KEY"]
     L --> M{status}
     M -- "2xx" --> OK["mijnbatterij_submit outcome=ok<br/>heartbeat up"]
-    M -- "4xx / 5xx / transport" --> ERR["SubmitError<br/>outcome=rejected|unreachable<br/>body logged (the only schema doc there is)<br/>heartbeat down from the 2nd in a row<br/>backoff ×2, capped at 3600 s"]
+    M -- "4xx / 5xx / transport" --> ERR["SubmitError<br/>outcome=rejected|unreachable,<br/>WITH the payload that was refused<br/>body logged (the only schema doc there is)<br/>heartbeat down from the 2nd in a row<br/>backoff ×2, capped at 3600 s"]
 
     classDef ok fill:#e5f4ec,stroke:#1f8f56,color:#166a3f;
     classDef skip fill:#eceef0,stroke:#6b7280,color:#374151;
@@ -51,7 +51,7 @@ flowchart TD
 | `timestamp` | newest `power_readings` sample | the measurement's time, never the submission's |
 | `batteryCharge` | `soc_percent` | |
 | `batteryPower` | `battery_power_w` | **sign flipped by default.** AlphaESS `pbat` is + while discharging; sent charge-positive unless `MIJNBATTERIJ_CHARGE_POSITIVE=0` |
-| `chargedToday` / `dischargedToday` | `battery_power_w` integrated from local midnight | via `pricing._accumulate`, so an interval that crosses zero lands in both totals instead of netting |
+| `chargedToday` / `dischargedToday` | `battery_power_w` integrated from local midnight | via `pricing._accumulate`, so an interval that crosses zero lands in both totals instead of netting; gaps beyond `MIJNBATTERIJ_MAX_SAMPLE_GAP_S` are skipped, never interpolated |
 | `batteryResult` | `pricing.compute_day()['saving']` over today so far | the same two-world model `daily_cost` stores, ungated |
 | `batteryResultTotal` | Σ stored `daily_cost.saving` at the current `model_version`, + today | |
 | `totalBatteryCycles` | (Σ `daily_energy.discharge_kwh_api` + today) / `BATTERY_CAPACITY_KWH` + `MIJNBATTERIJ_CYCLES_OFFSET` | throughput-equivalent, not an event count |
@@ -80,3 +80,46 @@ Both are deliberate: the total under-states rather than estimating.
   leaderboard that no stored row can ever be reconciled against.
 - Yesterday is missing until `daily-savings.sh` runs (~02:00), so the total dips
   for the first couple of hours of each local day and then recovers.
+
+## Why an outage is not a "successful" cycle
+
+`collect()` returning nothing is not an error — no exception is raised, and the
+next cycle may well succeed. It is also not a success, and the distinction is
+the whole reason the heartbeat exists: a dead collector means every cycle
+completes cleanly while nothing reaches the platform for hours. So a `None`
+snapshot pushes the heartbeat **down** with its outcome as the reason, and does
+**not** count as a consecutive failure — backing off would not help, because the
+fault is upstream of this service, and retrying costs one cheap query.
+
+The two outcomes are kept apart on the point (`no-data` vs `stale`) because they
+are fixed in different places: an empty bucket is a wrong `sys_sn`, an unscoped
+token or a fresh install; a stale one is a collector outage.
+
+## Why the trapezoid stops at a gap
+
+`battery_energy_kwh()` skips any sample pair more than
+`MIJNBATTERIJ_MAX_SAMPLE_GAP_S` apart (default 3× the poll interval — the same
+line `pricing.compute_day()` draws between cadence drift and a real outage).
+
+The trapezoid assumes power ramped between two samples. True across 30 s; a
+fabrication across an outage — six hours missing with the battery charging at
+4 kW either side invents about 24 kWh of `chargedToday`. `compute_day()` has the
+same shape and survives it only because `gate()`'s max-gap check discards the
+whole day afterwards. There is no equivalent second line of defence here: a live
+figure is published the moment it is computed. Skipping under-reports instead,
+which is the direction that cannot invent energy, and `gap_skipped_s` on the
+status point says by how much it might have.
+
+## Why the cycle count fills yesterday in, but the euro total does not
+
+`daily_energy` is written by the nightly job at ~03:00. Between midnight and
+then, yesterday's discharge is in no stored row while today's has just reset to
+zero, so a plain sum drops `totalBatteryCycles` by roughly a full cycle every
+night and recovers three hours later. `stored_discharge_total()` therefore
+integrates yesterday out of `power_readings` when its row is absent.
+
+`batteryResultTotal` has the same hole and keeps it. The asymmetry is
+deliberate: a euro total that dips is a number moving, and the days it omits are
+days `pricing.gate()` judged unpublishable. **A lifetime cycle counter that
+moves backwards is physically impossible**, so anything reading it downstream is
+entitled to treat that as corrupt data rather than as a late batch job.

@@ -731,7 +731,11 @@ MIJNBATTERIJ_CYCLES_OFFSET=0
 ```
 
 Mint `INFLUX_TOKEN_MIJNBATTERIJ` with the rest — see
-["Scoped tokens"](#scoped-tokens).
+["Scoped tokens"](#scoped-tokens). Unlike the dispatcher's token this one is
+**not** `:?`-guarded, so it needs no placeholder first: pulling this branch
+leaves every existing compose command working whether or not you ever set it.
+The service refuses to start on an empty token once `MIJNBATTERIJ_API_KEY` is
+filled in, naming the variable.
 
 ### 2. Check the payload before publishing anything
 
@@ -758,6 +762,12 @@ carefully, because nothing downstream can catch them being wrong:
   current `model_version`, plus today so far. Days that failed
   `pricing.gate()` are absent from `daily_cost` and therefore from this total;
   it under-states rather than estimates, deliberately.
+
+`chargedToday`/`dischargedToday` skip any gap in `power_readings` longer than
+`MIJNBATTERIJ_MAX_SAMPLE_GAP_S` (default 3× the poll interval) rather than
+interpolating across it — interpolating six missing hours at 4 kW would invent
+~24 kWh. So after a collector outage those two figures under-report the day, by
+the number of seconds `gap_skipped_s` on the `mijnbatterij_submit` point names.
 
 ### 3. Publish
 
@@ -1133,11 +1143,22 @@ Every service gets a token scoped to what it actually does:
 | `INFLUX_TOKEN_KUMA` | read `alphaess` | For the Uptime Kuma keyword monitor in ["Monitoring the nightly efficiency job"](#monitoring-the-nightly-efficiency-job). Deliberately not `INFLUX_TOKEN_GRAFANA`: that one also reads `planning`, and pasting it into a second system means revoking one breaks the other. Optional — mint it only if you set that monitor up. |
 | `INFLUX_TOKEN_GRAFANA` | read on every bucket it charts | Read-only. Anyone who reaches the Grafana UI can issue arbitrary Flux through the datasource proxy, so this is the one most worth keeping narrow. |
 | `INFLUX_TOKEN_DISPATCH` | read `planning`, read + write `alphaess` | Reads the plan the translator consumes and writes the `dispatch_state` readback behind the dashboard's dispatch panels. The only process in the stack that reads another project's bucket, which is why it is not the collector's token. **Needed before any compose subcommand works**, including ones that have nothing to do with dispatch — see below. |
-| `INFLUX_TOKEN_MIJNBATTERIJ` | read + write `alphaess` | Reads `power_readings`, `market_price`, `daily_cost` and `daily_energy` to build the mijnbatterij.nl payload; writes only its own `mijnbatterij_submit` and `mijnbatterij_rank` status series. Separate from the collector's because it is the one token in the stack that is also the credential for an outbound public submission — revoking it stops the publishing without touching collection. |
+| `INFLUX_TOKEN_MIJNBATTERIJ` | read + write `alphaess` | Reads `power_readings`, `market_price`, `daily_cost` and `daily_energy` to build the mijnbatterij.nl payload; writes only its own `mijnbatterij_submit` and `mijnbatterij_rank` status series. Separate from the collector's because it is the one token in the stack that is also the credential for an outbound public submission — revoking it stops the publishing without touching collection. **The one token without a `:?` guard**, because that service is opt-in: see below. |
 
-None of them have a fallback: compose fails to start and names the missing
-variable. A service that quietly reverted to the admin token would defeat the
-point.
+None of them has a fallback — except `INFLUX_TOKEN_MIJNBATTERIJ`, below.
+Compose fails to start and names the missing variable. A service that quietly
+reverted to the admin token would defeat the point.
+
+**`INFLUX_TOKEN_MIJNBATTERIJ` is `:-`, not `:?`.** The guard is stack-wide, and
+that service is opt-in — it idles without `MIJNBATTERIJ_API_KEY`. Guarding it
+would break every compose subcommand on the NAS the moment the branch is pulled,
+for a feature nobody had switched on yet, and would leave you needing a
+placeholder just to run the `compose exec influxdb` that mints the real token.
+Nothing is given up: the guards exist so a missing token cannot silently become
+the *admin* token, and an empty value is not the admin token — it fails to
+authenticate. `mijnbatterij.py` exits at startup with a message naming this
+variable if the token is empty while an API key is set, which puts the error in
+the one service it concerns.
 
 That guard is stack-wide, not per-service. Compose interpolates the whole file on
 every subcommand, so a missing `INFLUX_TOKEN_DISPATCH` stops `docker compose

@@ -56,6 +56,7 @@ def config(**overrides) -> dict:
         "totals_ttl_s": 3600,
         "rank_interval_s": 0,
         "capacity_kwh": 27.9,
+        "max_gap_s": 90.0,
         "cycles_offset": 0.0,
         "mode": "self_consumption",
         "load_balancing": False,
@@ -97,15 +98,16 @@ def test_the_window_ends_at_now():
 def test_a_steady_charge_is_all_charge_and_no_discharge():
     t0 = dt.datetime(2026, 7, 17, 0, 0, tzinfo=UTC)
     samples = constant_samples(t0, t0 + dt.timedelta(hours=1), grid=1000.0, battery=-1000.0)
-    charged, discharged = mb.battery_energy_kwh(samples)
+    charged, discharged, skipped = mb.battery_energy_kwh(samples)
     assert charged == pytest.approx(1.0, abs=1e-6)
     assert discharged == 0.0
+    assert skipped == 0.0
 
 
 def test_a_steady_discharge_is_all_discharge():
     t0 = dt.datetime(2026, 7, 17, 0, 0, tzinfo=UTC)
     samples = constant_samples(t0, t0 + dt.timedelta(hours=2), grid=0.0, battery=500.0)
-    charged, discharged = mb.battery_energy_kwh(samples)
+    charged, discharged, _ = mb.battery_energy_kwh(samples)
     assert charged == 0.0
     assert discharged == pytest.approx(1.0, abs=1e-6)
 
@@ -116,14 +118,14 @@ def test_an_interval_that_crosses_zero_counts_towards_both_totals():
     smaller number, or a day of hard cycling reads as a quiet one."""
     t0 = dt.datetime(2026, 7, 17, 0, 0, tzinfo=UTC)
     samples = [sample(t0, battery=-1000.0), sample(t0 + dt.timedelta(hours=1), battery=1000.0)]
-    charged, discharged = mb.battery_energy_kwh(samples)
+    charged, discharged, _ = mb.battery_energy_kwh(samples, max_gap_s=7200)
     assert charged == pytest.approx(0.25, abs=1e-6)
     assert discharged == pytest.approx(0.25, abs=1e-6)
 
 
 def test_a_single_sample_integrates_to_nothing():
     t0 = dt.datetime(2026, 7, 17, 0, 0, tzinfo=UTC)
-    assert mb.battery_energy_kwh([sample(t0, battery=-1000.0)]) == (0.0, 0.0)
+    assert mb.battery_energy_kwh([sample(t0, battery=-1000.0)]) == (0.0, 0.0, 0.0)
 
 
 # --------------------------------------------------------------------------
@@ -220,10 +222,10 @@ def test_collect_builds_a_payload_from_todays_samples(monkeypatch):
     samples = constant_samples(start, now, grid=1000.0, battery=-1000.0, soc=55.0)
     _stub_influx(monkeypatch, samples, hourly_intervals(start, 24))
 
-    snap = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                      totals=mb.Totals(3600), config=config(), now=now)
+    snap, outcome = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                               totals=mb.Totals(3600), config=config(), now=now)
 
-    assert snap is not None
+    assert outcome == "ok"
     assert snap.payload["chargedToday"] == pytest.approx(12.0, abs=0.01)
     assert snap.payload["dischargedToday"] == 0.0
     assert snap.payload["batteryCharge"] == 55.0
@@ -238,8 +240,8 @@ def test_todays_result_is_added_to_the_stored_all_time_total(monkeypatch):
     samples = constant_samples(start, now, grid=1000.0, battery=-1000.0)
     _stub_influx(monkeypatch, samples, hourly_intervals(start, 24), saving=10.0)
 
-    snap = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                      totals=mb.Totals(3600), config=config(), now=now)
+    snap, _ = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                         totals=mb.Totals(3600), config=config(), now=now)
 
     assert snap.payload["batteryResultTotal"] == pytest.approx(
         10.0 + snap.payload["batteryResult"], abs=1e-4)
@@ -251,8 +253,8 @@ def test_todays_throughput_counts_towards_the_cycle_total(monkeypatch):
     samples = constant_samples(start, now, grid=0.0, battery=1000.0)
     _stub_influx(monkeypatch, samples, hourly_intervals(start, 24), discharge=27.9)
 
-    snap = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                      totals=mb.Totals(3600), config=config(cycles_offset=100.0), now=now)
+    snap, _ = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                         totals=mb.Totals(3600), config=config(cycles_offset=100.0), now=now)
 
     # 27.9 kWh stored + 12 kWh today, over 27.9 kWh usable, plus the offset.
     assert snap.payload["totalBatteryCycles"] == pytest.approx(101.43, abs=0.01)
@@ -267,14 +269,33 @@ def test_a_stale_newest_sample_submits_nothing(monkeypatch):
     _stub_influx(monkeypatch, samples, hourly_intervals(start, 24))
 
     assert mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                      totals=mb.Totals(3600), config=config(), now=now) is None
+                      totals=mb.Totals(3600), config=config(), now=now) == (None, "stale")
 
 
 def test_no_samples_at_all_submits_nothing(monkeypatch):
     now = dt.datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
     _stub_influx(monkeypatch, [], [])
     assert mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                      totals=mb.Totals(3600), config=config(), now=now) is None
+                      totals=mb.Totals(3600), config=config(), now=now) == (None, "no-data")
+
+
+def test_an_empty_bucket_and_a_dead_collector_are_told_apart(monkeypatch):
+    """They get fixed in different places -- one is a wrong sys_sn or an
+    unscoped token, the other is an outage -- so a panel that shows only
+    "nothing submitted" cannot tell you which of the two you have."""
+    now = dt.datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
+    start = dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC)
+
+    _stub_influx(monkeypatch, [], [])
+    _, absent = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                           totals=mb.Totals(3600), config=config(), now=now)
+
+    old = constant_samples(start, now - dt.timedelta(hours=2), grid=0.0, battery=0.0)
+    _stub_influx(monkeypatch, old, hourly_intervals(start, 24))
+    _, stale = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                          totals=mb.Totals(3600), config=config(), now=now)
+
+    assert (absent, stale) == ("no-data", "stale")
 
 
 def test_missing_prices_send_a_zero_result_rather_than_no_submission(monkeypatch):
@@ -285,8 +306,8 @@ def test_missing_prices_send_a_zero_result_rather_than_no_submission(monkeypatch
     samples = constant_samples(start, now, grid=1000.0, battery=-1000.0)
     _stub_influx(monkeypatch, samples, [])
 
-    snap = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                      totals=mb.Totals(3600), config=config(), now=now)
+    snap, _ = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                         totals=mb.Totals(3600), config=config(), now=now)
 
     assert snap.payload["batteryResult"] == 0.0
     assert snap.payload["chargedToday"] == pytest.approx(12.0, abs=0.01)
@@ -404,3 +425,219 @@ def test_a_rejection_is_stored_as_a_point_too():
     line = mb.status_point(None, "SN", "rejected", 422, now).to_line_protocol()
     assert "submitted=0" in line
     assert "status_code=422" in line
+
+
+# --------------------------------------------------------------------------
+# Gap handling
+# --------------------------------------------------------------------------
+
+def test_an_outage_is_skipped_rather_than_trapezoided_across():
+    """The trapezoid assumes the power ramped between two samples, which is true
+    across 30 s and a fabrication across six hours. Charging at 4 kW either side
+    of an outage would otherwise invent ~24 kWh of chargedToday, and unlike
+    compute_day there is no gate() downstream to throw the day out afterwards."""
+    t0 = dt.datetime(2026, 7, 17, 0, 0, tzinfo=UTC)
+    samples = [sample(t0, battery=-4000.0),
+               sample(t0 + dt.timedelta(hours=6), battery=-4000.0)]
+    charged, discharged, skipped = mb.battery_energy_kwh(samples, max_gap_s=90)
+    assert (charged, discharged) == (0.0, 0.0)
+    assert skipped == 6 * 3600
+
+
+def test_normal_cadence_drift_is_still_integrated():
+    """The cap must not fire on a poll or two being late, or every figure is
+    quietly low all the time."""
+    t0 = dt.datetime(2026, 7, 17, 0, 0, tzinfo=UTC)
+    samples = [sample(t0, battery=-3600.0), sample(t0 + dt.timedelta(seconds=60),
+                                                   battery=-3600.0)]
+    charged, _, skipped = mb.battery_energy_kwh(samples, max_gap_s=90)
+    assert charged == pytest.approx(0.06, abs=1e-6)
+    assert skipped == 0.0
+
+
+def test_a_gap_does_not_discard_the_energy_either_side_of_it():
+    t0 = dt.datetime(2026, 7, 17, 0, 0, tzinfo=UTC)
+    samples = [
+        sample(t0, battery=-1000.0),
+        sample(t0 + dt.timedelta(hours=1), battery=-1000.0),          # 1 kWh
+        sample(t0 + dt.timedelta(hours=7), battery=-1000.0),          # 6 h gap
+        sample(t0 + dt.timedelta(hours=8), battery=-1000.0),          # 1 kWh
+    ]
+    charged, _, skipped = mb.battery_energy_kwh(samples, max_gap_s=3600)
+    assert charged == pytest.approx(2.0, abs=1e-6)
+    assert skipped == 6 * 3600
+
+
+def test_the_skipped_seconds_reach_the_status_point(monkeypatch):
+    """So a panel can say the figure is under-reported instead of leaving it to
+    be inferred from a hole in power_readings."""
+    now = dt.datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
+    snap = mb.Snapshot(_payload(), sample(now), age_s=1.0, sample_count=2, skipped_s=21600.0)
+    assert "gap_skipped_s=21600" in mb.status_point(snap, "SN", "ok", 200, now).to_line_protocol()
+
+
+# --------------------------------------------------------------------------
+# The nightly cycle-count hole
+# --------------------------------------------------------------------------
+
+class RecordingQueryApi:
+    """Returns a fixed sum, and remembers every flux it was handed."""
+
+    def __init__(self, value=100.0, rows=True):
+        self.value = value
+        self.rows = rows
+        self.queries = []
+
+    def query(self, flux):
+        self.queries.append(flux)
+
+        class Rec:
+            @staticmethod
+            def get_value():
+                return None
+
+        class Table:
+            records = [Rec()] if self.rows else []
+
+        return [Table()]
+
+
+def test_yesterday_is_filled_from_power_readings_until_the_nightly_job_runs(monkeypatch):
+    """daily_energy lands at ~03:00. Between midnight and then, yesterday is in
+    no stored row while today's own discharge has just reset to zero -- so a
+    naive sum drops totalBatteryCycles by about a full cycle every night. A
+    lifetime counter moving backwards is physically impossible and reads
+    downstream as corrupt data, not as a late batch job."""
+    monkeypatch.setattr(mb, "_sum_query", lambda *a, **k: 100.0)
+    monkeypatch.setattr(mb, "has_daily_energy", lambda *a, **k: False)
+    monkeypatch.setattr(mb, "discharge_from_readings", lambda *a, **k: 18.5)
+
+    now = dt.datetime(2026, 7, 17, 0, 30, tzinfo=UTC)
+    total = mb.stored_discharge_total(RecordingQueryApi(), "alphaess", "SN",
+                                      dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC), now=now)
+    assert total == pytest.approx(118.5)
+
+
+def test_nothing_is_filled_in_once_the_row_exists(monkeypatch):
+    """Otherwise the fix double-counts yesterday from 03:00 onwards, which is a
+    worse error than the dip it replaces."""
+    monkeypatch.setattr(mb, "_sum_query", lambda *a, **k: 100.0)
+    monkeypatch.setattr(mb, "has_daily_energy", lambda *a, **k: True)
+    monkeypatch.setattr(mb, "discharge_from_readings",
+                        lambda *a, **k: pytest.fail("should not have been called"))
+
+    now = dt.datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
+    total = mb.stored_discharge_total(RecordingQueryApi(), "alphaess", "SN",
+                                      dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC), now=now)
+    assert total == pytest.approx(100.0)
+
+
+def test_the_fill_looks_at_yesterday_in_local_time():
+    """At 00:30 CEST on the 17th -- 22:30 UTC on the 16th -- yesterday is the
+    16th, not the 15th."""
+    api = RecordingQueryApi(rows=True)
+    mb.has_daily_energy(api, "alphaess", "SN", dt.date(2026, 7, 16))
+    assert "2026-07-15T22:00:00+00:00" in api.queries[0]
+
+
+# --------------------------------------------------------------------------
+# run_once: what a rejection records
+# --------------------------------------------------------------------------
+
+class RecordingWriteApi:
+    def __init__(self):
+        self.points = []
+
+    def write(self, bucket=None, record=None):
+        self.points.append(record.to_line_protocol())
+
+
+def _run_once(monkeypatch, response, samples=None, **cfg):
+    now_start = dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC)
+    if samples is None:
+        samples = constant_samples(now_start, dt.datetime.now(UTC), grid=1000.0,
+                                   battery=-1000.0)
+    _stub_influx(monkeypatch, samples, hourly_intervals(now_start, 48))
+    write_api = RecordingWriteApi()
+    session = FakeSession(response)
+    return write_api, session, mb.run_once(
+        FakeQueryApi(), write_api, session, bucket="alphaess", sys_sn="SN",
+        api_key="key", config=config(**cfg), totals=mb.Totals(3600), dry_run=False)
+
+
+def test_a_rejected_submission_records_what_was_in_the_body(monkeypatch):
+    """The whole point of mijnbatterij_submit is being able to debug a 422 after
+    the fact. Recording only `submitted=0` and the status code leaves you
+    guessing what was actually sent."""
+    write_api = RecordingWriteApi()
+    session = FakeSession(FakeResponse(422, text="dischargedToday out of range"))
+    start = dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC)
+    samples = constant_samples(start, dt.datetime.now(UTC), grid=1000.0, battery=-1000.0)
+    _stub_influx(monkeypatch, samples, hourly_intervals(start, 48))
+
+    with pytest.raises(mb.SubmitError):
+        mb.run_once(FakeQueryApi(), write_api, session, bucket="alphaess", sys_sn="SN",
+                    api_key="key", config=config(), totals=mb.Totals(3600), dry_run=False)
+
+    assert len(write_api.points) == 1
+    point = write_api.points[0]
+    assert "outcome=rejected" in point
+    assert "status_code=422" in point
+    assert "discharged_today=" in point
+    assert "battery_result=" in point
+
+
+def test_an_unreachable_platform_is_labelled_apart_from_a_rejection(monkeypatch):
+    """A 4xx will fail identically next time and needs a code or config change;
+    a transport failure is worth simply trying again in five minutes."""
+    import requests
+
+    class Broken(FakeSession):
+        def post(self, *a, **k):
+            raise requests.ConnectionError("name resolution failed")
+
+    write_api = RecordingWriteApi()
+    start = dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC)
+    samples = constant_samples(start, dt.datetime.now(UTC), grid=1000.0, battery=-1000.0)
+    _stub_influx(monkeypatch, samples, hourly_intervals(start, 48))
+
+    with pytest.raises(mb.SubmitError):
+        mb.run_once(FakeQueryApi(), write_api, session=Broken(), bucket="alphaess",
+                    sys_sn="SN", api_key="key", config=config(),
+                    totals=mb.Totals(3600), dry_run=False)
+
+    assert "outcome=unreachable" in write_api.points[0]
+
+
+def test_a_declined_cycle_records_the_reason_it_declined(monkeypatch):
+    now_utc = dt.datetime.now(UTC)
+    start = dt.datetime.combine(now_utc.date(), dt.time(), UTC) - dt.timedelta(days=1)
+    stale = constant_samples(start, now_utc - dt.timedelta(hours=3), grid=0.0, battery=0.0)
+    write_api, _, (snap, outcome) = _run_once(monkeypatch, FakeResponse(200), samples=stale)
+    assert (snap, outcome) == (None, "stale")
+    assert "outcome=stale" in write_api.points[0]
+    assert "submitted=0" in write_api.points[0]
+
+
+# --------------------------------------------------------------------------
+# fetch_rank: an undocumented API cannot be allowed to kill the loop
+# --------------------------------------------------------------------------
+
+def test_a_rank_body_of_the_wrong_shape_is_not_a_crash():
+    """A list where an object was expected raises AttributeError, not
+    SubmitError -- and out in run_loop that ends the process, which
+    `restart: unless-stopped` then turns into a crash loop that stops every
+    submission over a decoration on a Grafana panel."""
+    session = FakeSession(get_response=FakeResponse(payload=[{"overallRank": 1}]))
+    assert mb.fetch_rank(session, "key") == {}
+
+
+def test_a_null_result_today_is_not_a_crash():
+    session = FakeSession(get_response=FakeResponse(payload={"resultToday": None}))
+    assert mb.fetch_rank(session, "key") == {}
+
+
+def test_a_non_numeric_rank_is_dropped_rather_than_raising():
+    session = FakeSession(get_response=FakeResponse(
+        payload={"resultToday": {"overallRank": "n/a", "providerRank": 4}}))
+    assert mb.fetch_rank(session, "key") == {"provider_rank": 4.0}
