@@ -697,6 +697,99 @@ sudo docker compose run --rm collector python pricing.py --date <yesterday> --fo
 or create the monitor the following day. Do **not** widen the `-14d` range to
 paper over it — that hides exactly the condition the monitor exists to report.
 
+## Publishing to mijnbatterij.nl
+
+[mijnbatterij.nl](https://mijnbatterij.nl) benchmarks Dutch home batteries
+against each other publicly. The `mijnbatterij` service submits this
+installation's live figures to it every five minutes, reading **only** InfluxDB
+— `power_readings`, `market_price`, `daily_cost`, `daily_energy` — so it never
+touches the AlphaESS API and cannot perturb collection.
+
+It runs from the collector image with a different command, and it is **opt-in**:
+with `MIJNBATTERIJ_API_KEY` unset the container idles instead of crash-looping,
+the same shape as `awtrix-pusher` without `AWTRIX_HOST`.
+
+### 1. Register the installation (browser, once)
+
+There is no signup API. On the site, create an account and add an installation:
+
+| Field | Value |
+|---|---|
+| Merk / model | AlphaESS SMILE-G3-S5 |
+| Opslagcapaciteit | `BATTERY_CAPACITY_KWH` from `.env` (27.9 kWh) |
+| Max vermogen | 5 kW |
+| Netaansluiting | your fuse rating, e.g. `3x25A` |
+| Aansturingsleverancier | **Doe-het-zelf** |
+| Locatie, gebruikersnaam | shown publicly — pick accordingly |
+
+The API key then appears on the profile page. It is a credential for an
+outbound *public* submission, so it goes in `.env` and nowhere else:
+
+```
+MIJNBATTERIJ_API_KEY=<key from the profile page>
+MIJNBATTERIJ_CYCLES_OFFSET=0
+```
+
+Mint `INFLUX_TOKEN_MIJNBATTERIJ` with the rest — see
+["Scoped tokens"](#scoped-tokens).
+
+### 2. Check the payload before publishing anything
+
+The first submission is public. Look at it first, from the Mac or the NAS:
+
+```sh
+sudo docker compose run --rm mijnbatterij python mijnbatterij.py --once --dry-run
+```
+
+That prints the exact body and posts nothing. Three numbers are worth reading
+carefully, because nothing downstream can catch them being wrong:
+
+- **`batteryPower` sign.** AlphaESS's `pbat` is positive while *discharging*;
+  this sends charge-positive. The convention the platform expects is not
+  documented anywhere public. If its graph reads inverted, set
+  `MIJNBATTERIJ_CHARGE_POSITIVE=0` — do not change the sign in the code, or the
+  payload silently disagrees with `power_readings`.
+- **`totalBatteryCycles`.** Computed as total kWh discharged (from
+  `daily_energy`) over usable capacity, so it counts only what this collector
+  has seen. Put whatever the pack did before that into
+  `MIJNBATTERIJ_CYCLES_OFFSET`, or the figure is "cycles since we started
+  measuring" published as a lifetime total.
+- **`batteryResultTotal`.** The sum of stored `daily_cost.saving` at the
+  current `model_version`, plus today so far. Days that failed
+  `pricing.gate()` are absent from `daily_cost` and therefore from this total;
+  it under-states rather than estimates, deliberately.
+
+### 3. Publish
+
+```sh
+sudo docker compose up -d mijnbatterij
+```
+
+Not a bare `up -d`, which recreates the collector and cost 922 s of samples on
+2026-08-10.
+
+Verify it from InfluxDB rather than from the site, which caches:
+
+```sh
+sudo docker compose logs --tail 20 mijnbatterij
+```
+
+Every cycle also writes a `mijnbatterij_submit` point — `submitted`,
+`status_code`, and the figures actually sent — so a rejection is visible in
+Grafana instead of only in a log that rotates. `MIJNBATTERIJ_HEARTBEAT_URL`
+takes an Uptime Kuma **Push** URL; the service pushes `down` from the second
+consecutive rejection, carrying the platform's own validation message as the
+reason. That message is worth reading: there is no published field-by-field
+reference for this API, so it is the only description of the schema anyone has.
+
+### What `mode` should say
+
+`self_consumption` | `self_consumption_plus` | `imbalance` are the documented
+values. This battery follows a day-ahead-price plan, which is closest to
+`self_consumption_plus`, but nothing here can verify how the platform buckets a
+DIY dispatcher — so `MIJNBATTERIJ_MODE` decides it and defaults to the
+conservative `self_consumption`. Change it in `.env`, not in the code.
+
 ## Backing up InfluxDB
 
 InfluxDB's data lives only in the `alphaess-influxdb-data` Docker volume,
@@ -1040,6 +1133,7 @@ Every service gets a token scoped to what it actually does:
 | `INFLUX_TOKEN_KUMA` | read `alphaess` | For the Uptime Kuma keyword monitor in ["Monitoring the nightly efficiency job"](#monitoring-the-nightly-efficiency-job). Deliberately not `INFLUX_TOKEN_GRAFANA`: that one also reads `planning`, and pasting it into a second system means revoking one breaks the other. Optional — mint it only if you set that monitor up. |
 | `INFLUX_TOKEN_GRAFANA` | read on every bucket it charts | Read-only. Anyone who reaches the Grafana UI can issue arbitrary Flux through the datasource proxy, so this is the one most worth keeping narrow. |
 | `INFLUX_TOKEN_DISPATCH` | read `planning`, read + write `alphaess` | Reads the plan the translator consumes and writes the `dispatch_state` readback behind the dashboard's dispatch panels. The only process in the stack that reads another project's bucket, which is why it is not the collector's token. **Needed before any compose subcommand works**, including ones that have nothing to do with dispatch — see below. |
+| `INFLUX_TOKEN_MIJNBATTERIJ` | read + write `alphaess` | Reads `power_readings`, `market_price`, `daily_cost` and `daily_energy` to build the mijnbatterij.nl payload; writes only its own `mijnbatterij_submit` and `mijnbatterij_rank` status series. Separate from the collector's because it is the one token in the stack that is also the credential for an outbound public submission — revoking it stops the publishing without touching collection. |
 
 None of them have a fallback: compose fails to start and names the missing
 variable. A service that quietly reverted to the admin token would defeat the
@@ -1080,6 +1174,10 @@ sudo docker compose exec -T influxdb influx auth create \
 sudo docker compose exec -T influxdb influx auth create \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "awtrix-pusher: r alphaess" \
   --read-bucket "$ALPHAESS_ID"
+
+sudo docker compose exec -T influxdb influx auth create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "mijnbatterij: rw alphaess" \
+  --read-bucket "$ALPHAESS_ID" --write-bucket "$ALPHAESS_ID"
 
 # Only if you set up the Uptime Kuma keyword monitor. This one is pasted into
 # Kuma's config, not into .env.

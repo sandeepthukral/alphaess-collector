@@ -1,5 +1,5 @@
 x-logging: &default-logging
-  # All four services log continuously (the collector/pusher every
+  # Every long-running service here logs continuously (the collector/pusher every
   # POLL_INTERVAL_SECONDS, forever) and the default json-file driver has no
   # cap of its own -- left alone it's unbounded disk growth on the NAS. Cap
   # and rotate instead.
@@ -171,6 +171,70 @@ services:
       AWTRIX_ICON_GRID: ${AWTRIX_ICON_GRID:-}
       AWTRIX_ICON_LOAD: ${AWTRIX_ICON_LOAD:-}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - alphaess-net
+
+  # Public benchmarking submission to https://mijnbatterij.nl, under the
+  # "Doe-het-zelf" control provider -- the battery here is driven by this repo's
+  # own dispatcher, not by an aansturingsleverancier the platform supports.
+  #
+  # Reads only what is already in InfluxDB (power_readings, market_price,
+  # daily_cost, daily_energy), so it adds no load on the AlphaESS API and cannot
+  # perturb collection. Same image as the collector; different command.
+  #
+  # OPT-IN, and off until registered: with MIJNBATTERIJ_API_KEY unset the
+  # container idles rather than crash-looping, exactly like awtrix-pusher
+  # without AWTRIX_HOST. The key is issued on the profile page after the
+  # installation is created by hand in the browser -- there is no signup API.
+  mijnbatterij:
+    build: ./collector
+    restart: unless-stopped
+    logging: *default-logging
+    command: ["python", "-u", "mijnbatterij.py"]
+    environment:
+      <<: *default-timezone
+      ALPHAESS_SYS_SN: ${ALPHAESS_SYS_SN}
+      INFLUX_URL: http://influxdb:8086
+      # Read+write on alphaess: reads power_readings, market_price, daily_cost
+      # and daily_energy; writes only its own mijnbatterij_submit and
+      # mijnbatterij_rank status series.
+      INFLUX_TOKEN: ${INFLUX_TOKEN_MIJNBATTERIJ:?set INFLUX_TOKEN_MIJNBATTERIJ in .env -- see DEPLOY.md, "Scoped tokens"}
+      INFLUX_ORG: ${INFLUX_ORG:-home}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-alphaess}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Blank = disabled. Paste the key from the mijnbatterij.nl profile page.
+      MIJNBATTERIJ_API_KEY: ${MIJNBATTERIJ_API_KEY:-}
+      # The platform asks for every 1-5 minutes. 300 s is the slow end on
+      # purpose: each cycle re-integrates the whole day so far out of Influx,
+      # and nothing on a leaderboard moves meaningfully inside five minutes.
+      MIJNBATTERIJ_INTERVAL_SECONDS: ${MIJNBATTERIJ_INTERVAL_SECONDS:-300}
+      MIJNBATTERIJ_TIMEOUT_SECONDS: ${MIJNBATTERIJ_TIMEOUT_SECONDS:-15}
+      # Newest sample older than this = submit nothing. A stale row published as
+      # current is worse than a gap: the platform ranks installations against
+      # each other, so it charges this one for a collector outage.
+      MIJNBATTERIJ_STALE_AFTER_SECONDS: ${MIJNBATTERIJ_STALE_AFTER_SECONDS:-600}
+      # How long the all-time daily_cost/daily_energy sums are cached. They only
+      # change once a night.
+      MIJNBATTERIJ_TOTALS_TTL_SECONDS: ${MIJNBATTERIJ_TOTALS_TTL_SECONDS:-3600}
+      # GET /api/me for the leaderboard rank, into `mijnbatterij_rank`. 0 = off.
+      MIJNBATTERIJ_RANK_INTERVAL_SECONDS: ${MIJNBATTERIJ_RANK_INTERVAL_SECONDS:-3600}
+      # Usable capacity, the denominator of totalBatteryCycles. Shared with
+      # pricing.py's SoC-in-kWh indicator, hence the same variable.
+      BATTERY_CAPACITY_KWH: ${BATTERY_CAPACITY_KWH:-}
+      # Cycles the pack did before this collector existed. Without it the
+      # submitted lifetime figure is "cycles since we started measuring".
+      MIJNBATTERIJ_CYCLES_OFFSET: ${MIJNBATTERIJ_CYCLES_OFFSET:-0}
+      # Two undocumented corners of their API, both settings rather than
+      # assumptions compiled into the payload. See the module docstring.
+      MIJNBATTERIJ_MODE: ${MIJNBATTERIJ_MODE:-self_consumption}
+      MIJNBATTERIJ_CHARGE_POSITIVE: ${MIJNBATTERIJ_CHARGE_POSITIVE:-1}
+      MIJNBATTERIJ_LOAD_BALANCING: ${MIJNBATTERIJ_LOAD_BALANCING:-0}
+      # Optional Kuma "Push" monitor. Pushes down from the 2nd consecutive
+      # rejection, with the platform's own validation message as the reason.
+      MIJNBATTERIJ_HEARTBEAT_URL: ${MIJNBATTERIJ_HEARTBEAT_URL:-}
     depends_on:
       influxdb:
         condition: service_healthy
