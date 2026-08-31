@@ -255,7 +255,12 @@ services:
       MIJNBATTERIJ_CYCLES_OFFSET: ${MIJNBATTERIJ_CYCLES_OFFSET:-0}
       # Two undocumented corners of their API, both settings rather than
       # assumptions compiled into the payload. See the module docstring.
-      MIJNBATTERIJ_MODE: ${MIJNBATTERIJ_MODE:-self_consumption}
+      # Blank = do not send `mode` at all, which is the default. The profile
+      # page holds it already (Modus, e.g. "Handmatig/doe-het-zelf", beside
+      # Aansturing, e.g. Frank Energie) and the platform validates any mode it
+      # is sent against that provider's own set -- it rejected
+      # `self_consumption` for frank-energie on the first live submission.
+      MIJNBATTERIJ_MODE: ${MIJNBATTERIJ_MODE:-}
       MIJNBATTERIJ_CHARGE_POSITIVE: ${MIJNBATTERIJ_CHARGE_POSITIVE:-1}
       MIJNBATTERIJ_LOAD_BALANCING: ${MIJNBATTERIJ_LOAD_BALANCING:-0}
       # Optional Kuma "Push" monitor. Pushes down from the 2nd consecutive

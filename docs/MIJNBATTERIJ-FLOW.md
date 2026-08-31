@@ -58,7 +58,7 @@ flowchart TD
 | `batteryResult` | `pricing.compute_day()['saving']` over today so far | the same two-world model `daily_cost` stores, ungated |
 | `batteryResultTotal` | Σ stored `daily_cost.saving` at the current `model_version`, + today | |
 | `totalBatteryCycles` | (Σ `daily_energy.discharge_kwh_api` + today) / `BATTERY_CAPACITY_KWH` + `MIJNBATTERIJ_CYCLES_OFFSET` | throughput-equivalent, not an event count |
-| `mode` | `MIJNBATTERIJ_MODE` | a setting: the platform's bucketing of a DIY dispatcher is unverifiable from here |
+| `mode` | `MIJNBATTERIJ_MODE` | **omitted when blank, which is the default.** The profile's own Modus field (`Handmatig/doe-het-zelf`) already says it; a sent mode is validated against the Aansturing provider's unpublished set |
 | `loadBalancingActive` | `MIJNBATTERIJ_LOAD_BALANCING` | nothing in this stack does load balancing |
 
 ## Why `gate()` is not applied to today

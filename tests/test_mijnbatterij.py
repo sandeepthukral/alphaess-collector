@@ -172,6 +172,27 @@ def test_the_payload_carries_exactly_the_documented_fields():
     }
 
 
+def test_an_empty_mode_is_omitted_rather_than_sent_blank():
+    """The profile page carries Modus (e.g. "Handmatig/doe-het-zelf") next to
+    Aansturing (e.g. Frank Energie), and the platform validates any mode it is
+    sent against that provider's own unpublished set -- it rejected
+    `self_consumption` for frank-energie outright. Omitting the field lets the
+    profile stand, which is where the answer already is. Sending "" would be a
+    guess at a value, not an abstention."""
+    payload = _payload(mode="")
+    assert "mode" not in payload
+    assert payload["batteryCharge"] == 62.4    # the rest is unaffected
+
+
+def test_omitting_the_mode_is_the_default(monkeypatch):
+    monkeypatch.delenv("MIJNBATTERIJ_MODE", raising=False)
+    assert mb.load_config()["mode"] == ""
+
+
+def test_an_explicit_mode_is_still_sent():
+    assert _payload(mode="imbalance")["mode"] == "imbalance"
+
+
 def test_charging_is_sent_positive_by_default():
     """AlphaESS's pbat is positive while DISCHARGING, so -1500 W is charging at
     1.5 kW. Getting this backwards publishes a battery that appears to discharge
@@ -931,9 +952,9 @@ def test_an_empty_base_url_falls_back_instead_of_retrying_forever(monkeypatch):
     assert mb.load_config()["base_url"] == mb.API_BASE
 
 
-def test_an_empty_mode_falls_back_to_the_conservative_value(monkeypatch):
+def test_an_empty_mode_setting_means_omit_it(monkeypatch):
     monkeypatch.setenv("MIJNBATTERIJ_MODE", "")
-    assert mb.load_config()["mode"] == "self_consumption"
+    assert mb.load_config()["mode"] == ""
 
 
 # --------------------------------------------------------------------------

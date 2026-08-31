@@ -37,10 +37,12 @@ here rather than assumptions baked into the payload:
     platform's graph reads inverted, flip the setting -- do not edit the sign
     in here, or the next reader has to rediscover why it disagrees with
     power_readings.
-  * `mode`. "self_consumption" | "self_consumption_plus" | "imbalance" are the
-    documented values; a day-ahead-price-driven DIY dispatcher is closest to
-    self_consumption_plus, but nothing here can verify how the platform buckets
-    it, so MIJNBATTERIJ_MODE decides and defaults to the conservative one.
+  * `mode`. NOT SENT AT ALL by default. The profile page carries Modus
+    ("Handmatig/doe-het-zelf") as a setting beside Aansturing ("Frank
+    Energie"), and the platform validates any mode it is sent against that
+    provider's own unpublished set -- asserting "self_consumption" from here
+    earned a 400 naming frank-energie while the profile was correct all along.
+    MIJNBATTERIJ_MODE can still name one; blank omits the field.
 
 Run modes:
     python mijnbatterij.py           # submit loop (production)
@@ -410,9 +412,18 @@ def build_payload(*, latest: Sample, charged_kwh: float, discharged_kwh: float,
                   result_today: float, result_total: float, cycle_count: float,
                   mode: str, load_balancing: bool,
                   charge_positive: bool = True) -> dict:
-    """The POST /api/live body. Pure: everything it needs is an argument."""
+    """The POST /api/live body. Pure: everything it needs is an argument.
+
+    An empty `mode` OMITS the field rather than sending "". The platform's own
+    profile page carries the mode as a setting (Modus, e.g.
+    "Handmatig/doe-het-zelf") alongside the control provider (Aansturing, e.g.
+    Frank Energie), and validates any mode it is sent against that provider's
+    own set -- which is not published, and rejected `self_consumption` outright
+    for frank-energie on the first live submission. Not sending the field lets
+    the profile stand, which is where the answer already is.
+    """
     power = -latest.battery if charge_positive else latest.battery
-    return {
+    payload = {
         "timestamp": latest.time.astimezone(dt.UTC).isoformat(),
         "batteryResult": round(result_today, 4),
         "batteryResultTotal": round(result_total, 4),
@@ -421,9 +432,11 @@ def build_payload(*, latest: Sample, charged_kwh: float, discharged_kwh: float,
         "chargedToday": round(charged_kwh, 3),
         "dischargedToday": round(discharged_kwh, 3),
         "totalBatteryCycles": round(cycle_count, 2),
-        "mode": mode,
         "loadBalancingActive": load_balancing,
     }
+    if mode:
+        payload["mode"] = mode
+    return payload
 
 
 class Snapshot:
@@ -749,7 +762,10 @@ def load_config() -> dict:
         "max_gap_s": _num_env("MIJNBATTERIJ_MAX_SAMPLE_GAP_S", DEFAULT_MAX_SAMPLE_GAP_S),
         "capacity_kwh": capacity,
         "cycles_offset": _num_env("MIJNBATTERIJ_CYCLES_OFFSET", 0.0),
-        "mode": _str_env("MIJNBATTERIJ_MODE", "self_consumption"),
+        # Empty = do not send `mode` at all. Deliberately the default: the
+        # profile page already holds it, and a guessed value is validated
+        # server-side against a provider-specific set nobody has published.
+        "mode": _str_env("MIJNBATTERIJ_MODE", ""),
         "load_balancing": _bool_env("MIJNBATTERIJ_LOAD_BALANCING", False),
         "charge_positive": _bool_env("MIJNBATTERIJ_CHARGE_POSITIVE", True),
         "base_url": _str_env("MIJNBATTERIJ_BASE_URL", API_BASE).rstrip("/"),
@@ -814,7 +830,8 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
     totals = Totals(config["totals_ttl_s"])
     heartbeat_url = os.environ.get("MIJNBATTERIJ_HEARTBEAT_URL", "")
     log.info("Submitting every %ds to %s (mode=%s, charge_positive=%s)",
-             interval, config["base_url"], config["mode"], config["charge_positive"])
+             interval, config["base_url"],
+             config["mode"] or "<from profile>", config["charge_positive"])
 
     consecutive_failures = 0
     next_rank = 0.0

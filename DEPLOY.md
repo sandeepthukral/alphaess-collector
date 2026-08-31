@@ -719,7 +719,8 @@ There is no signup API. On the site, create an account and add an installation:
 | Opslagcapaciteit | `BATTERY_CAPACITY_KWH` from `.env` (27.9 kWh) |
 | Max vermogen | 5 kW |
 | Netaansluiting | your fuse rating, e.g. `3x25A` |
-| Aansturingsleverancier | **Doe-het-zelf** |
+| Aansturing | your energy supplier — **Frank Energie** here. This is *who supplies the battery's control*, not how it is driven |
+| Modus | **Handmatig/doe-het-zelf** — this is the field that says the dispatching is your own |
 | Locatie, gebruikersnaam | shown publicly — pick accordingly |
 
 The API key then appears on the profile page. It is a credential for an
@@ -806,43 +807,36 @@ consecutive rejection, carrying the platform's own validation message as the
 reason. That message is worth reading: there is no published field-by-field
 reference for this API, so it is the only description of the schema anyone has.
 
-### What `mode` should say
+### What `mode` should say — nothing, by default
 
-`self_consumption` | `self_consumption_plus` | `imbalance` are the documented
-values. This battery follows a day-ahead-price plan, which is closest to
-`self_consumption_plus`, but nothing here can verify how the platform buckets a
-DIY dispatcher — so `MIJNBATTERIJ_MODE` decides it and defaults to the
-conservative `self_consumption`. Change it in `.env`, not in the code.
+`MIJNBATTERIJ_MODE` is **blank** by default, which omits the field from the
+payload entirely. That is not timidity, it is where the answer actually lives:
+the profile page carries **Modus** (`Handmatig/doe-het-zelf`) as a setting in
+its own right, beside **Aansturing** (`Frank Energie`). Two different fields —
+Aansturing is who supplies the control, Modus is how the battery is driven — and
+it is Modus, not Aansturing, that says this installation is self-dispatched.
 
-**The valid set depends on the control provider on your profile**, which the
-platform enforces server-side. The first live submission from this installation
-came back:
+The platform validates any mode it *is* sent against the provider's own set,
+which is not published anywhere. The first live submission from here asserted
+`self_consumption` and came back:
 
 ```
 400 {"message":"Battery mode: self_consumption is not available for frank-energie"}
 ```
 
-— i.e. the account was registered under **frank-energie**, not Doe-het-zelf, and
-that provider does not accept `self_consumption`. Two fixes, and they are not
-equivalent:
+So the profile was right and the payload was wrong. Sending nothing lets the
+profile stand.
 
-1. **Set the aansturingsleverancier to Doe-het-zelf on the profile page.** This
-   is the accurate one. The battery here is driven by this repo's dispatcher;
-   listing it as Frank-controlled benchmarks it against Slim Handelen
-   installations it has nothing to do with, and credits Frank with results it
-   did not produce.
-2. **Or set `MIJNBATTERIJ_MODE` to a value that provider accepts** — try
-   `imbalance`, then `self_consumption_plus` — and restart the service. This
-   gets data flowing without correcting what the leaderboard says the
-   installation *is*.
-
-Change one thing at a time and read the next rejection; the message names the
-field it refused. A 4xx repeats every cycle until a setting changes, and the log
-says so on the first one rather than leaving it looking transient:
+Set `MIJNBATTERIJ_MODE` only if the platform later asks for it, or if you want
+to report a mode that changes at runtime. The documented values are
+`self_consumption`, `self_consumption_plus` and `imbalance`; which of them a
+given Aansturing accepts is discoverable only by sending one and reading the
+rejection, and a 4xx repeats every cycle until a setting changes — the log says
+so on the first one rather than leaving it looking transient.
 
 ```sh
 cd /volume1/docker/alphaess-collector
-sed -i 's|^MIJNBATTERIJ_MODE=.*|MIJNBATTERIJ_MODE=imbalance|' .env
+sed -i 's|^MIJNBATTERIJ_MODE=.*|MIJNBATTERIJ_MODE=|' .env     # blank = omit
 grep '^MIJNBATTERIJ_MODE=' .env
 sudo docker compose up -d mijnbatterij
 sudo docker compose logs --tail 20 -f mijnbatterij
