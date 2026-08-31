@@ -110,16 +110,43 @@ figure is published the moment it is computed. Skipping under-reports instead,
 which is the direction that cannot invent energy, and `gap_skipped_s` on the
 status point says by how much it might have.
 
-## Why the cycle count fills yesterday in, but the euro total does not
+## Why the cycle count fills gaps in, but the euro total does not
 
 `daily_energy` is written by the nightly job at ~03:00. Between midnight and
 then, yesterday's discharge is in no stored row while today's has just reset to
 zero, so a plain sum drops `totalBatteryCycles` by roughly a full cycle every
 night and recovers three hours later. `stored_discharge_total()` therefore
-integrates yesterday out of `power_readings` when its row is absent.
+integrates missing days out of `power_readings`.
 
-`batteryResultTotal` has the same hole and keeps it. The asymmetry is
+**Every missing day, not just yesterday.** Filling only yesterday fixes the
+nightly dip and leaves a worse bug behind it: a day whose row never arrives —
+one AlphaESS did not serve, one `efficiency.gate()` rejected — gets filled while
+it *is* yesterday and dropped the following midnight. The counter then does not
+dip and recover, it steps down and stays there. On this installation four such
+days exist (2026-08-17 … 19 and 08-29, 61 kWh between them), so this is the
+normal case, not a hypothetical. `DEFAULT_MAX_FILL_DAYS` caps the work at ten
+days per refresh; a longer list is a broken nightly job and is logged as one.
+
+`batteryResultTotal` has a comparable hole and keeps it. The asymmetry is
 deliberate: a euro total that dips is a number moving, and the days it omits are
 days `pricing.gate()` judged unpublishable. **A lifetime cycle counter that
 moves backwards is physically impossible**, so anything reading it downstream is
 entitled to treat that as corrupt data rather than as a late batch job.
+
+Both sums also pin `model_version`. `pricing.py` and `efficiency.py` supersede a
+day by writing a new row at a new version and leaving the old one in place, so
+an unfiltered sum counts every recomputed day twice — on `daily_energy` that
+roughly doubles the published cycle count the first time `MODEL_VERSION` is
+bumped, and shows nothing wrong until then.
+
+## Why the totals cache is keyed on the day, not only on time
+
+Both sums mean "everything before today", so their meaning changes at the local
+midnight: what was "up to and including yesterday" becomes "up to the day before
+yesterday", with the caller adding today's own throughput on top.
+
+A cache warmed at 23:30 and still inside its TTL at 00:05 would hand back a
+total missing the whole day that just ended, while `discharged` for the new day
+has reset to ~0 — dropping `totalBatteryCycles` by a full day's throughput, and
+skipping the fill above that exists precisely to prevent that. A TTL alone
+cannot see a day boundary, so `Totals` compares `day_start` as well.

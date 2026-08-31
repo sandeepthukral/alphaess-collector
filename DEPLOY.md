@@ -754,17 +754,22 @@ carefully, because nothing downstream can catch them being wrong:
   `MIJNBATTERIJ_CHARGE_POSITIVE=0` — do not change the sign in the code, or the
   payload silently disagrees with `power_readings`.
 - **`totalBatteryCycles`.** Computed as total kWh discharged (from
-  `daily_energy`) over usable capacity, so it counts only what this collector
-  has seen. Put whatever the pack did before that into
-  `MIJNBATTERIJ_CYCLES_OFFSET`, or the figure is "cycles since we started
-  measuring" published as a lifetime total.
+  `daily_energy`, at the current `model_version`) over usable capacity, so it
+  counts only what this collector has seen. Put whatever the pack did before
+  that into `MIJNBATTERIJ_CYCLES_OFFSET`, or the figure is "cycles since we
+  started measuring" published as a lifetime total. Days `daily_energy` has no
+  row for — not yet written, never served, or gated — are integrated out of
+  `power_readings` instead, so the counter cannot step backwards; the log names
+  each one it fills.
 - **`batteryResultTotal`.** The sum of stored `daily_cost.saving` at the
   current `model_version`, plus today so far. Days that failed
   `pricing.gate()` are absent from `daily_cost` and therefore from this total;
   it under-states rather than estimates, deliberately.
 
 `chargedToday`/`dischargedToday` skip any gap in `power_readings` longer than
-`MIJNBATTERIJ_MAX_SAMPLE_GAP_S` (default 3× the poll interval) rather than
+`MIJNBATTERIJ_MAX_SAMPLE_GAP_S` — leave it **blank**, which derives it as 3× the
+collector's `POLL_INTERVAL_SECONDS` so it follows the poll interval instead of
+being pinned to whatever 3× was the day it was written — rather than
 interpolating across it — interpolating six missing hours at 4 kW would invent
 ~24 kWh. So after a collector outage those two figures under-report the day, by
 the number of seconds `gap_skipped_s` on the `mijnbatterij_submit` point names.

@@ -61,6 +61,7 @@ import requests
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 
+import efficiency
 import pricing
 from prices import NL_TZ
 from pricing import Sample, _accumulate
@@ -78,6 +79,12 @@ RANK_MEASUREMENT = "mijnbatterij_rank"
 # to whatever pricing.py currently writes, so a model bump moves both together
 # rather than silently mixing two models' euros in one total.
 MODEL_VERSION = pricing.MODEL_VERSION
+# The same, for daily_energy and totalBatteryCycles. Both jobs supersede a day
+# by writing a new row at a new version and leaving the old one in place -- so a
+# sum that does not filter on version counts every recomputed day twice. On
+# daily_energy that would roughly double the cycle count on a public
+# leaderboard, and it stays invisible until the first MODEL_VERSION bump.
+ENERGY_MODEL_VERSION = efficiency.MODEL_VERSION
 
 DEFAULT_INTERVAL_S = 300
 DEFAULT_TIMEOUT_S = 15
@@ -93,6 +100,11 @@ DEFAULT_STALE_AFTER_S = 600
 # 3x the poll interval is the same line pricing.compute_day() draws between
 # cadence drift and a real outage, so the two agree on what counts as missing.
 DEFAULT_MAX_SAMPLE_GAP_S = 3 * pricing.POLL_INTERVAL_S
+# Ceiling on how many missing daily_energy days one totals refresh will
+# integrate out of power_readings. Each costs a day of samples; on a healthy
+# system the list is empty or one long, and a list longer than this is a broken
+# nightly job rather than something to paper over one query at a time.
+DEFAULT_MAX_FILL_DAYS = 10
 
 
 def env(name: str, default: str | None = None) -> str:
@@ -101,6 +113,24 @@ def env(name: str, default: str | None = None) -> str:
         log.error("Missing required environment variable: %s", name)
         sys.exit(1)
     return value
+
+
+def _num_env(name: str, default: float, cast=float):
+    """A numeric setting, treating an EMPTY value as absent.
+
+    docker-compose.yml passes several of these through as `${VAR:-}`, so an
+    unset variable arrives here as "" rather than not at all -- and float("")
+    raises, crash-looping the container at startup over a setting nobody
+    touched. os.environ.get's default only covers the absent case.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return cast(raw)
+    except ValueError:
+        log.warning("%s=%r is not a number; using %s", name, raw, default)
+        return default
 
 
 def _bool_env(name: str, default: bool) -> bool:
@@ -176,8 +206,20 @@ _DISCHARGE_TOTAL_FLUX = """
 from(bucket: "{bucket}")
   |> range(start: 1970-01-01T00:00:00Z, stop: {stop})
   |> filter(fn: (r) => r._measurement == "daily_energy" and r.sys_sn == "{sys_sn}"
-        and r._field == "discharge_kwh_api")
+        and r.model_version == "{model_version}" and r._field == "discharge_kwh_api")
   |> sum()
+"""
+
+# The local days daily_energy actually holds a row for, at the current version.
+# One record per day -- a year of history is 365 rows, which is why the missing
+# days can be derived client-side instead of by a second round of queries.
+_DISCHARGE_DAYS_FLUX = """
+from(bucket: "{bucket}")
+  |> range(start: 1970-01-01T00:00:00Z, stop: {stop})
+  |> filter(fn: (r) => r._measurement == "daily_energy" and r.sys_sn == "{sys_sn}"
+        and r.model_version == "{model_version}" and r._field == "discharge_kwh_api")
+  |> keep(columns: ["_time"])
+  |> sort(columns: ["_time"])
 """
 
 
@@ -207,61 +249,98 @@ def stored_saving_total(query_api, bucket: str, sys_sn: str, stop: dt.datetime) 
     ))
 
 
-_DAILY_ENERGY_PRESENT_FLUX = """
-from(bucket: "{bucket}")
-  |> range(start: {start}, stop: {stop})
-  |> filter(fn: (r) => r._measurement == "daily_energy" and r.sys_sn == "{sys_sn}"
-        and r._field == "discharge_kwh_api")
-  |> limit(n:1)
-"""
+def stored_discharge_days(query_api, bucket: str, sys_sn: str,
+                          stop: dt.datetime) -> list[dt.date]:
+    """The local days daily_energy holds a discharge row for, oldest first."""
+    flux = _DISCHARGE_DAYS_FLUX.format(
+        bucket=bucket, sys_sn=sys_sn, model_version=ENERGY_MODEL_VERSION,
+        stop=stop.isoformat())
+    days = set()
+    for table in query_api.query(flux):
+        for rec in table.records:
+            days.add(rec.get_time().astimezone(NL_TZ).date())
+    return sorted(days)
 
 
-def has_daily_energy(query_api, bucket: str, sys_sn: str, day: dt.date) -> bool:
-    start, stop = pricing.day_window_utc(day)
-    flux = _DAILY_ENERGY_PRESENT_FLUX.format(
-        bucket=bucket, sys_sn=sys_sn, start=start.isoformat(), stop=stop.isoformat())
-    return any(table.records for table in query_api.query(flux))
+def missing_discharge_days(stored: list[dt.date], until: dt.date) -> list[dt.date]:
+    """Every local day between the first stored one and `until` with no row.
+
+    Bounded below by the first stored day on purpose: power_readings may reach
+    further back than daily_energy ever did, and filling that stretch would not
+    repair a gap, it would silently redefine what the lifetime total covers.
+    """
+    if not stored:
+        return []
+    day, out = stored[0], []
+    have = set(stored)
+    while day <= until:
+        if day not in have:
+            out.append(day)
+        day += dt.timedelta(days=1)
+    return out
 
 
-def discharge_from_readings(query_api, bucket: str, sys_sn: str, day: dt.date) -> float:
-    """One local day's kWh discharged, integrated from power_readings."""
+def discharge_from_readings(query_api, bucket: str, sys_sn: str, day: dt.date,
+                            max_gap_s: float = DEFAULT_MAX_SAMPLE_GAP_S) -> float:
+    """One local day's kWh discharged, integrated from power_readings.
+
+    Takes max_gap_s so a filled day and the live day in the same payload are
+    integrated under one rule; a fill that quietly used the module default would
+    disagree with today's own figures whenever the setting is tuned.
+    """
     start, stop = pricing.day_window_utc(day)
     samples = pricing.load_samples_influx(query_api, bucket, sys_sn, start, stop)
-    return battery_energy_kwh(samples)[1]
+    return battery_energy_kwh(samples, max_gap_s)[1]
 
 
 def stored_discharge_total(query_api, bucket: str, sys_sn: str, stop: dt.datetime,
-                           now: dt.datetime | None = None) -> float:
-    """All-time kWh discharged before `stop`, per AlphaESS's own daily totals.
+                           now: dt.datetime | None = None,
+                           max_gap_s: float = DEFAULT_MAX_SAMPLE_GAP_S,
+                           max_fill_days: int = DEFAULT_MAX_FILL_DAYS) -> float:
+    """All-time kWh discharged before `stop`, per AlphaESS's own daily totals,
+    WITH ANY DAY daily_energy IS MISSING INTEGRATED OUT OF power_readings.
 
-    WITH YESTERDAY FILLED IN FROM power_readings WHEN ITS ROW IS NOT THERE YET.
     daily_energy is written by the nightly job at ~03:00, so between midnight
     and then, yesterday's discharge is in no stored row -- while `discharged`
     for today has just reset to zero. Summing only what is stored would make
     totalBatteryCycles drop by about a full cycle every night and climb back
     three hours later.
 
-    batteryResultTotal has the same hole and is left with it deliberately (see
-    stored_saving_total). The asymmetry is the point: a euro total that dips is
-    a number moving, and days it omits are days pricing.gate() judged
-    unpublishable. A LIFETIME CYCLE COUNTER THAT MOVES BACKWARDS IS PHYSICALLY
-    IMPOSSIBLE, so anything reading it downstream is entitled to treat that as
-    corrupt data rather than as a late batch job.
+    EVERY MISSING DAY, NOT JUST YESTERDAY. Filling only yesterday fixes the
+    nightly dip and leaves a worse bug behind it: a day whose row never arrives
+    -- one AlphaESS did not serve, one efficiency.gate() rejected -- is filled
+    while it is yesterday and then dropped the following midnight, so the
+    counter does not dip and recover, it steps down and stays there. A lifetime
+    cycle counter that moves backwards is physically impossible, and anything
+    reading it downstream is entitled to treat that as corrupt data rather than
+    as a late batch job. On a healthy system this fills nothing or one day.
 
-    The fill also covers a day daily_energy never gets -- one AlphaESS did not
-    serve, or that efficiency.gate() rejected -- which would otherwise be a
-    permanent under-count rather than a passing dip.
+    batteryResultTotal has a comparable hole and keeps it (see
+    stored_saving_total). The asymmetry is deliberate: a euro total that dips is
+    a number moving, and the days it omits are days pricing.gate() judged
+    unpublishable -- there is no physical law saying euros only go up.
     """
     total = _sum_query(query_api, _DISCHARGE_TOTAL_FLUX.format(
-        bucket=bucket, sys_sn=sys_sn, stop=stop.isoformat(),
+        bucket=bucket, sys_sn=sys_sn, model_version=ENERGY_MODEL_VERSION,
+        stop=stop.isoformat(),
     ))
     now = dt.datetime.now(dt.UTC) if now is None else now
     yesterday = now.astimezone(NL_TZ).date() - dt.timedelta(days=1)
-    if not has_daily_energy(query_api, bucket, sys_sn, yesterday):
-        filled = discharge_from_readings(query_api, bucket, sys_sn, yesterday)
-        log.info("daily_energy has no row for %s yet; filled %.2f kWh from "
-                 "power_readings so the cycle count does not go backwards",
-                 yesterday, filled)
+    missing = missing_discharge_days(
+        stored_discharge_days(query_api, bucket, sys_sn, stop), yesterday)
+    if len(missing) > max_fill_days:
+        # Newest first: the recent days are the ones whose absence is still
+        # moving the published figure. A backlog this size is a broken nightly
+        # job, not a hiccup, and quietly issuing a query per day for it would
+        # turn one refresh into a stampede.
+        log.warning("daily_energy is missing %d days; filling only the newest %d. "
+                    "totalBatteryCycles under-reports until the nightly job catches up",
+                    len(missing), max_fill_days)
+        missing = missing[-max_fill_days:]
+    for day in missing:
+        filled = discharge_from_readings(query_api, bucket, sys_sn, day, max_gap_s)
+        log.info("daily_energy has no row for %s; filled %.2f kWh from power_readings "
+                 "so the cycle count does not go backwards", day, filled)
         total += filled
     return total
 
@@ -322,22 +401,41 @@ class Snapshot:
 
 
 class Totals:
-    """Cached all-time sums. See DEFAULT_TOTALS_TTL_S for why they are cached."""
+    """Cached all-time sums. See DEFAULT_TOTALS_TTL_S for why they are cached.
+
+    KEYED ON day_start AS WELL AS ON TIME, and the day is what makes this
+    correct rather than merely fresh. Both sums cover everything *before* today,
+    so at the midnight rollover their meaning changes: what was "up to and
+    including yesterday" becomes "up to the day before yesterday", and the
+    caller adds today's own throughput on top. A cache warmed at 23:30 and still
+    inside its TTL at 00:05 would hand back a total missing the whole of the day
+    that just ended, while `discharged` for the new day has reset to ~0 --
+    dropping totalBatteryCycles by a full day and, worse, skipping the fill in
+    stored_discharge_total that exists precisely to stop that. A TTL alone
+    cannot see a day boundary; this does.
+    """
 
     def __init__(self, ttl_s: float):
         self.ttl_s = ttl_s
         self._saving = 0.0
         self._discharge = 0.0
         self._at = 0.0
+        self._day_start: dt.datetime | None = None
 
     def get(self, query_api, bucket: str, sys_sn: str, day_start: dt.datetime,
-            now_mono: float | None = None) -> tuple[float, float]:
+            now_mono: float | None = None, max_gap_s: float = DEFAULT_MAX_SAMPLE_GAP_S,
+            ) -> tuple[float, float]:
         now_mono = time.monotonic() if now_mono is None else now_mono
-        if not self._at or now_mono - self._at >= self.ttl_s:
+        expired = not self._at or now_mono - self._at >= self.ttl_s
+        rolled_over = self._day_start != day_start
+        if expired or rolled_over:
             self._saving = stored_saving_total(query_api, bucket, sys_sn, day_start)
-            self._discharge = stored_discharge_total(query_api, bucket, sys_sn, day_start)
+            self._discharge = stored_discharge_total(
+                query_api, bucket, sys_sn, day_start, max_gap_s=max_gap_s)
             self._at = now_mono
-            log.debug("Totals refreshed: saving=%.4f discharge=%.2f",
+            self._day_start = day_start
+            log.debug("Totals refreshed (%s): saving=%.4f discharge=%.2f",
+                      "day rollover" if rolled_over else "ttl",
                       self._saving, self._discharge)
         return self._saving, self._discharge
 
@@ -385,7 +483,8 @@ def collect(query_api, *, bucket: str, sys_sn: str, totals: Totals, config: dict
     if not intervals:
         log.warning("No market_price rows for %s -- batteryResult sent as 0", local_day)
 
-    saving_total, discharge_total = totals.get(query_api, bucket, sys_sn, start)
+    saving_total, discharge_total = totals.get(query_api, bucket, sys_sn, start,
+                                               max_gap_s=config["max_gap_s"])
     cycle_count = cycles(discharge_total + discharged,
                          config["capacity_kwh"], config["cycles_offset"])
 
@@ -543,22 +642,22 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK") -> None:
 # --------------------------------------------------------------------------
 
 def load_config() -> dict:
-    capacity = float(env("BATTERY_CAPACITY_KWH", "0") or 0)
+    capacity = _num_env("BATTERY_CAPACITY_KWH", 0.0)
     if capacity <= 0:
         log.warning("BATTERY_CAPACITY_KWH unset -- totalBatteryCycles will be "
                     "the offset alone")
     return {
-        "interval_s": int(env("MIJNBATTERIJ_INTERVAL_SECONDS", str(DEFAULT_INTERVAL_S))),
-        "timeout_s": float(env("MIJNBATTERIJ_TIMEOUT_SECONDS", str(DEFAULT_TIMEOUT_S))),
-        "stale_after_s": int(env("MIJNBATTERIJ_STALE_AFTER_SECONDS",
-                                 str(DEFAULT_STALE_AFTER_S))),
-        "totals_ttl_s": float(env("MIJNBATTERIJ_TOTALS_TTL_SECONDS",
-                                  str(DEFAULT_TOTALS_TTL_S))),
-        "rank_interval_s": int(env("MIJNBATTERIJ_RANK_INTERVAL_SECONDS", "3600")),
-        "max_gap_s": float(env("MIJNBATTERIJ_MAX_SAMPLE_GAP_S",
-                               str(DEFAULT_MAX_SAMPLE_GAP_S))),
+        "interval_s": _num_env("MIJNBATTERIJ_INTERVAL_SECONDS", DEFAULT_INTERVAL_S, int),
+        "timeout_s": _num_env("MIJNBATTERIJ_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_S),
+        "stale_after_s": _num_env("MIJNBATTERIJ_STALE_AFTER_SECONDS",
+                                  DEFAULT_STALE_AFTER_S, int),
+        "totals_ttl_s": _num_env("MIJNBATTERIJ_TOTALS_TTL_SECONDS", DEFAULT_TOTALS_TTL_S),
+        "rank_interval_s": _num_env("MIJNBATTERIJ_RANK_INTERVAL_SECONDS", 3600, int),
+        # Left empty in .env by default so the ceiling tracks POLL_INTERVAL_SECONDS
+        # instead of being pinned to whatever 3x it was on the day it was written.
+        "max_gap_s": _num_env("MIJNBATTERIJ_MAX_SAMPLE_GAP_S", DEFAULT_MAX_SAMPLE_GAP_S),
         "capacity_kwh": capacity,
-        "cycles_offset": float(env("MIJNBATTERIJ_CYCLES_OFFSET", "0") or 0),
+        "cycles_offset": _num_env("MIJNBATTERIJ_CYCLES_OFFSET", 0.0),
         "mode": env("MIJNBATTERIJ_MODE", "self_consumption"),
         "load_balancing": _bool_env("MIJNBATTERIJ_LOAD_BALANCING", False),
         "charge_positive": _bool_env("MIJNBATTERIJ_CHARGE_POSITIVE", True),
@@ -708,12 +807,19 @@ def main() -> None:
     # an installation that has not been registered on the platform has no key
     # and must idle rather than crash-loop under `restart: unless-stopped`.
     api_key = os.environ.get("MIJNBATTERIJ_API_KEY", "").strip()
-    if not api_key and not args.dry_run:
+    # Idle only when this is the long-running service. `--once` is someone at a
+    # terminal waiting for an answer, and parking them in a sleep loop with a
+    # message about idling reads as a hang -- they get the error instead.
+    if not api_key and not args.once:
         log.info("MIJNBATTERIJ_API_KEY not set; submission disabled. Idling.")
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
         signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
         while True:
             time.sleep(3600)
+    if not api_key and not args.dry_run:
+        log.error("MIJNBATTERIJ_API_KEY is not set, so there is nothing to submit to. "
+                  "Add --dry-run to build and print a payload without submitting.")
+        sys.exit(1)
 
     bucket = env("INFLUX_BUCKET")
     sys_sn = env("ALPHAESS_SYS_SN")
@@ -728,9 +834,12 @@ def main() -> None:
     # start instead, naming the variable and where the recipe is.
     influx_token = env("INFLUX_TOKEN").strip()
     if not influx_token:
-        log.error("MIJNBATTERIJ_API_KEY is set but INFLUX_TOKEN_MIJNBATTERIJ is empty. "
-                  "Mint it per DEPLOY.md, \"Scoped tokens\" -- without it this service "
-                  "can neither read power_readings nor record what it submitted.")
+        # Reached by --dry-run with no API key as well as by the service proper,
+        # so the message cannot claim the key is set.
+        log.error("INFLUX_TOKEN_MIJNBATTERIJ is empty. Mint it per DEPLOY.md, "
+                  "\"Scoped tokens\" -- without it this service can read neither "
+                  "power_readings nor the daily totals, and cannot record what it "
+                  "submitted.")
         sys.exit(1)
 
     client = InfluxDBClient(url=env("INFLUX_URL"), token=influx_token,

@@ -232,8 +232,19 @@ services:
       # each other, so it charges this one for a collector outage.
       MIJNBATTERIJ_STALE_AFTER_SECONDS: ${MIJNBATTERIJ_STALE_AFTER_SECONDS:-600}
       # How long the all-time daily_cost/daily_energy sums are cached. They only
-      # change once a night.
+      # change once a night. (The cache also drops at the local midnight
+      # regardless, because both sums mean "everything before today".)
       MIJNBATTERIJ_TOTALS_TTL_SECONDS: ${MIJNBATTERIJ_TOTALS_TTL_SECONDS:-3600}
+      # Longest gap in power_readings that chargedToday/dischargedToday will
+      # integrate across; beyond it the pair is skipped rather than
+      # interpolated. BOTH OF THESE MUST BE HERE. The default is derived from
+      # POLL_INTERVAL_SECONDS, which this service does not otherwise need and
+      # would therefore read as 30 whatever the collector is actually set to --
+      # so raising the poll interval to 120 s without passing it through would
+      # put every sample pair beyond a 90 s ceiling and publish 0.000 kWh
+      # forever, with nothing in the logs to say why.
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-30}
+      MIJNBATTERIJ_MAX_SAMPLE_GAP_S: ${MIJNBATTERIJ_MAX_SAMPLE_GAP_S:-}
       # GET /api/me for the leaderboard rank, into `mijnbatterij_rank`. 0 = off.
       MIJNBATTERIJ_RANK_INTERVAL_SECONDS: ${MIJNBATTERIJ_RANK_INTERVAL_SECONDS:-3600}
       # Usable capacity, the denominator of totalBatteryCycles. Shared with

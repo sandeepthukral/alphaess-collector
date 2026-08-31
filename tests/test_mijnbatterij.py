@@ -502,42 +502,114 @@ class RecordingQueryApi:
         return [Table()]
 
 
+def _fill_setup(monkeypatch, stored_days, filled=18.5):
+    calls = []
+    monkeypatch.setattr(mb, "_sum_query", lambda *a, **k: 100.0)
+    monkeypatch.setattr(mb, "stored_discharge_days", lambda *a, **k: stored_days)
+    monkeypatch.setattr(mb, "discharge_from_readings",
+                        lambda *a, **k: calls.append(a[3]) or filled)
+    return calls
+
+
+DAYS = [dt.date(2026, 7, d) for d in range(14, 18)]  # 14th .. 17th
+
+
 def test_yesterday_is_filled_from_power_readings_until_the_nightly_job_runs(monkeypatch):
     """daily_energy lands at ~03:00. Between midnight and then, yesterday is in
     no stored row while today's own discharge has just reset to zero -- so a
     naive sum drops totalBatteryCycles by about a full cycle every night. A
     lifetime counter moving backwards is physically impossible and reads
     downstream as corrupt data, not as a late batch job."""
-    monkeypatch.setattr(mb, "_sum_query", lambda *a, **k: 100.0)
-    monkeypatch.setattr(mb, "has_daily_energy", lambda *a, **k: False)
-    monkeypatch.setattr(mb, "discharge_from_readings", lambda *a, **k: 18.5)
+    calls = _fill_setup(monkeypatch, [DAYS[0], DAYS[1]])  # 14th, 15th; 16th absent
+    now = dt.datetime(2026, 7, 17, 0, 30, tzinfo=UTC)     # 02:30 local on the 17th
 
-    now = dt.datetime(2026, 7, 17, 0, 30, tzinfo=UTC)
     total = mb.stored_discharge_total(RecordingQueryApi(), "alphaess", "SN",
                                       dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC), now=now)
+
+    assert calls == [dt.date(2026, 7, 16)]
     assert total == pytest.approx(118.5)
 
 
 def test_nothing_is_filled_in_once_the_row_exists(monkeypatch):
     """Otherwise the fix double-counts yesterday from 03:00 onwards, which is a
     worse error than the dip it replaces."""
-    monkeypatch.setattr(mb, "_sum_query", lambda *a, **k: 100.0)
-    monkeypatch.setattr(mb, "has_daily_energy", lambda *a, **k: True)
-    monkeypatch.setattr(mb, "discharge_from_readings",
-                        lambda *a, **k: pytest.fail("should not have been called"))
-
+    calls = _fill_setup(monkeypatch, [DAYS[0], DAYS[1], DAYS[2]])
     now = dt.datetime(2026, 7, 17, 10, 0, tzinfo=UTC)
+
     total = mb.stored_discharge_total(RecordingQueryApi(), "alphaess", "SN",
                                       dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC), now=now)
+
+    assert calls == []
     assert total == pytest.approx(100.0)
 
 
-def test_the_fill_looks_at_yesterday_in_local_time():
-    """At 00:30 CEST on the 17th -- 22:30 UTC on the 16th -- yesterday is the
-    16th, not the 15th."""
-    api = RecordingQueryApi(rows=True)
-    mb.has_daily_energy(api, "alphaess", "SN", dt.date(2026, 7, 16))
-    assert "2026-07-15T22:00:00+00:00" in api.queries[0]
+def test_a_day_whose_row_never_arrives_keeps_being_filled(monkeypatch):
+    """Filling ONLY yesterday fixes the nightly dip and leaves a worse bug: a
+    day AlphaESS never served, or that efficiency.gate() rejected, is filled
+    while it is yesterday and dropped the next midnight -- so the counter does
+    not dip and recover, it steps down and stays there."""
+    calls = _fill_setup(monkeypatch, [DAYS[0], DAYS[2], DAYS[3]])  # 15th missing
+    now = dt.datetime(2026, 7, 18, 12, 0, tzinfo=UTC)  # the 15th is three days back
+
+    mb.stored_discharge_total(RecordingQueryApi(), "alphaess", "SN",
+                              dt.datetime(2026, 7, 17, 22, 0, tzinfo=UTC), now=now)
+
+    assert calls == [dt.date(2026, 7, 15)]
+
+
+def test_the_fill_is_capped_so_a_broken_nightly_job_is_not_a_stampede(monkeypatch):
+    calls = _fill_setup(monkeypatch, [dt.date(2026, 1, 1)])
+    now = dt.datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+
+    mb.stored_discharge_total(RecordingQueryApi(), "alphaess", "SN",
+                              dt.datetime(2026, 7, 17, 22, 0, tzinfo=UTC), now=now,
+                              max_fill_days=3)
+
+    # The newest three: the ones still moving the published figure.
+    assert calls == [dt.date(2026, 7, 15), dt.date(2026, 7, 16), dt.date(2026, 7, 17)]
+
+
+def test_days_before_the_first_stored_one_are_not_invented():
+    """power_readings may reach further back than daily_energy ever did. Filling
+    that stretch would not repair a gap, it would redefine what the lifetime
+    total covers -- and silently inflate the published figure."""
+    assert mb.missing_discharge_days([dt.date(2026, 7, 16)], dt.date(2026, 7, 17)) == \
+        [dt.date(2026, 7, 17)]
+
+
+def test_no_stored_days_at_all_fills_nothing():
+    assert mb.missing_discharge_days([], dt.date(2026, 7, 17)) == []
+
+
+def test_the_discharge_sum_is_pinned_to_the_current_model_version():
+    """efficiency.py supersedes a day by writing a new row at a new version and
+    leaving the old one in place. An unfiltered sum counts every recomputed day
+    twice -- which on a public leaderboard is a cycle count that roughly doubles
+    the first time MODEL_VERSION is bumped, and is invisible until then."""
+    import efficiency
+    flux = mb._DISCHARGE_TOTAL_FLUX.format(bucket="alphaess", sys_sn="SN",
+                                           model_version=mb.ENERGY_MODEL_VERSION,
+                                           stop="2026-07-17T00:00:00+00:00")
+    assert mb.ENERGY_MODEL_VERSION == efficiency.MODEL_VERSION
+    assert f'r.model_version == "{efficiency.MODEL_VERSION}"' in flux
+
+
+def test_the_fill_integrates_under_the_configured_gap_rule(monkeypatch):
+    """A filled day and the live day land in the same payload; integrating them
+    under different gap rules makes the two halves disagree."""
+    seen = {}
+
+    def record(samples, max_gap_s):
+        seen["gap"] = max_gap_s
+        return 0.0, 0.0, 0.0
+
+    monkeypatch.setattr(pricing, "load_samples_influx", lambda *a, **k: [])
+    monkeypatch.setattr(mb, "battery_energy_kwh", record)
+
+    mb.discharge_from_readings(RecordingQueryApi(), "alphaess", "SN",
+                               dt.date(2026, 7, 16), max_gap_s=360.0)
+
+    assert seen["gap"] == 360.0
 
 
 # --------------------------------------------------------------------------
@@ -641,3 +713,98 @@ def test_a_non_numeric_rank_is_dropped_rather_than_raising():
     session = FakeSession(get_response=FakeResponse(
         payload={"resultToday": {"overallRank": "n/a", "providerRank": 4}}))
     assert mb.fetch_rank(session, "key") == {"provider_rank": 4.0}
+
+
+# --------------------------------------------------------------------------
+# Totals cache and the midnight rollover
+# --------------------------------------------------------------------------
+
+def test_the_cache_is_dropped_at_the_local_midnight(monkeypatch):
+    """Both sums mean "everything before today", so their meaning changes at the
+    rollover: what was "up to yesterday" becomes "up to the day before". A cache
+    warmed at 23:30 and still inside its TTL at 00:05 hands back a total missing
+    the whole day that just ended, while today's own discharge has reset to ~0 --
+    dropping totalBatteryCycles by a full day, and skipping the fill that exists
+    precisely to stop that. A TTL alone cannot see a day boundary."""
+    calls = []
+    monkeypatch.setattr(mb, "stored_saving_total", lambda *a, **k: calls.append("s") or 1.0)
+    monkeypatch.setattr(mb, "stored_discharge_total", lambda *a, **k: calls.append("d") or 2.0)
+    totals = mb.Totals(3600)
+
+    before = dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC)   # today = the 17th
+    after = dt.datetime(2026, 7, 17, 22, 0, tzinfo=UTC)    # today = the 18th
+    totals.get(FakeQueryApi(), "alphaess", "SN", before, now_mono=1000.0)
+    totals.get(FakeQueryApi(), "alphaess", "SN", after, now_mono=1002.0)  # 2 s later
+
+    assert calls == ["s", "d", "s", "d"]
+
+
+def test_the_cache_still_holds_within_one_day(monkeypatch):
+    """The rollover check must not defeat the caching it is bolted onto."""
+    calls = []
+    monkeypatch.setattr(mb, "stored_saving_total", lambda *a, **k: calls.append("s") or 1.0)
+    monkeypatch.setattr(mb, "stored_discharge_total", lambda *a, **k: calls.append("d") or 2.0)
+    totals = mb.Totals(3600)
+    start = dt.datetime(2026, 7, 16, 22, 0, tzinfo=UTC)
+
+    totals.get(FakeQueryApi(), "alphaess", "SN", start, now_mono=1000.0)
+    totals.get(FakeQueryApi(), "alphaess", "SN", start, now_mono=1300.0)
+
+    assert calls == ["s", "d"]
+
+
+# --------------------------------------------------------------------------
+# Settings that arrive as empty strings
+# --------------------------------------------------------------------------
+
+def test_an_empty_setting_falls_back_instead_of_crashing(monkeypatch):
+    """docker-compose.yml passes MIJNBATTERIJ_MAX_SAMPLE_GAP_S through as
+    `${VAR:-}`, so an unset variable arrives as "" rather than absent -- and
+    float("") raises, crash-looping the container at startup over a setting
+    nobody touched."""
+    monkeypatch.setenv("MIJNBATTERIJ_MAX_SAMPLE_GAP_S", "")
+    assert mb._num_env("MIJNBATTERIJ_MAX_SAMPLE_GAP_S", 90.0) == 90.0
+
+
+def test_the_gap_ceiling_follows_the_poll_interval(monkeypatch):
+    """Pinned at 90 while the collector moves to a 120 s poll, every sample pair
+    is beyond the ceiling and chargedToday publishes 0.000 forever."""
+    monkeypatch.setenv("POLL_INTERVAL_SECONDS", "120")
+    monkeypatch.setenv("MIJNBATTERIJ_MAX_SAMPLE_GAP_S", "")
+    import importlib
+
+    import pricing as pricing_mod
+    importlib.reload(pricing_mod)
+    reloaded = importlib.reload(mb)
+    try:
+        assert reloaded.load_config()["max_gap_s"] == 360.0
+    finally:
+        monkeypatch.undo()
+        importlib.reload(pricing_mod)
+        importlib.reload(mb)
+
+
+def test_a_nonsense_setting_warns_and_falls_back(monkeypatch):
+    monkeypatch.setenv("MIJNBATTERIJ_TIMEOUT_SECONDS", "soon")
+    assert mb._num_env("MIJNBATTERIJ_TIMEOUT_SECONDS", 15.0) == 15.0
+
+
+# --------------------------------------------------------------------------
+# Compose passes through what the code reads
+# --------------------------------------------------------------------------
+
+def test_the_service_receives_every_setting_it_reads():
+    """A setting documented in .env.example and DEPLOY.md but absent from the
+    service's own environment block is a knob the operator turns to no effect.
+    POLL_INTERVAL_SECONDS is the dangerous one: it is not a mijnbatterij setting
+    at all, but the gap ceiling is derived from it."""
+    import pathlib
+    import re
+    compose = pathlib.Path(__file__).resolve().parents[1] / "docker-compose.yml"
+    block = re.search(r"^  mijnbatterij:$(.*?)^  [a-z]", compose.read_text(), re.M | re.S)
+    assert block, "no mijnbatterij service in docker-compose.yml"
+    for var in ("MIJNBATTERIJ_MAX_SAMPLE_GAP_S", "POLL_INTERVAL_SECONDS",
+                "MIJNBATTERIJ_INTERVAL_SECONDS", "MIJNBATTERIJ_STALE_AFTER_SECONDS",
+                "MIJNBATTERIJ_TOTALS_TTL_SECONDS", "MIJNBATTERIJ_CYCLES_OFFSET",
+                "BATTERY_CAPACITY_KWH"):
+        assert f"{var}:" in block.group(1), f"{var} never reaches the container"
