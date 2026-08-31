@@ -940,6 +940,12 @@ def test_an_empty_mode_falls_back_to_the_conservative_value(monkeypatch):
 # A cycle that raised must leave a trace
 # --------------------------------------------------------------------------
 
+def _raiser(exc):
+    def boom(*a, **k):
+        raise exc
+    return boom
+
+
 def _loop_once(monkeypatch, write_api, heartbeats, *, raises=None, cycles=1):
     monkeypatch.setenv("MIJNBATTERIJ_HEARTBEAT_URL", "http://kuma.invalid/push/x")
     monkeypatch.setattr(mb, "send_heartbeat",
@@ -991,3 +997,31 @@ def test_an_outage_does_push_down(monkeypatch):
     _loop_once(monkeypatch, RecordingWriteApi(), heartbeats)
 
     assert heartbeats == [("down", "nothing submitted: stale")]
+
+
+def test_a_payload_rejection_says_it_will_not_clear_on_its_own(monkeypatch, caplog):
+    """A 400 naming an invalid setting is retried every 300 s forever and logs
+    identically to a transient blip, so the log gives the reader no reason to
+    stop waiting for it to pass. Observed live: `400 Battery mode:
+    self_consumption is not available for frank-energie`."""
+    monkeypatch.setattr(mb, "run_once", _raiser(mb.SubmitError("HTTP 400: mode", 400)))
+    with caplog.at_level("ERROR"):
+        _loop_once(monkeypatch, RecordingWriteApi(), [])
+    assert "will repeat until a setting changes" in caplog.text
+    assert "MIJNBATTERIJ_MODE" in caplog.text
+
+
+def test_a_server_error_is_not_called_permanent(monkeypatch, caplog):
+    """A 500 or a timeout is worth simply trying again in five minutes, and
+    telling the operator to go edit .env would send them after nothing."""
+    monkeypatch.setattr(mb, "run_once", _raiser(mb.SubmitError("HTTP 503: busy", 503)))
+    with caplog.at_level("ERROR"):
+        _loop_once(monkeypatch, RecordingWriteApi(), [])
+    assert "will repeat until a setting changes" not in caplog.text
+
+
+def test_a_rate_limit_is_not_called_permanent(monkeypatch, caplog):
+    monkeypatch.setattr(mb, "run_once", _raiser(mb.SubmitError("HTTP 429: slow down", 429)))
+    with caplog.at_level("ERROR"):
+        _loop_once(monkeypatch, RecordingWriteApi(), [])
+    assert "will repeat until a setting changes" not in caplog.text

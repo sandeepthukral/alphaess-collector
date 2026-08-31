@@ -814,6 +814,40 @@ values. This battery follows a day-ahead-price plan, which is closest to
 DIY dispatcher — so `MIJNBATTERIJ_MODE` decides it and defaults to the
 conservative `self_consumption`. Change it in `.env`, not in the code.
 
+**The valid set depends on the control provider on your profile**, which the
+platform enforces server-side. The first live submission from this installation
+came back:
+
+```
+400 {"message":"Battery mode: self_consumption is not available for frank-energie"}
+```
+
+— i.e. the account was registered under **frank-energie**, not Doe-het-zelf, and
+that provider does not accept `self_consumption`. Two fixes, and they are not
+equivalent:
+
+1. **Set the aansturingsleverancier to Doe-het-zelf on the profile page.** This
+   is the accurate one. The battery here is driven by this repo's dispatcher;
+   listing it as Frank-controlled benchmarks it against Slim Handelen
+   installations it has nothing to do with, and credits Frank with results it
+   did not produce.
+2. **Or set `MIJNBATTERIJ_MODE` to a value that provider accepts** — try
+   `imbalance`, then `self_consumption_plus` — and restart the service. This
+   gets data flowing without correcting what the leaderboard says the
+   installation *is*.
+
+Change one thing at a time and read the next rejection; the message names the
+field it refused. A 4xx repeats every cycle until a setting changes, and the log
+says so on the first one rather than leaving it looking transient:
+
+```sh
+cd /volume1/docker/alphaess-collector
+sed -i 's|^MIJNBATTERIJ_MODE=.*|MIJNBATTERIJ_MODE=imbalance|' .env
+grep '^MIJNBATTERIJ_MODE=' .env
+sudo docker compose up -d mijnbatterij
+sudo docker compose logs --tail 20 -f mijnbatterij
+```
+
 ## Backing up InfluxDB
 
 InfluxDB's data lives only in the `alphaess-influxdb-data` Docker volume,

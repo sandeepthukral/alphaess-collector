@@ -844,6 +844,21 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
         except SubmitError as exc:
             consecutive_failures += 1
             log.error("Submission failed (%d consecutive): %s", consecutive_failures, exc)
+            # A 4xx other than 429 is a verdict on the payload, not a bad
+            # moment: it will fail identically every 300 s until a setting or
+            # the payload changes, and the retries only make the log longer.
+            # Said once, on the first one, because the point of saying it is
+            # that the reader stops waiting for it to clear -- e.g.
+            # `400 Battery mode: self_consumption is not available for
+            # frank-energie`, which is a .env edit and never resolves on its own.
+            if consecutive_failures == 1 and exc.status and 400 <= exc.status < 500 \
+                    and exc.status != 429:
+                log.error("HTTP %d is a rejection of the payload, not a transient "
+                          "fault -- it will repeat until a setting changes. If the "
+                          "message names `mode`, set MIJNBATTERIJ_MODE in .env to a "
+                          "value your control provider accepts and restart this "
+                          "service; see DEPLOY.md, \"What `mode` should say\".",
+                          exc.status)
             # The status point was written by run_once, with the payload that
             # was rejected still attached.
             #
