@@ -60,6 +60,7 @@ import os
 import signal
 import sys
 import time
+from urllib.parse import urlencode, urlsplit, urlunsplit
 
 import requests
 from influxdb_client import InfluxDBClient, Point, WritePrecision
@@ -998,12 +999,33 @@ def _write(write_api, bucket: str, point: Point) -> None:
         log.warning("InfluxDB write failed: %s", exc)
 
 
-def send_heartbeat(url: str, status: str = "up", msg: str = "OK") -> None:
+def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
+                   timeout: float = 5) -> None:
+    """Ping a Kuma "Push" monitor. Never raises; an empty URL means not monitored.
+
+    The query string is REBUILT, not appended to -- the same fix as
+    `collector/collector.py:407` and `dispatch/heartbeat.py:22`, arrived at here
+    the same way the other two were: from a log line. The push URL Kuma displays
+    already carries `?status=up&msg=OK&ping=`, that whole string is what lands in
+    `.env`, and `params=` appends rather than replaces, so Express sees
+    `status=["up", "down"]`. That matches neither value. Every ping registers
+    DOWN and the message renders as `[object Object]` -- including, and this is
+    the part that matters, the `up` pings, so the monitor never goes green and
+    the `down` push that was supposed to carry the platform's rejection message
+    arrives saying nothing.
+
+    Third occurrence of this bug in this repo. It survives review because the
+    broken call looks more correct than the fix does.
+    """
     if not url:
         return
+    target = urlunsplit(urlsplit(url)._replace(query=urlencode({"status": status, "msg": msg})))
     try:
-        requests.get(url, params={"status": status, "msg": msg, "ping": ""}, timeout=5)
-    except requests.RequestException as exc:
+        requests.get(target, timeout=timeout)
+    except Exception as exc:
+        # Bare, like both siblings: a bad URL in .env raises out of urlsplit or
+        # requests' own validation, and a monitoring convenience must never take
+        # down the submission loop it is monitoring.
         log.warning("Heartbeat push failed: %s", exc)
 
 

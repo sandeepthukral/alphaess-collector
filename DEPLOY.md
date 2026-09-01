@@ -839,11 +839,65 @@ day's first poll — the only one that pushes no heartbeat).
 A `batteryResult` of exactly 0 with `price_coverage` below 0.999 is not a
 break-even day: it means `market_price` does not cover the day so far, so the
 euro figure was suppressed rather than published as a fraction of itself. Check
-`refresh-prices.sh`. `MIJNBATTERIJ_HEARTBEAT_URL`
-takes an Uptime Kuma **Push** URL; the service pushes `down` from the second
-consecutive rejection, carrying the platform's own validation message as the
-reason. That message is worth reading: there is no published field-by-field
-reference for this API, so it is the only description of the schema anyone has.
+`refresh-prices.sh`.
+
+### Monitoring the submissions
+
+`MIJNBATTERIJ_HEARTBEAT_URL` takes an Uptime Kuma **Push** monitor URL:
+
+- **Heartbeat Interval**: `600`
+- **Retries**: `1`, **Heartbeat Retry Interval**: `300`
+
+The interval is twice `MIJNBATTERIJ_INTERVAL_SECONDS` on purpose. One missed
+cycle must not page you, two must; `Retries: 1` puts the first miss in PENDING
+rather than a notification. Worst case the alert lands ~15 minutes after
+submissions stop, which is the right speed for a leaderboard.
+
+| Cycle outcome | Push | What it actually means |
+|---|---|---|
+| Submitted | `up` | — |
+| `stale` | `down`, first cycle | **the collector is down**, not this service |
+| `no-data` | `down`, first cycle | wrong `ALPHAESS_SYS_SN`, or the token cannot read the bucket |
+| `day-start` | nothing | benign, the ~30 s after midnight before the day's first poll |
+| Rejected 4xx/5xx | `down` from the 2nd consecutive | carries the platform's own validation message |
+
+The two `down`-on-the-first-cycle rows are why this monitor fires alongside the
+collector's own `HEARTBEAT_URL` during a NAS outage. That duplication is the
+design: a submitter that stays green while publishing nothing for six hours is
+the precise failure this exists to catch, and it cannot distinguish "no data
+because the collector stopped" from "no data" without asking the collector,
+which is the thing that just broke. Route it to a separate notification group
+if the doubling is noise; do not soften the check.
+
+The rejection message is worth reading. The spec (["The API is documented, after
+all"](#the-api-is-documented-after-all)) covers the fields, but the server is
+what decides, and its 400 text is the most specific description of a
+disagreement anyone gets.
+
+**Use an IP address, not a hostname.** The container resolves through Docker's
+resolver, which has neither the NAS's `search` domain nor mDNS, so a bare
+`data42` or a `.local` name fails with `Failed to resolve` on every ping — and
+because heartbeat errors are logged and swallowed by design, the only symptom
+is a monitor that never goes green:
+
+```
+WARNING mijnbatterij: Heartbeat push failed: HTTPConnectionPool(host='data42',
+port=3001): ... Failed to resolve 'data42' ([Errno -2] Name or service not known)
+```
+
+Tailscale does not help here. MagicDNS resolves on the *host*; the container is
+on a Docker bridge network and never sees that resolver. Use the NAS's LAN IP
+(`ip -4 addr show eth0`), or `100.x.y.z` from `tailscale ip -4` if you want the
+tailnet address — both are addresses, which is the point.
+
+**Paste the URL Kuma shows you, query string and all.** `send_heartbeat`
+rebuilds the query rather than appending to it, so the trailing
+`?status=up&msg=OK&ping=` is harmless. It was not always: appending makes
+Express parse `status` as `["up", "down"]`, which matches neither value, so
+every ping — including the `up` ones — registers DOWN and the message renders
+as `[object Object]`. This repo has now fixed that bug three times
+(`collector/collector.py:407`, `dispatch/heartbeat.py:22`, and here). It keeps
+coming back because the broken call reads more naturally than the fix.
 
 ### Backfilling finished months
 

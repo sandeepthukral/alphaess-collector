@@ -7,8 +7,10 @@ that is really "since we started measuring", and a stale sample published as liv
 """
 
 import datetime as dt
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
+import requests
 
 import mijnbatterij as mb
 import pricing
@@ -1240,3 +1242,54 @@ def test_the_live_endpoint_is_unchanged_by_the_refactor():
     session = FakeSession(FakeResponse(200))
     mb.submit(session, "key-123", {"batteryCharge": 50})
     assert session.posts[0]["url"] == "https://api.mijnbatterij.nl/api/live"
+
+
+# --------------------------------------------------------------------------
+# Heartbeat query string
+# --------------------------------------------------------------------------
+
+class _RecordingGet:
+    """Stands in for `requests.get`, keeping every URL it was handed."""
+
+    def __init__(self, exc: Exception | None = None):
+        self.urls: list[str] = []
+        self.exc = exc
+
+    def __call__(self, url, timeout=None):
+        self.urls.append(url)
+        if self.exc:
+            raise self.exc
+        return FakeResponse(200, "")
+
+
+KUMA_URL = "http://data42.lan:3001/api/push/E1UNtJJr3h?status=up&msg=OK&ping="
+
+
+def test_the_heartbeat_replaces_kumas_own_query_string(monkeypatch):
+    """The URL Kuma displays already carries `?status=up&msg=OK&ping=`, and that whole
+    string is what an operator pastes into .env. Appending to it makes Express parse
+    `status` as an array matching neither "up" nor "down", so every ping -- `up` ones
+    included -- registers DOWN. Twice fixed elsewhere in this repo before this module
+    reintroduced it: collector/collector.py:407 and dispatch/heartbeat.py:22."""
+    get = _RecordingGet()
+    monkeypatch.setattr(mb.requests, "get", get)
+    mb.send_heartbeat(KUMA_URL, "down", "HTTP 400: rejected")
+    assert len(get.urls) == 1
+    query = urlsplit(get.urls[0]).query
+    assert parse_qs(query)["status"] == ["down"], f"status must not repeat: {query}"
+    assert parse_qs(query)["msg"] == ["HTTP 400: rejected"]
+    assert get.urls[0].startswith("http://data42.lan:3001/api/push/E1UNtJJr3h?")
+
+
+def test_the_heartbeat_swallows_a_malformed_url(monkeypatch):
+    """A bad URL in .env is a monitoring problem. It must not stop submissions."""
+    get = _RecordingGet(requests.exceptions.MissingSchema("no scheme"))
+    monkeypatch.setattr(mb.requests, "get", get)
+    mb.send_heartbeat("data42:3001/api/push/abc")  # no exception
+
+
+def test_an_empty_heartbeat_url_pings_nothing(monkeypatch):
+    get = _RecordingGet()
+    monkeypatch.setattr(mb.requests, "get", get)
+    mb.send_heartbeat("")
+    assert get.urls == []
