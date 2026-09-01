@@ -86,3 +86,25 @@ def test_the_error_message_points_somewhere_that_exists(var):
             assert re.search(rf"^#+ (?:\d+\. )?{re.escape(section)}\s*$", DEPLOY, re.M | re.I), (
                 f"{var}'s error sends the reader to DEPLOY.md section {section!r}, "
                 f"which has no matching heading")
+
+
+# `INFLUX_TOKEN_MIJNBATTERIJ` is the one Influx token deliberately NOT `:?`-guarded, so the
+# checks above do not cover it. These two do instead: it must stay unguarded, and it must
+# still be mintable.
+
+def test_the_mijnbatterij_token_is_not_stack_wide_guarded():
+    """Every `:?` guard is stack-wide -- see this module's docstring. Paid willingly for the
+    services the stack runs; wrong for `mijnbatterij`, which is opt-in and idles without
+    MIJNBATTERIJ_API_KEY. Guarding it would break `sudo docker compose ps` on the NAS the
+    moment this branch is pulled, for a feature nobody had switched on. Nothing is lost:
+    the guards exist so a missing token cannot silently become the ADMIN token, and an empty
+    value is not the admin token -- it fails to authenticate. mijnbatterij.py refuses to
+    start on an empty token when an API key is set, which puts the error in the service it
+    concerns."""
+    assert "INFLUX_TOKEN_MIJNBATTERIJ" not in GUARDED
+    assert "${INFLUX_TOKEN_MIJNBATTERIJ:-}" in COMPOSE_TEXT
+
+
+def test_the_mijnbatterij_token_still_has_a_command_that_mints_it():
+    """Being unguarded makes it easier to forget, not less necessary."""
+    assert re.search(r'-d "mijnbatterij: ', DEPLOY)

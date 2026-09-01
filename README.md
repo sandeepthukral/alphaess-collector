@@ -327,19 +327,67 @@ or tomorrow — which the forward-looking **Battery Plan** dashboard needs.
 hours, is what keeps that end current; see
 [DEPLOY.md](DEPLOY.md#keeping-todays-and-tomorrows-prices-available).
 
+## Public benchmarking (mijnbatterij.nl)
+
+[mijnbatterij.nl](https://mijnbatterij.nl) ranks Dutch home batteries against
+each other publicly. The `mijnbatterij` service submits this installation's live
+figures every five minutes under the **Doe-het-zelf** control provider — the
+battery here is driven by this repo's own dispatcher, not by a supported
+aansturingsleverancier.
+
+```
+InfluxDB ──(every 5 min)──▶ mijnbatterij.py ──HTTPS──▶ api.mijnbatterij.nl/api/live
+  power_readings                                       └▶ mijnbatterij_submit
+  market_price                                            (what was sent, and
+  daily_cost, daily_energy                                 whether it landed)
+```
+
+It reads **only** InfluxDB, so it never touches the AlphaESS API and cannot
+perturb collection. Today's euro figure comes from `pricing.compute_day()` — the
+same two-world model `daily_cost` stores overnight — run ungated on the partial
+day, so the live number and tomorrow's stored one cannot disagree.
+
+Opt-in: with `MIJNBATTERIJ_API_KEY` unset the container idles. The key is issued
+on the site's profile page after the installation is registered by hand; there
+is no signup API. Look at a payload before publishing anything, because the
+first submission is public:
+
+```sh
+docker compose build mijnbatterij   # `run` reuses the existing image
+docker compose run --rm mijnbatterij python mijnbatterij.py --once --dry-run
+```
+
+History goes separately, to `/api/results/daily` (per day) and
+`/api/results/monthly` (totals):
+
+```sh
+docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --dry-run
+docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --test
+```
+
+`--test` sets the API's own testing flag: it validates the payload and stores
+nothing. The API is specified at
+[onbalansmarkt.com/help/api-docs/](https://onbalansmarkt.com/help/api-docs/) —
+read it before adding a field.
+
+Full setup, and the two fields that are guesses about an undocumented API
+(`batteryPower`'s sign and `mode`), are in
+[DEPLOY.md](DEPLOY.md#publishing-to-mijnbatterijnl); the decision flow is in
+[docs/MIJNBATTERIJ-FLOW.md](docs/MIJNBATTERIJ-FLOW.md).
+
 ## Development
 
 Tests cover the parts that fail silently: the energy integration and pricing
-model, the complete-day quality gate, the collector's failure handling, and the
-AWTRIX display formatting. Nothing here needs Docker, InfluxDB, or network
-access.
+model, the complete-day quality gate, the collector's failure handling, the
+AWTRIX display formatting, and the mijnbatterij.nl payload. Nothing here needs
+Docker, InfluxDB, or network access.
 
 ```sh
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
 
 .venv/bin/pytest                                     # tests
-.venv/bin/ruff check collector awtrix-pusher tests   # lint
+.venv/bin/ruff check collector awtrix-pusher dispatch scripts tests   # lint
 ```
 
 Both run in CI on every push and pull request

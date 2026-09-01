@@ -9,6 +9,7 @@ COPY collector.py .
 COPY prices.py .
 COPY pricing.py .
 COPY efficiency.py .
+COPY mijnbatterij.py .
 
 RUN useradd --create-home collector
 USER collector

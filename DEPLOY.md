@@ -697,6 +697,330 @@ sudo docker compose run --rm collector python pricing.py --date <yesterday> --fo
 or create the monitor the following day. Do **not** widen the `-14d` range to
 paper over it — that hides exactly the condition the monitor exists to report.
 
+## Publishing to mijnbatterij.nl
+
+[mijnbatterij.nl](https://mijnbatterij.nl) benchmarks Dutch home batteries
+against each other publicly. The `mijnbatterij` service submits this
+installation's live figures to it every five minutes, reading **only** InfluxDB
+— `power_readings`, `market_price`, `daily_cost`, `daily_energy` — so it never
+touches the AlphaESS API and cannot perturb collection.
+
+It runs from the collector image with a different command, and it is **opt-in**:
+with `MIJNBATTERIJ_API_KEY` unset the container idles instead of crash-looping,
+the same shape as `awtrix-pusher` without `AWTRIX_HOST`.
+
+### 1. Register the installation (browser, once)
+
+There is no signup API. On the site, create an account and add an installation:
+
+| Field | Value |
+|---|---|
+| Merk / model | AlphaESS SMILE-G3-S5 |
+| Opslagcapaciteit | `BATTERY_CAPACITY_KWH` from `.env` (27.9 kWh) |
+| Max vermogen | 5 kW |
+| Netaansluiting | your fuse rating, e.g. `3x25A` |
+| Aansturing | your energy supplier — **Frank Energie** here. This is *who supplies the battery's control*, not how it is driven |
+| Modus | **Handmatig/doe-het-zelf** — this is the field that says the dispatching is your own |
+| Locatie, gebruikersnaam | shown publicly — pick accordingly |
+
+The API key then appears on the profile page. It is a credential for an
+outbound *public* submission, so it goes in `.env` and nowhere else:
+
+```
+MIJNBATTERIJ_API_KEY=<key from the profile page>
+MIJNBATTERIJ_CYCLES_OFFSET=0
+```
+
+Mint `INFLUX_TOKEN_MIJNBATTERIJ` with the rest — see
+["Scoped tokens"](#scoped-tokens). Unlike the dispatcher's token this one is
+**not** `:?`-guarded, so it needs no placeholder first: pulling this branch
+leaves every existing compose command working whether or not you ever set it.
+The service refuses to start on an empty token once `MIJNBATTERIJ_API_KEY` is
+filled in, naming the variable.
+
+### 2. Check the payload before publishing anything
+
+The first submission is public. Look at it first, from the Mac or the NAS:
+
+```sh
+sudo docker compose build mijnbatterij   # `run` never builds; see below
+sudo docker compose run --rm mijnbatterij python mijnbatterij.py --once --dry-run
+```
+
+That prints the exact body and posts nothing. Three numbers are worth reading
+carefully, because nothing downstream can catch them being wrong:
+
+- **`batteryPower` sign.** AlphaESS's `pbat` is positive while *discharging*;
+  this sends charge-positive. The convention the platform expects is not
+  documented anywhere public. If its graph reads inverted, set
+  `MIJNBATTERIJ_CHARGE_POSITIVE=0` — do not change the sign in the code, or the
+  payload silently disagrees with `power_readings`.
+- **`totalBatteryCycles`.** Computed as total kWh discharged (from
+  `daily_energy`, at the current `model_version`) over usable capacity, so it
+  counts only what this collector has seen. Days `daily_energy` has no row for —
+  not yet written, never served, or gated — are integrated out of
+  `power_readings` instead, so the counter cannot step backwards; the log names
+  each one it fills.
+
+  **`MIJNBATTERIJ_CYCLES_OFFSET` is what the pack did BEFORE that record
+  begins, and nothing else.** It is added on top of everything measured, so
+  putting the figure the dry run prints into it counts that figure twice — 33.62
+  measured plus a 31.42 "offset" published 65.04, roughly double the truth, on a
+  public leaderboard. If you do not know the pre-collection number, leave it
+  `0`; a total that is honestly short is worth more than one that is silently
+  doubled.
+
+  To derive it, ask AlphaESS directly for the days before the record starts.
+  `getOneDateEnergyBySn` serves history from the install date and returns zeros
+  before it, so walking backwards finds both the first operating day and the
+  throughput that predates `daily_energy`:
+
+  ```sh
+  sudo docker compose run --rm collector python - <<'EOF'
+  import datetime as dt, os
+  from efficiency import fetch_day_energy
+  aid, sec, sn = (os.environ["ALPHAESS_APP_ID"], os.environ["ALPHAESS_APP_SECRET"],
+                  os.environ["ALPHAESS_SYS_SN"])
+  # The local days before your earliest daily_energy row.
+  total = 0.0
+  for d in range(1, 18):
+      day = dt.date(2026, 7, d)
+      dis = float((fetch_day_energy(aid, sec, sn, day) or {}).get("eDischarge") or 0)
+      total += dis
+      print(day, dis)
+  print("offset =", round(total / float(os.environ["BATTERY_CAPACITY_KWH"]), 2), "cycles")
+  EOF
+  ```
+
+  One call per day at `ALPHAESS_MIN_REQUEST_INTERVAL_S`, and that budget is
+  shared with the live collector — keep the range to the days that actually
+  predate the record. On this installation the answer was 0.37 cycles: the pack
+  first ran on 2026-07-16 and `daily_energy` starts at 2026-07-18, leaving two
+  days (10.30 kWh) that no row covers and that the fill will not invent, because
+  it deliberately does not reach back past the first stored day.
+- **`batteryResultTotal`.** The sum of stored `daily_cost.saving` at the
+  current `model_version`, plus today so far. Days that failed
+  `pricing.gate()` are absent from `daily_cost` and therefore from this total;
+  it under-states rather than estimates, deliberately.
+
+`chargedToday`/`dischargedToday` skip any gap in `power_readings` longer than
+`MIJNBATTERIJ_MAX_SAMPLE_GAP_S` — leave it **blank**, which derives it as 3× the
+collector's `POLL_INTERVAL_SECONDS` so it follows the poll interval instead of
+being pinned to whatever 3× was the day it was written — rather than
+interpolating across it — interpolating six missing hours at 4 kW would invent
+~24 kWh. So after a collector outage those two figures under-report the day, by
+the number of seconds `gap_skipped_s` on the `mijnbatterij_submit` point names.
+
+### 3. Publish
+
+```sh
+sudo docker compose up -d --build mijnbatterij
+```
+
+Not a bare `up -d`, which recreates the collector and cost 922 s of samples on
+2026-08-10. `--build` because `up` reuses an existing image too: without it a
+pulled change starts nothing new, and the container comes up looking healthy
+while running the previous version.
+
+Verify it from InfluxDB rather than from the site, which caches:
+
+```sh
+sudo docker compose logs --tail 20 mijnbatterij
+```
+
+Every cycle also writes a `mijnbatterij_submit` point — `submitted`,
+`status_code`, `price_coverage`, `gap_skipped_s` and the figures actually sent —
+so a rejection is visible in Grafana instead of only in a log that rotates. The
+`outcome` tag says what happened: `ok`, `rejected`, `unreachable`, `error`,
+`stale` (the collector stopped), `no-data` (nothing in the bucket for this
+serial at all) or `day-start` (the benign seconds after midnight, before the
+day's first poll — the only one that pushes no heartbeat).
+
+A `batteryResult` of exactly 0 with `price_coverage` below 0.999 is not a
+break-even day: it means `market_price` does not cover the day so far, so the
+euro figure was suppressed rather than published as a fraction of itself. Check
+`refresh-prices.sh`.
+
+### Monitoring the submissions
+
+`MIJNBATTERIJ_HEARTBEAT_URL` takes an Uptime Kuma **Push** monitor URL:
+
+- **Heartbeat Interval**: `600`
+- **Retries**: `1`, **Heartbeat Retry Interval**: `300`
+
+The interval is twice `MIJNBATTERIJ_INTERVAL_SECONDS` on purpose. One missed
+cycle must not page you, two must; `Retries: 1` puts the first miss in PENDING
+rather than a notification. Worst case the alert lands ~15 minutes after
+submissions stop, which is the right speed for a leaderboard.
+
+| Cycle outcome | Push | What it actually means |
+|---|---|---|
+| Submitted | `up` | — |
+| `stale` | `down`, first cycle | **the collector is down**, not this service |
+| `no-data` | `down`, first cycle | wrong `ALPHAESS_SYS_SN`, or the token cannot read the bucket |
+| `day-start` | nothing | benign, the ~30 s after midnight before the day's first poll |
+| Rejected 4xx/5xx | `down` from the 2nd consecutive | carries the platform's own validation message |
+
+The two `down`-on-the-first-cycle rows are why this monitor fires alongside the
+collector's own `HEARTBEAT_URL` during a NAS outage. That duplication is the
+design: a submitter that stays green while publishing nothing for six hours is
+the precise failure this exists to catch, and it cannot distinguish "no data
+because the collector stopped" from "no data" without asking the collector,
+which is the thing that just broke. Route it to a separate notification group
+if the doubling is noise; do not soften the check.
+
+The rejection message is worth reading. The spec (["The API is documented, after
+all"](#the-api-is-documented-after-all)) covers the fields, but the server is
+what decides, and its 400 text is the most specific description of a
+disagreement anyone gets.
+
+**Use an IP address, not a hostname.** The container resolves through Docker's
+resolver, which has neither the NAS's `search` domain nor mDNS, so a bare
+`data42` or a `.local` name fails with `Failed to resolve` on every ping — and
+because heartbeat errors are logged and swallowed by design, the only symptom
+is a monitor that never goes green:
+
+```
+WARNING mijnbatterij: Heartbeat push failed: HTTPConnectionPool(host='data42',
+port=3001): ... Failed to resolve 'data42' ([Errno -2] Name or service not known)
+```
+
+Tailscale does not help here. MagicDNS resolves on the *host*; the container is
+on a Docker bridge network and never sees that resolver. Use the NAS's LAN IP
+(`ip -4 addr show eth0`), or `100.x.y.z` from `tailscale ip -4` if you want the
+tailnet address — both are addresses, which is the point.
+
+**Paste the URL Kuma shows you, query string and all.** `send_heartbeat`
+rebuilds the query rather than appending to it, so the trailing
+`?status=up&msg=OK&ping=` is harmless. It was not always: appending makes
+Express parse `status` as `["up", "down"]`, which matches neither value, so
+every ping — including the `up` ones — registers DOWN and the message renders
+as `[object Object]`. This repo has now fixed that bug three times
+(`collector/collector.py:407`, `dispatch/heartbeat.py:22`, and here). It keeps
+coming back because the broken call reads more naturally than the fix.
+
+### Backfilling finished months
+
+`/api/live` publishes today. History goes to two other endpoints, and the split
+matters: **`/api/results/daily` carries the per-day figures, and
+`/api/results/monthly` carries month TOTALS only.** The monthly endpoint has no
+per-day structure at all — an earlier version of this integration sent a `days`
+map reverse-engineered from a third-party example and got
+`400 Invalid request provided` for it.
+
+```sh
+cd /volume1/docker/alphaess-collector
+git pull
+sudo docker compose build mijnbatterij collector
+sudo docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --dry-run
+```
+
+**`compose run` does not build.** It uses whatever image already exists, so a
+`git pull` on its own leaves you running the code from the last build — which
+surfaces as `error: unrecognized arguments: --monthly`, i.e. an image predating
+the flag rather than anything wrong with the command. Build first whenever the
+source has moved, and build `collector` too: Compose builds one image per
+service, so despite the shared `./collector` build context they are two images
+and `pricing.py` runs from the other one.
+
+`--dry-run` prints the exact bodies and contacts nothing. To check them against
+the real API without storing anything, use the API's own testing flag instead:
+
+```sh
+sudo docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --test
+```
+
+`--test` sets `test: true` on every day payload, which the API validates and
+discards. That is the honest way to confirm a schema change — there is a
+published spec now (below), but it is the server that decides.
+
+Read the two warnings before submitting for real:
+
+- **"had no daily_energy row and were integrated from power_readings"** — the
+  same repair the live path makes. Those days go out flagged `invalid`, which
+  is the spec's own field for a figure that may be incomplete.
+- **"have no stored daily_cost row, sent as €0.00 flagged invalid"** — the
+  month's euro total is short by those days. Check *why* before publishing,
+  because the two causes have different answers:
+
+  ```sh
+  sudo docker compose run --rm collector \
+    python pricing.py --backfill 2026-08-29 2026-08-31 --dry-run
+  ```
+
+  A day reported `EXCLUDED (coverage …)` is gated and will never have a row —
+  it stays €0.00, deliberately, for the reason in
+  [docs/MIJNBATTERIJ-FLOW.md](docs/MIJNBATTERIJ-FLOW.md). A day that computes a
+  saving cleanly simply has not been written yet, because the nightly job has
+  not run since. Write it first, then submit:
+
+  ```sh
+  sudo docker compose run --rm collector python pricing.py --date 2026-08-31
+  sudo docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08
+  ```
+
+On 2026-09-01 this installation's August came to 31 days, 747.4 kWh charged,
+713.6 kWh discharged, €115.25, marked `partial` because 2026-08-29 carries no
+euro figure (gated at coverage 0.808 after a 35-minute outage) and four days'
+energy is derived from `power_readings`.
+
+**Only whole past days are sent.** Today is capped out of the payload: it is
+still moving, it belongs to `/api/live`, and the spec requires the daily
+endpoint's `date` to be before today in Europe/Amsterdam anyway. Re-running a
+month is safe and is how a day gets corrected once its nightly row lands —
+nothing is ever sent `finalized`, which the spec makes permanent.
+
+### The API is documented, after all
+
+A 400 from the monthly endpoint named
+[https://onbalansmarkt.com/help/api-docs/](https://onbalansmarkt.com/help/api-docs/),
+which is a Quarkus OpenAPI UI; the machine-readable spec is at
+`/help/api-docs/public-schema` (YAML, despite the JSON-ish path). It is the only
+authoritative description of this API and it contradicts the reverse-engineered
+payload this integration started from in four ways:
+
+| | Reverse-engineered | Actually |
+|---|---|---|
+| numeric fields | JSON numbers | **strings** — `"8.80"`, `"143"` |
+| `loadBalancingActive` | boolean | **`"on"` / `"off"`** |
+| `batteryPower` | sent every cycle | **does not exist**; the API ignored it |
+| per-day history | `days` map on monthly | **`POST /api/results/daily`** |
+
+It also documents fields worth sending that nobody had guessed: `gridImportToday`
+and `gridExportToday` (which enable the platform's 15-minute household energy
+tracking), `solarKwhGenerated`, `batterySavings`, `invalid`, `partial`, `note`,
+and the `test` flag above. All of those are now populated from data this stack
+already holds.
+
+### What `mode` should say — nothing, by default
+
+`MIJNBATTERIJ_MODE` is **blank** by default, which omits the field. The spec is
+explicit about why that is right: mode "can be provided to **override** the mode
+configured on the profile page". The profile already carries **Modus**
+(`Handmatig/doe-het-zelf`) beside **Aansturing** (`Frank Energie`) — two
+different fields, and it is Modus, not Aansturing, that says this installation
+is self-dispatched. Sending nothing lets it stand.
+
+The published enum is `imbalance`, `imbalance_aggressive`, `manual`,
+`day_ahead`, `self_consumption`, `self_consumption_plus`, and **which subset an
+account may use varies by provider**. The first live submission from here
+asserted `self_consumption` and came back:
+
+```
+400 {"message":"Battery mode: self_consumption is not available for frank-energie"}
+```
+
+If you ever do want to send one, `manual` is the value matching
+`Handmatig/doe-het-zelf`, and `day_ahead` describes what the dispatcher actually
+does. A value outside the enum is refused locally with a log line naming the
+valid set, rather than sent to earn a 400 every cycle:
+
+```sh
+cd /volume1/docker/alphaess-collector
+sed -i 's|^MIJNBATTERIJ_MODE=.*|MIJNBATTERIJ_MODE=|' .env     # blank = omit
+sudo docker compose up -d --build mijnbatterij
+```
+
 ## Backing up InfluxDB
 
 InfluxDB's data lives only in the `alphaess-influxdb-data` Docker volume,
@@ -1040,10 +1364,22 @@ Every service gets a token scoped to what it actually does:
 | `INFLUX_TOKEN_KUMA` | read `alphaess` | For the Uptime Kuma keyword monitor in ["Monitoring the nightly efficiency job"](#monitoring-the-nightly-efficiency-job). Deliberately not `INFLUX_TOKEN_GRAFANA`: that one also reads `planning`, and pasting it into a second system means revoking one breaks the other. Optional — mint it only if you set that monitor up. |
 | `INFLUX_TOKEN_GRAFANA` | read on every bucket it charts | Read-only. Anyone who reaches the Grafana UI can issue arbitrary Flux through the datasource proxy, so this is the one most worth keeping narrow. |
 | `INFLUX_TOKEN_DISPATCH` | read `planning`, read + write `alphaess` | Reads the plan the translator consumes and writes the `dispatch_state` readback behind the dashboard's dispatch panels. The only process in the stack that reads another project's bucket, which is why it is not the collector's token. **Needed before any compose subcommand works**, including ones that have nothing to do with dispatch — see below. |
+| `INFLUX_TOKEN_MIJNBATTERIJ` | read + write `alphaess` | Reads `power_readings`, `market_price`, `daily_cost` and `daily_energy` to build the mijnbatterij.nl payload; writes only its own `mijnbatterij_submit` and `mijnbatterij_rank` status series. Separate from the collector's because it is the one token in the stack that is also the credential for an outbound public submission — revoking it stops the publishing without touching collection. **The one token without a `:?` guard**, because that service is opt-in: see below. |
 
-None of them have a fallback: compose fails to start and names the missing
-variable. A service that quietly reverted to the admin token would defeat the
-point.
+None of them has a fallback — except `INFLUX_TOKEN_MIJNBATTERIJ`, below.
+Compose fails to start and names the missing variable. A service that quietly
+reverted to the admin token would defeat the point.
+
+**`INFLUX_TOKEN_MIJNBATTERIJ` is `:-`, not `:?`.** The guard is stack-wide, and
+that service is opt-in — it idles without `MIJNBATTERIJ_API_KEY`. Guarding it
+would break every compose subcommand on the NAS the moment the branch is pulled,
+for a feature nobody had switched on yet, and would leave you needing a
+placeholder just to run the `compose exec influxdb` that mints the real token.
+Nothing is given up: the guards exist so a missing token cannot silently become
+the *admin* token, and an empty value is not the admin token — it fails to
+authenticate. `mijnbatterij.py` exits at startup with a message naming this
+variable if the token is empty while an API key is set, which puts the error in
+the one service it concerns.
 
 That guard is stack-wide, not per-service. Compose interpolates the whole file on
 every subcommand, so a missing `INFLUX_TOKEN_DISPATCH` stops `docker compose
@@ -1080,6 +1416,10 @@ sudo docker compose exec -T influxdb influx auth create \
 sudo docker compose exec -T influxdb influx auth create \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "awtrix-pusher: r alphaess" \
   --read-bucket "$ALPHAESS_ID"
+
+sudo docker compose exec -T influxdb influx auth create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "mijnbatterij: rw alphaess" \
+  --read-bucket "$ALPHAESS_ID" --write-bucket "$ALPHAESS_ID"
 
 # Only if you set up the Uptime Kuma keyword monitor. This one is pasted into
 # Kuma's config, not into .env.
