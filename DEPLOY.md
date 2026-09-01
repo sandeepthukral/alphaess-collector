@@ -970,6 +970,52 @@ endpoint's `date` to be before today in Europe/Amsterdam anyway. Re-running a
 month is safe and is how a day gets corrected once its nightly row lands —
 nothing is ever sent `finalized`, which the spec makes permanent.
 
+### Publishing finished days nightly
+
+`--monthly` above is also the scheduled job. The live loop publishes **today**
+every 5 minutes and nothing else; until this task is scheduled, the platform's
+record of *yesterday* is whatever the last `/api/live` snapshot before midnight
+carried — the day truncated at the last submission, computed before
+`daily-savings.sh` had written its euro figure at all.
+
+Schedule [scripts/daily-mijnbatterij.sh](scripts/daily-mijnbatterij.sh):
+
+- **General**: User = `root` (DSM's docker socket needs root)
+- **Schedule**: Daily, first run time `03:30`
+- **Task Settings → Run command**:
+
+  ```sh
+  /volume1/docker/alphaess-collector/scripts/daily-mijnbatterij.sh
+  ```
+
+`03:30`, **after** `daily-savings.sh` at 02:00 and `daily-efficiency.sh` at
+03:00. This job only publishes what those two wrote: run it earlier and
+yesterday goes out as €0.00 flagged `invalid`, which is a true statement about
+an empty `daily_cost` and a wrong one about the day.
+
+It posts the month **yesterday** falls in — on the 1st that is the month that
+just ended, so a month gets its final pass the night after its last day. For the
+first `HEAL_DAYS` (4) days of a month it posts the previous month as well,
+matching `daily-savings.sh`'s 4-day self-healing window: a day skipped for late
+prices can be written two nights later, and by then the month-of-yesterday rule
+alone would have stopped looking at it.
+
+Safe to re-run, and safe to run while the live loop is running — nothing is ever
+sent `finalized`, so a day is corrected rather than duplicated. The script exits
+0 without doing anything when `MIJNBATTERIJ_API_KEY` is blank, so it can be
+scheduled on an installation that has not been registered yet.
+
+**No Kuma monitor for this one**, deliberately. `MIJNBATTERIJ_HEARTBEAT_URL`
+belongs to the live loop and expects a push every 5 minutes; a nightly job
+pushing to the same monitor would hold it green through a dead loop. DSM's own
+task-failure notification is the alert here.
+
+Run it once by hand first:
+
+```sh
+sudo /volume1/docker/alphaess-collector/scripts/daily-mijnbatterij.sh
+```
+
 ### The API is documented, after all
 
 A 400 from the monthly endpoint named

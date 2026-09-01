@@ -358,7 +358,11 @@ docker compose run --rm mijnbatterij python mijnbatterij.py --once --dry-run
 ```
 
 History goes separately, to `/api/results/daily` (per day) and
-`/api/results/monthly` (totals):
+`/api/results/monthly` (totals). That is a scheduled job, not only a manual
+repair: `scripts/daily-mijnbatterij.sh` runs it nightly at ~03:30, after the
+savings and efficiency jobs have written the rows it publishes. Without it the
+platform's record of a finished day would be the last live snapshot before
+midnight, computed before that day had a `daily_cost` row at all.
 
 ```sh
 docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --dry-run

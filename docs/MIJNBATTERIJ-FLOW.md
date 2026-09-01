@@ -211,6 +211,18 @@ cannot see a day boundary, so `Totals` compares `day_start` as well.
 the thing the original version got wrong: `/api/results/daily` takes the per-day
 figures, `/api/results/monthly` takes month totals and has no per-day structure.
 
+**This is the nightly job, not only a manual repair.** `/api/live` publishes
+today and nothing else, so without a scheduled `--monthly` the platform's record
+of a finished day is the last live snapshot before midnight — the day truncated
+at the last submission, and computed before its `daily_cost` row existed.
+`scripts/daily-mijnbatterij.sh` runs this path at ~03:30, after
+`daily-savings.sh` (02:00) writes the euros and `daily-efficiency.sh` (03:00)
+writes the energy totals it prefers. It posts the month **yesterday** falls in,
+plus the previous month during the first four days of a new one — the same
+4-day window `daily-savings.sh` uses to heal a day whose prices published late.
+Order matters in one direction only: running it before those two publishes
+yesterday as €0.00 flagged `invalid`.
+
 ```mermaid
 flowchart TD
     A["--monthly 2026-08"] --> B["month_days(year, month, until=yesterday)"]
