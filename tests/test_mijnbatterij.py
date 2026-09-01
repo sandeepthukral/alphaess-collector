@@ -61,6 +61,7 @@ def config(**overrides) -> dict:
         "mode": "self_consumption",
         "load_balancing": False,
         "charge_positive": True,
+        "test": False,
         "base_url": mb.API_BASE,
     }
     base.update(overrides)
@@ -157,51 +158,74 @@ def _payload(**overrides):
         "result_today": 1.23456,
         "result_total": 98.7654,
         "cycle_count": 121.345,
-        "mode": "self_consumption",
+        "mode": "",
         "load_balancing": False,
     }
     args.update(overrides)
     return mb.build_payload(**args)
 
 
-def test_the_payload_carries_exactly_the_documented_fields():
+def test_the_payload_matches_the_published_schema():
+    """Field names and presence, against the OpenAPI spec at
+    https://onbalansmarkt.com/help/api-docs/ -- not against a third-party
+    integration's example, which is where the original list came from and which
+    carried a `batteryPower` field the API does not define."""
     assert set(_payload()) == {
-        "timestamp", "batteryResult", "batteryResultTotal", "batteryCharge",
-        "batteryPower", "chargedToday", "dischargedToday", "totalBatteryCycles",
-        "mode", "loadBalancingActive",
+        "timestamp", "batteryResult", "batteryResultTotal", "batterySavings",
+        "batteryCharge", "chargedToday", "dischargedToday", "gridImportToday",
+        "gridExportToday", "solarKwhGenerated", "totalBatteryCycles",
+        "loadBalancingActive",
     }
 
 
+def test_there_is_no_battery_power_field():
+    """The spec defines none. The original payload sent one for weeks and the
+    API silently ignored it, which is precisely why it went unnoticed."""
+    assert "batteryPower" not in _payload()
+
+
+def test_every_numeric_field_is_a_string():
+    """The spec types them all as `string`. /api/live tolerates real JSON
+    numbers, which is why this survived until /api/results/monthly refused a
+    payload outright."""
+    payload = _payload()
+    for key in ("batteryResult", "batteryResultTotal", "batteryCharge",
+                "chargedToday", "dischargedToday", "totalBatteryCycles"):
+        assert isinstance(payload[key], str), key
+
+
+def test_load_balancing_is_on_or_off_not_a_boolean():
+    """`loadBalancingActive` is an enum of 'on' | 'off' in the spec."""
+    assert _payload(load_balancing=False)["loadBalancingActive"] == "off"
+    assert _payload(load_balancing=True)["loadBalancingActive"] == "on"
+
+
 def test_an_empty_mode_is_omitted_rather_than_sent_blank():
-    """The profile page carries Modus (e.g. "Handmatig/doe-het-zelf") next to
-    Aansturing (e.g. Frank Energie), and the platform validates any mode it is
-    sent against that provider's own unpublished set -- it rejected
-    `self_consumption` for frank-energie outright. Omitting the field lets the
-    profile stand, which is where the answer already is. Sending "" would be a
-    guess at a value, not an abstention."""
-    payload = _payload(mode="")
-    assert "mode" not in payload
-    assert payload["batteryCharge"] == 62.4    # the rest is unaffected
+    """The spec says mode OVERRIDES the profile page's own Modus, so sending
+    nothing is how the profile stands. Which values a given account may use
+    varies by provider: frank-energie rejected `self_consumption` outright."""
+    assert "mode" not in _payload(mode="")
+    assert _payload(mode="manual")["mode"] == "manual"
 
 
-def test_omitting_the_mode_is_the_default(monkeypatch):
-    monkeypatch.delenv("MIJNBATTERIJ_MODE", raising=False)
-    assert mb.load_config()["mode"] == ""
+def test_the_result_is_also_sent_as_savings():
+    """The spec defines batteryResult = batteryResultImbalance + batterySavings.
+    Nothing here trades imbalance, so the two are the same number."""
+    p = _payload()
+    assert p["batteryResult"] == p["batterySavings"] == "1.23"
 
 
-def test_an_explicit_mode_is_still_sent():
-    assert _payload(mode="imbalance")["mode"] == "imbalance"
+def test_a_shaky_day_is_flagged_invalid_rather_than_withheld():
+    """The API has a field for exactly the days this service already detects --
+    a gap it refused to integrate across, a price feed too thin to price the
+    day. Publishing the number with a flag beats publishing it silently."""
+    assert "invalid" not in _payload()
+    assert _payload(invalid=True)["invalid"] is True
 
 
-def test_charging_is_sent_positive_by_default():
-    """AlphaESS's pbat is positive while DISCHARGING, so -1500 W is charging at
-    1.5 kW. Getting this backwards publishes a battery that appears to discharge
-    all night, and nothing downstream can detect it."""
-    assert _payload()["batteryPower"] == 1500
-
-
-def test_the_sign_convention_is_a_setting_not_a_constant():
-    assert _payload(charge_positive=False)["batteryPower"] == -1500
+def test_the_test_flag_asks_the_api_to_validate_without_storing():
+    assert "test" not in _payload()
+    assert _payload(test=True)["test"] is True
 
 
 def test_the_timestamp_is_the_sample_time_not_the_submission_time():
@@ -212,11 +236,11 @@ def test_the_timestamp_is_offset_aware():
     assert _payload()["timestamp"].endswith("+00:00")
 
 
-def test_euros_and_kwh_keep_enough_digits_to_be_summed():
-    p = _payload()
-    assert p["batteryResult"] == 1.2346
-    assert p["chargedToday"] == 4.234
-    assert p["batteryCharge"] == 62.4
+def test_grid_and_solar_energy_are_carried():
+    """Optional in the spec, and what enables its 15-minute household tracking."""
+    p = _payload(imported_kwh=6.4, exported_kwh=3.1, solar_kwh=12.5)
+    assert (p["gridImportToday"], p["gridExportToday"], p["solarKwhGenerated"]) == \
+        ("6.400", "3.100", "12.500")
 
 
 # --------------------------------------------------------------------------
@@ -247,9 +271,9 @@ def test_collect_builds_a_payload_from_todays_samples(monkeypatch):
                                totals=mb.Totals(3600), config=config(), now=now)
 
     assert outcome == "ok"
-    assert snap.payload["chargedToday"] == pytest.approx(12.0, abs=0.01)
-    assert snap.payload["dischargedToday"] == 0.0
-    assert snap.payload["batteryCharge"] == 55.0
+    assert float(snap.payload["chargedToday"]) == pytest.approx(12.0, abs=0.01)
+    assert float(snap.payload["dischargedToday"]) == 0.0
+    assert snap.payload["batteryCharge"] == "55.0"
 
 
 def test_todays_result_is_added_to_the_stored_all_time_total(monkeypatch):
@@ -264,8 +288,8 @@ def test_todays_result_is_added_to_the_stored_all_time_total(monkeypatch):
     snap, _ = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
                          totals=mb.Totals(3600), config=config(), now=now)
 
-    assert snap.payload["batteryResultTotal"] == pytest.approx(
-        10.0 + snap.payload["batteryResult"], abs=1e-4)
+    assert float(snap.payload["batteryResultTotal"]) == pytest.approx(
+        10.0 + float(snap.payload["batteryResult"]), abs=0.01)
 
 
 def test_todays_throughput_counts_towards_the_cycle_total(monkeypatch):
@@ -278,7 +302,7 @@ def test_todays_throughput_counts_towards_the_cycle_total(monkeypatch):
                          totals=mb.Totals(3600), config=config(cycles_offset=100.0), now=now)
 
     # 27.9 kWh stored + 12 kWh today, over 27.9 kWh usable, plus the offset.
-    assert snap.payload["totalBatteryCycles"] == pytest.approx(101.43, abs=0.01)
+    assert float(snap.payload["totalBatteryCycles"]) == pytest.approx(101.43, abs=0.01)
 
 
 def test_a_stale_newest_sample_submits_nothing(monkeypatch):
@@ -330,8 +354,10 @@ def test_missing_prices_send_a_zero_result_rather_than_no_submission(monkeypatch
     snap, _ = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
                          totals=mb.Totals(3600), config=config(), now=now)
 
-    assert snap.payload["batteryResult"] == 0.0
-    assert snap.payload["chargedToday"] == pytest.approx(12.0, abs=0.01)
+    assert float(snap.payload["batteryResult"]) == 0.0
+    assert float(snap.payload["chargedToday"]) == pytest.approx(12.0, abs=0.01)
+    # No prices means the euro figure was suppressed, which the API has a flag for.
+    assert snap.payload["invalid"] is True
 
 
 # --------------------------------------------------------------------------
@@ -436,7 +462,7 @@ def test_the_status_point_records_what_was_actually_sent():
     assert "mijnbatterij_submit" in line
     assert "outcome=ok" in line
     assert "submitted=1" in line
-    assert "battery_result=1.2346" in line
+    assert "battery_result=1.23" in line
 
 
 def test_a_rejection_is_stored_as_a_point_too():
@@ -913,7 +939,8 @@ def test_a_price_feed_that_stopped_mid_day_sends_zero_not_a_fraction(monkeypatch
     snap, _ = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
                          totals=mb.Totals(3600), config=config(), now=now)
 
-    assert snap.payload["batteryResult"] == 0.0
+    assert float(snap.payload["batteryResult"]) == 0.0
+    assert snap.payload["invalid"] is True
     assert snap.price_coverage == pytest.approx(0.4, abs=0.01)
 
 
@@ -927,7 +954,8 @@ def test_a_fully_priced_day_still_reports_its_saving(monkeypatch):
     snap, _ = mb.collect(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
                          totals=mb.Totals(3600), config=config(), now=now)
 
-    assert snap.payload["batteryResult"] != 0.0
+    assert float(snap.payload["batteryResult"]) != 0.0
+    assert "invalid" not in snap.payload
     assert snap.price_coverage == pytest.approx(1.0)
 
 
@@ -1063,47 +1091,43 @@ def _energy(day, charged, discharged):
     return {day: {"charge_kwh_api": charged, "discharge_kwh_api": discharged}}
 
 
-def test_a_month_totals_its_days(monkeypatch):
+def test_a_month_returns_one_row_per_day(monkeypatch):
     energy = {**_energy(dt.date(2026, 8, 1), 29.2, 26.6),
               **_energy(dt.date(2026, 8, 2), 29.7, 25.3)}
     savings = {dt.date(2026, 8, 1): {"saving": 4.3435},
                dt.date(2026, 8, 2): {"saving": 4.3372}}
     _stub_month(monkeypatch, energy, savings)
 
-    payload, report = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                                       year=2026, month=8, until=dt.date(2026, 8, 2))
+    rows, report = mb.build_month(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                                  year=2026, month=8, until=dt.date(2026, 8, 2))
 
-    assert payload["yearMonth"] == "2026-08"
-    assert payload["batteryCharged"] == pytest.approx(58.9)
-    assert payload["batteryDischarged"] == pytest.approx(51.9)
-    assert payload["batteryResult"] == pytest.approx(8.6807)
-    assert set(payload["days"]) == {"01", "02"}
-    assert payload["days"]["01"]["batteryResult"] == 4.3435
+    assert [r["day"] for r in rows] == [dt.date(2026, 8, 1), dt.date(2026, 8, 2)]
+    assert rows[0]["charged"] == 29.2 and rows[0]["result"] == 4.3435
     assert report["filled"] == [] and report["unpriced"] == []
+    assert report["expected"] == 2
 
 
 def test_today_is_never_sent_as_a_finished_day(monkeypatch):
-    """Today is still moving and is what /api/live is for. Sending it here
-    publishes a part-day as a whole one, and then disagrees with the live figure
-    for the rest of the day."""
+    """Today is still moving and is what /api/live is for. The spec agrees: the
+    daily endpoint's `date` must be before today in Europe/Amsterdam."""
     energy = {**_energy(dt.date(2026, 8, 30), 1.0, 1.0),
               **_energy(dt.date(2026, 8, 31), 2.0, 2.0)}
     _stub_month(monkeypatch, energy, {})
 
-    payload, _ = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                                  year=2026, month=8, until=dt.date(2026, 8, 30))
+    rows, _ = mb.build_month(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                             year=2026, month=8, until=dt.date(2026, 8, 30))
 
-    # The 31st is in `energy` and would be sent but for the `until` cap, so this
+    # The 31st is in `energy` and would appear but for the `until` cap, so this
     # fails if the cap is removed rather than passing on absence.
-    assert set(payload["days"]) == {"30"}
+    assert [r["day"] for r in rows] == [dt.date(2026, 8, 30)]
 
 
 def test_a_month_with_no_finished_days_yet_is_empty(monkeypatch):
     """The 1st of a month: `until` is yesterday, which is last month."""
     _stub_month(monkeypatch, {}, {})
-    payload, _ = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                                  year=2026, month=9, until=dt.date(2026, 8, 31))
-    assert payload == {}
+    rows, _ = mb.build_month(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                             year=2026, month=9, until=dt.date(2026, 8, 31))
+    assert rows == []
 
 
 def test_a_day_without_a_daily_energy_row_is_integrated_from_readings(monkeypatch):
@@ -1112,12 +1136,21 @@ def test_a_day_without_a_daily_energy_row_is_integrated_from_readings(monkeypatc
     _stub_month(monkeypatch, {}, {dt.date(2026, 8, 17): {"saving": 2.5}},
                 readings=(20.0, 18.0))
 
-    payload, report = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                                       year=2026, month=8, until=dt.date(2026, 8, 17))
+    rows, report = mb.build_month(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                                  year=2026, month=8, until=dt.date(2026, 8, 17))
 
-    assert payload["days"]["17"]["batteryCharged"] == 20.0
-    assert payload["days"]["17"]["batteryDischarged"] == 18.0
+    assert rows[0]["charged"] == 20.0 and rows[0]["discharged"] == 18.0
+    assert rows[0]["derived"] is True
     assert dt.date(2026, 8, 17) in report["filled"]
+
+
+def test_a_derived_day_is_flagged_invalid_when_sent(monkeypatch):
+    """The figures rest on the derived series rather than AlphaESS's own
+    totals, and the API has a field that says exactly that."""
+    payload = mb.build_daily(day=dt.date(2026, 8, 17), charged_kwh=20.0,
+                             discharged_kwh=18.0, result=2.5, invalid=True)
+    assert payload["invalid"] is True
+    assert payload["date"] == "2026-08-17"
 
 
 def test_a_day_with_no_data_anywhere_is_left_out_entirely(monkeypatch):
@@ -1125,25 +1158,75 @@ def test_a_day_with_no_data_anywhere_is_left_out_entirely(monkeypatch):
     "we were not watching", and the platform cannot tell those apart."""
     _stub_month(monkeypatch, {}, {}, readings=(0.0, 0.0))
 
-    payload, report = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                                       year=2026, month=8, until=dt.date(2026, 8, 3))
+    rows, report = mb.build_month(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                                  year=2026, month=8, until=dt.date(2026, 8, 3))
 
-    assert payload["days"] == {}
+    assert rows == []
     assert report["filled"] == []
 
 
-def test_a_gated_day_is_sent_as_zero_euros_and_named(monkeypatch):
+def test_a_gated_day_is_sent_as_zero_euros_flagged_invalid(monkeypatch):
     """Recomputing it ungated would put a number on a public leaderboard that no
     stored row can ever be reconciled against -- the same call
     stored_saving_total makes. Observed live: 2026-08-29, coverage 0.808."""
     _stub_month(monkeypatch, _energy(dt.date(2026, 8, 29), 22.0, 19.0), {})
 
-    payload, report = mb.build_monthly(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
-                                       year=2026, month=8, until=dt.date(2026, 8, 29))
+    rows, report = mb.build_month(FakeQueryApi(), bucket="alphaess", sys_sn="SN",
+                                  year=2026, month=8, until=dt.date(2026, 8, 29))
 
-    assert payload["days"]["29"]["batteryResult"] == 0.0
-    assert payload["days"]["29"]["batteryDischarged"] == 19.0
+    assert rows[0]["result"] is None
     assert report["unpriced"] == [dt.date(2026, 8, 29)]
+
+    payload = mb.build_daily(day=rows[0]["day"], charged_kwh=rows[0]["charged"],
+                             discharged_kwh=rows[0]["discharged"], result=None)
+    assert payload["batteryResult"] == "0.00"
+    assert payload["invalid"] is True
+    assert payload["dischargedToday"] == "19.000"
+
+
+def test_the_month_totals_carry_no_per_day_structure():
+    """`days` was invented -- the spec has no such field, and sending it is what
+    earned `400 Invalid request provided`."""
+    payload = mb.build_month_totals(year=2026, month=8, charged_kwh=747.4,
+                                    discharged_kwh=713.5, result=113.47,
+                                    partial=True)
+    assert "days" not in payload
+    assert payload["yearMonth"] == "2026-08"
+    assert payload["batteryResult"] == "113.47"
+    assert payload["batteryCharged"] == "747.400"
+    assert payload["partial"] is True
+
+
+def test_a_complete_month_is_not_marked_partial():
+    payload = mb.build_month_totals(year=2026, month=8, charged_kwh=1.0,
+                                    discharged_kwh=1.0, result=1.0, partial=False)
+    assert "partial" not in payload
+
+
+def test_a_day_result_is_never_finalized():
+    """The spec says a finalized result can never be updated, and a day here can
+    legitimately improve once its nightly daily_cost row lands."""
+    assert "finalized" not in mb.build_daily(
+        day=dt.date(2026, 8, 1), charged_kwh=1.0, discharged_kwh=1.0, result=1.0)
+
+
+def test_the_daily_payload_goes_to_the_daily_endpoint():
+    session = FakeSession(FakeResponse(200))
+    mb.submit_daily(session, "key-123", {"date": "2026-08-01"})
+    assert session.posts[0]["url"] == "https://api.mijnbatterij.nl/api/results/daily"
+
+
+def test_a_mode_outside_the_published_enum_is_refused(monkeypatch):
+    """Rather than sent, where it comes back as a 400 every cycle for as long as
+    it takes someone to read the log."""
+    monkeypatch.setenv("MIJNBATTERIJ_MODE", "doe_het_zelf")
+    assert mb.load_config()["mode"] == ""
+
+
+def test_every_published_mode_is_accepted(monkeypatch):
+    for mode in mb.MODES:
+        monkeypatch.setenv("MIJNBATTERIJ_MODE", mode)
+        assert mb.load_config()["mode"] == mode
 
 
 def test_the_monthly_payload_goes_to_the_results_endpoint():

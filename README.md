@@ -357,11 +357,18 @@ docker compose build mijnbatterij   # `run` reuses the existing image
 docker compose run --rm mijnbatterij python mijnbatterij.py --once --dry-run
 ```
 
-Finished months go separately, to `/api/results/monthly`:
+History goes separately, to `/api/results/daily` (per day) and
+`/api/results/monthly` (totals):
 
 ```sh
 docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --dry-run
+docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --test
 ```
+
+`--test` sets the API's own testing flag: it validates the payload and stores
+nothing. The API is specified at
+[onbalansmarkt.com/help/api-docs/](https://onbalansmarkt.com/help/api-docs/) —
+read it before adding a field.
 
 Full setup, and the two fields that are guesses about an undocumented API
 (`batteryPower`'s sign and `mode`), are in

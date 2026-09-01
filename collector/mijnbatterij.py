@@ -27,22 +27,22 @@ permanently, and by construction a partial day fails its coverage check. A live
 figure that self-corrects on the next submission is a different bargain from a
 stored one that never will.
 
-TWO THINGS ABOUT THIS API ARE NOT PUBLICLY SPECIFIED, and both are settings
-here rather than assumptions baked into the payload:
+THE API IS SPECIFIED, at https://onbalansmarkt.com/help/api-docs/ (spec at
+/help/api-docs/public-schema). This integration was first built from a
+third-party integration's example instead, because a 400 was what eventually
+named the docs -- so four things here were wrong and the live endpoint never
+said so: every numeric field is a STRING, `loadBalancingActive` is an
+'on'/'off' enum rather than a boolean, there is no `batteryPower` field at all
+(it was sent and ignored), and per-day history belongs to /api/results/daily
+rather than a `days` map on the monthly payload. Read the spec before adding a
+field; do not extend the guesswork.
 
-  * the sign convention for `batteryPower`. AlphaESS's pbat is positive while
-    DISCHARGING; this sends charge-positive by default
-    (MIJNBATTERIJ_CHARGE_POSITIVE=1), which is the usual convention for a
-    battery dashboard sitting next to a "charged today" figure. If the
-    platform's graph reads inverted, flip the setting -- do not edit the sign
-    in here, or the next reader has to rediscover why it disagrees with
-    power_readings.
-  * `mode`. NOT SENT AT ALL by default. The profile page carries Modus
-    ("Handmatig/doe-het-zelf") as a setting beside Aansturing ("Frank
-    Energie"), and the platform validates any mode it is sent against that
-    provider's own unpublished set -- asserting "self_consumption" from here
-    earned a 400 naming frank-energie while the profile was correct all along.
-    MIJNBATTERIJ_MODE can still name one; blank omits the field.
+`mode` is NOT SENT by default. The spec says it overrides the mode configured
+on the profile page, and that page already carries Modus
+("Handmatig/doe-het-zelf") beside Aansturing ("Frank Energie"). Which subset of
+the enum an account may use varies by provider: asserting "self_consumption"
+here earned a 400 naming frank-energie while the profile was correct all
+along.
 
 Run modes:
     python mijnbatterij.py           # submit loop (production)
@@ -76,6 +76,15 @@ API_BASE = "https://api.mijnbatterij.nl"
 LIVE_PATH = "/api/live"
 ME_PATH = "/api/me"
 MONTHLY_PATH = "/api/results/monthly"
+DAILY_PATH = "/api/results/daily"
+
+# From the published OpenAPI spec (https://onbalansmarkt.com/help/api-docs/,
+# spec at /help/api-docs/public-schema). Which subset a given account may use
+# depends on its Aansturing: frank-energie rejected `self_consumption` outright.
+# `manual` is the one that matches a profile whose Modus reads
+# "Handmatig/doe-het-zelf", which is what this installation is.
+MODES = ("imbalance", "imbalance_aggressive", "manual", "day_ahead",
+         "self_consumption", "self_consumption_plus")
 
 STATUS_MEASUREMENT = "mijnbatterij_submit"
 RANK_MEASUREMENT = "mijnbatterij_rank"
@@ -447,26 +456,26 @@ def month_days(year: int, month: int, until: dt.date) -> list[dt.date]:
     return out
 
 
-def build_monthly(query_api, *, bucket: str, sys_sn: str, year: int, month: int,
-                  until: dt.date, max_gap_s: float = DEFAULT_MAX_SAMPLE_GAP_S,
-                  ) -> tuple[dict, dict]:
-    """(payload, report) for POST /api/results/monthly.
+def build_month(query_api, *, bucket: str, sys_sn: str, year: int, month: int,
+                until: dt.date, max_gap_s: float = DEFAULT_MAX_SAMPLE_GAP_S,
+                ) -> tuple[list[dict], dict]:
+    """(per-day figures, report) for one month of finished local days.
 
     Energy comes from daily_energy, and from power_readings for any day
     daily_energy has no row for -- the same repair the live path makes, for the
-    same reason: those gaps are real here (four days in August 2026) and a month
-    total that silently omits them is wrong rather than merely incomplete.
+    same reason: those gaps are real (five days in August 2026) and a month
+    total that silently omits them is wrong rather than incomplete.
 
     EUROS COME FROM STORED daily_cost ROWS ONLY. A day pricing.gate() rejected
-    has no row and is published as 0.00 rather than recomputed ungated. That is
-    the same call stored_saving_total makes and for the same reason: an estimate
-    on a public leaderboard is a number no stored row can ever be reconciled
-    against. The report names those days so the shortfall is visible rather than
-    absorbed.
+    has no row, is reported as None here, and goes out as 0.00 flagged
+    `invalid` rather than recomputed ungated. That is the same call
+    stored_saving_total makes and for the same reason: an estimate on a public
+    leaderboard is a number no stored row can ever be reconciled against. The
+    API's own `invalid` flag is what says so without withholding the day.
     """
     days = month_days(year, month, until)
     if not days:
-        return {}, {"days": [], "filled": [], "unpriced": []}
+        return [], {"days": [], "filled": [], "unpriced": []}
     start = pricing.day_window_utc(days[0])[0]
     stop = pricing.day_window_utc(days[-1])[1]
 
@@ -475,45 +484,30 @@ def build_monthly(query_api, *, bucket: str, sys_sn: str, year: int, month: int,
     savings = _daily_rows(query_api, bucket, pricing.DAILY_MEASUREMENT, sys_sn,
                           MODEL_VERSION, ("saving",), start, stop)
 
-    out, filled, unpriced = {}, [], []
-    tot_charged = tot_discharged = tot_result = 0.0
+    rows, filled, unpriced = [], [], []
     for day in days:
         row = energy.get(day)
+        derived = False
         if row and "charge_kwh_api" in row and "discharge_kwh_api" in row:
             charged, discharged = row["charge_kwh_api"], row["discharge_kwh_api"]
         else:
             charged, discharged = energy_from_readings(
                 query_api, bucket, sys_sn, day, max_gap_s)
-            if charged or discharged:
-                filled.append(day)
-            else:
-                # No stored row and nothing in power_readings either: a day
-                # before the record begins, or a total collector outage. Left
-                # out of `days` entirely rather than sent as a zero day, which
-                # would read as "the battery did nothing" instead of "we were
-                # not watching".
+            if not charged and not discharged:
+                # Nothing stored and nothing measured: a day before the record
+                # begins, or a total outage. Omitted entirely rather than sent
+                # as zeros, which would read as "the battery did nothing" when
+                # the truth is "we were not watching".
                 continue
+            derived = True
+            filled.append(day)
         result = savings.get(day, {}).get("saving")
         if result is None:
             unpriced.append(day)
-            result = 0.0
-        out[f"{day.day:02d}"] = {
-            "batteryCharged": round(charged, 3),
-            "batteryDischarged": round(discharged, 3),
-            "batteryResult": round(result, 4),
-        }
-        tot_charged += charged
-        tot_discharged += discharged
-        tot_result += result
-
-    payload = {
-        "yearMonth": f"{year:04d}-{month:02d}",
-        "batteryCharged": round(tot_charged, 3),
-        "batteryDischarged": round(tot_discharged, 3),
-        "batteryResult": round(tot_result, 4),
-        "days": out,
-    }
-    return payload, {"days": sorted(out), "filled": filled, "unpriced": unpriced}
+        rows.append({"day": day, "charged": charged, "discharged": discharged,
+                     "result": result, "derived": derived})
+    return rows, {"days": [r["day"] for r in rows], "filled": filled,
+                  "unpriced": unpriced, "expected": len(days)}
 
 
 def cycles(discharge_kwh: float, capacity_kwh: float, offset: float = 0.0) -> float:
@@ -534,32 +528,144 @@ def cycles(discharge_kwh: float, capacity_kwh: float, offset: float = 0.0) -> fl
 # Payload
 # --------------------------------------------------------------------------
 
+def _s(value: float, dp: int = 2) -> str:
+    """Format a number the way this API wants it: as a STRING.
+
+    Every numeric field in the spec is typed `string` -- batteryResult "8.80",
+    chargedToday "11", totalBatteryCycles "143". /api/live happens to tolerate
+    real JSON numbers, which is why this went unnoticed until
+    /api/results/monthly refused a payload outright; matching the declared type
+    removes the question.
+    """
+    return f"{value:.{dp}f}"
+
+
+def grid_energy_kwh(samples: list[Sample],
+                    max_gap_s: float = DEFAULT_MAX_SAMPLE_GAP_S) -> tuple[float, float]:
+    """(imported_kwh, exported_kwh) from the grid signal.
+
+    pgrid is positive while importing, so _accumulate's buckets already line up.
+    Integrated straight from power_readings rather than taken from
+    compute_day(), so the two figures survive a day the price feed cannot cover
+    -- they are measurements, and nothing about them depends on a price.
+    """
+    bucket = [0.0, 0.0]
+    for a, b in zip(samples, samples[1:]):
+        seconds = (b.time - a.time).total_seconds()
+        if seconds > max_gap_s:
+            continue
+        _accumulate(bucket, seconds / 3600.0, a.grid, b.grid)
+    return bucket[0] / 1000.0, bucket[1] / 1000.0
+
+
+def pv_energy_kwh(samples: list[Sample],
+                  max_gap_s: float = DEFAULT_MAX_SAMPLE_GAP_S) -> float:
+    """kWh generated by the panels. ppv is one-directional, so only the
+    import bucket is ever filled."""
+    bucket = [0.0, 0.0]
+    for a, b in zip(samples, samples[1:]):
+        seconds = (b.time - a.time).total_seconds()
+        if seconds > max_gap_s:
+            continue
+        _accumulate(bucket, seconds / 3600.0, a.pv, b.pv)
+    return bucket[0] / 1000.0
+
+
 def build_payload(*, latest: Sample, charged_kwh: float, discharged_kwh: float,
                   result_today: float, result_total: float, cycle_count: float,
                   mode: str, load_balancing: bool,
-                  charge_positive: bool = True) -> dict:
-    """The POST /api/live body. Pure: everything it needs is an argument.
+                  imported_kwh: float = 0.0, exported_kwh: float = 0.0,
+                  solar_kwh: float = 0.0, invalid: bool = False,
+                  test: bool = False, charge_positive: bool = True) -> dict:
+    """The POST /api/live body, per the published OpenAPI spec.
 
-    An empty `mode` OMITS the field rather than sending "". The platform's own
-    profile page carries the mode as a setting (Modus, e.g.
-    "Handmatig/doe-het-zelf") alongside the control provider (Aansturing, e.g.
-    Frank Energie), and validates any mode it is sent against that provider's
-    own set -- which is not published, and rejected `self_consumption` outright
-    for frank-energie on the first live submission. Not sending the field lets
-    the profile stand, which is where the answer already is.
+    Every numeric field is a string there, `loadBalancingActive` is 'on'/'off'
+    rather than a boolean, and there is no `batteryPower` field at all -- the
+    original payload here carried one, reverse-engineered from a third-party
+    integration's example, and the API was simply ignoring it. `batteryCharge`
+    is the state of charge and is the only battery-side instantaneous value the
+    API takes, which is why charge_positive no longer changes what is sent.
+
+    `batteryResult` is defined as batteryResultImbalance + batterySavings.
+    Nothing here trades imbalance, so the two are the same number and both are
+    sent: the saving against the no-battery counterfactual.
     """
-    power = -latest.battery if charge_positive else latest.battery
     payload = {
         "timestamp": latest.time.astimezone(dt.UTC).isoformat(),
-        "batteryResult": round(result_today, 4),
-        "batteryResultTotal": round(result_total, 4),
-        "batteryCharge": round(latest.soc, 1),
-        "batteryPower": round(power),
-        "chargedToday": round(charged_kwh, 3),
-        "dischargedToday": round(discharged_kwh, 3),
-        "totalBatteryCycles": round(cycle_count, 2),
-        "loadBalancingActive": load_balancing,
+        "batteryResult": _s(result_today),
+        "batteryResultTotal": _s(result_total),
+        "batterySavings": _s(result_today),
+        "batteryCharge": _s(latest.soc, 1),
+        "chargedToday": _s(charged_kwh, 3),
+        "dischargedToday": _s(discharged_kwh, 3),
+        "gridImportToday": _s(imported_kwh, 3),
+        "gridExportToday": _s(exported_kwh, 3),
+        "solarKwhGenerated": _s(solar_kwh, 3),
+        "totalBatteryCycles": _s(cycle_count),
+        "loadBalancingActive": "on" if load_balancing else "off",
     }
+    if invalid:
+        # The spec has a field for exactly the days this service already knows
+        # are shaky -- a gap it refused to integrate across, or a price feed too
+        # thin to price the day. Better to publish the number and flag it than
+        # to publish it silently or withhold it.
+        payload["invalid"] = True
+    if mode:
+        payload["mode"] = mode
+    if test:
+        payload["test"] = True
+    return payload
+
+
+def build_daily(*, day: dt.date, charged_kwh: float, discharged_kwh: float,
+                result: float | None, mode: str = "", invalid: bool = False,
+                test: bool = False, note: str = "") -> dict:
+    """The POST /api/results/daily body for one finished local day.
+
+    This is where per-day history goes. /api/results/monthly takes month TOTALS
+    and has no per-day structure at all -- the `days` map this repo first sent
+    was invented, which is what the endpoint refused.
+
+    `finalized` is deliberately never set: the spec says a finalized result can
+    never be updated again, and a day here can legitimately improve when its
+    nightly daily_cost row lands.
+    """
+    payload = {
+        "date": day.isoformat(),
+        "batteryResult": _s(result or 0.0),
+        "batterySavings": _s(result or 0.0),
+        "chargedToday": _s(charged_kwh, 3),
+        "dischargedToday": _s(discharged_kwh, 3),
+    }
+    if invalid or result is None:
+        payload["invalid"] = True
+    if note:
+        payload["note"] = note
+    if mode:
+        payload["mode"] = mode
+    if test:
+        payload["test"] = True
+    return payload
+
+
+def build_month_totals(*, year: int, month: int, charged_kwh: float,
+                       discharged_kwh: float, result: float, partial: bool,
+                       mode: str = "", note: str = "") -> dict:
+    """The POST /api/results/monthly body: totals only, no per-day breakdown."""
+    payload = {
+        "yearMonth": f"{year:04d}-{month:02d}",
+        "batteryResult": _s(result),
+        "batterySavings": _s(result),
+        "batteryCharged": _s(charged_kwh, 3),
+        "batteryDischarged": _s(discharged_kwh, 3),
+    }
+    if partial:
+        # True when the month is not fully covered -- the record starts partway
+        # in, days are missing, or the month is still running. Without it a
+        # short month reads as a bad month rather than an incomplete one.
+        payload["partial"] = True
+    if note:
+        payload["note"] = note
     if mode:
         payload["mode"] = mode
     return payload
@@ -678,6 +784,8 @@ def collect(query_api, *, bucket: str, sys_sn: str, totals: Totals, config: dict
         return None, "stale"
 
     charged, discharged, skipped_s = battery_energy_kwh(samples, config["max_gap_s"])
+    imported, exported = grid_energy_kwh(samples, config["max_gap_s"])
+    solar = pv_energy_kwh(samples, config["max_gap_s"])
     if skipped_s:
         log.warning("Skipped %.0fs of gaps > %.0fs; chargedToday/dischargedToday "
                     "under-report today by an unknown amount",
@@ -721,6 +829,12 @@ def collect(query_api, *, bucket: str, sys_sn: str, totals: Totals, config: dict
         result_today=result_today, result_total=saving_total + result_today,
         cycle_count=cycle_count, mode=config["mode"],
         load_balancing=config["load_balancing"],
+        imported_kwh=imported, exported_kwh=exported, solar_kwh=solar,
+        # The two conditions this service already detects and previously only
+        # logged: energy it refused to integrate across a gap, and a euro figure
+        # suppressed for want of prices. The API has a field for it.
+        invalid=bool(skipped_s) or price_coverage < pricing.MIN_PRICE_COVERAGE,
+        test=config["test"],
         charge_positive=config["charge_positive"],
     )
     return Snapshot(payload, latest, age, len(samples), skipped_s,
@@ -776,8 +890,14 @@ def submit(session: requests.Session, api_key: str, payload: dict,
 
 def submit_monthly(session: requests.Session, api_key: str, payload: dict,
                    base_url: str = API_BASE, timeout: float = DEFAULT_TIMEOUT_S) -> int:
-    """POST one month's finished results."""
+    """POST one month's totals. No per-day structure -- see build_month_totals."""
     return _post(session, api_key, MONTHLY_PATH, payload, base_url, timeout)
+
+
+def submit_daily(session: requests.Session, api_key: str, payload: dict,
+                 base_url: str = API_BASE, timeout: float = DEFAULT_TIMEOUT_S) -> int:
+    """POST one finished day's result."""
+    return _post(session, api_key, DAILY_PATH, payload, base_url, timeout)
 
 
 def fetch_rank(session: requests.Session, api_key: str, base_url: str = API_BASE,
@@ -838,16 +958,23 @@ def status_point(snapshot: Snapshot | None, sys_sn: str, outcome: str,
         point = point.field("status_code", float(status_code))
     if snapshot is not None:
         p = snapshot.payload
+        # float() because the payload holds strings: the API types every
+        # numeric field as one. InfluxDB wants numbers, so the conversion
+        # happens here rather than the payload carrying two representations.
         for key, field in (
             ("batteryResult", "battery_result"),
             ("batteryResultTotal", "battery_result_total"),
             ("batteryCharge", "battery_charge"),
-            ("batteryPower", "battery_power"),
             ("chargedToday", "charged_today"),
             ("dischargedToday", "discharged_today"),
+            ("gridImportToday", "grid_import_today"),
+            ("gridExportToday", "grid_export_today"),
+            ("solarKwhGenerated", "solar_kwh_generated"),
             ("totalBatteryCycles", "total_battery_cycles"),
         ):
-            point = point.field(field, float(p[key]))
+            if key in p:
+                point = point.field(field, float(p[key]))
+        point = point.field("invalid", 1.0 if p.get("invalid") else 0.0)
         point = point.field("sample_age_s", round(snapshot.age_s, 1))
         point = point.field("sample_count", float(snapshot.sample_count))
         point = point.field("gap_skipped_s", round(snapshot.skipped_s, 1))
@@ -884,6 +1011,22 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK") -> None:
 # Orchestration
 # --------------------------------------------------------------------------
 
+def _mode_env() -> str:
+    """MIJNBATTERIJ_MODE, checked against the spec's enum.
+
+    Empty = do not send the field, which is the default and lets the profile
+    page's own Modus stand. A value outside MODES is refused here rather than
+    at the API, where it comes back as a 400 every cycle for as long as it
+    takes someone to read the log.
+    """
+    mode = _str_env("MIJNBATTERIJ_MODE", "")
+    if mode and mode not in MODES:
+        log.error("MIJNBATTERIJ_MODE=%r is not one of %s -- sending no mode and "
+                  "letting the profile page decide", mode, ", ".join(MODES))
+        return ""
+    return mode
+
+
 def load_config() -> dict:
     capacity = _num_env("BATTERY_CAPACITY_KWH", 0.0)
     if capacity <= 0:
@@ -899,12 +1042,16 @@ def load_config() -> dict:
         # Left empty in .env by default so the ceiling tracks POLL_INTERVAL_SECONDS
         # instead of being pinned to whatever 3x it was on the day it was written.
         "max_gap_s": _num_env("MIJNBATTERIJ_MAX_SAMPLE_GAP_S", DEFAULT_MAX_SAMPLE_GAP_S),
+        # Set by --test: the API validates the payload and stores nothing, so
+        # a new integration can be checked against the real endpoint rather
+        # than against a guess at its schema.
+        "test": False,
         "capacity_kwh": capacity,
         "cycles_offset": _num_env("MIJNBATTERIJ_CYCLES_OFFSET", 0.0),
         # Empty = do not send `mode` at all. Deliberately the default: the
         # profile page already holds it, and a guessed value is validated
         # server-side against a provider-specific set nobody has published.
-        "mode": _str_env("MIJNBATTERIJ_MODE", ""),
+        "mode": _mode_env(),
         "load_balancing": _bool_env("MIJNBATTERIJ_LOAD_BALANCING", False),
         "charge_positive": _bool_env("MIJNBATTERIJ_CHARGE_POSITIVE", True),
         "base_url": _str_env("MIJNBATTERIJ_BASE_URL", API_BASE).rstrip("/"),
@@ -942,52 +1089,83 @@ def run_once(query_api, write_api, session, *, bucket: str, sys_sn: str,
             exc.status, now))
         raise
     _write(write_api, bucket, status_point(snapshot, sys_sn, "ok", status, now))
-    log.info("Submitted: soc=%.1f%% power=%dW charged=%.2fkWh discharged=%.2fkWh "
-             "result=€%.4f total=€%.2f",
-             snapshot.payload["batteryCharge"], snapshot.payload["batteryPower"],
-             snapshot.payload["chargedToday"], snapshot.payload["dischargedToday"],
-             snapshot.payload["batteryResult"], snapshot.payload["batteryResultTotal"])
+    p = snapshot.payload
+    log.info("Submitted: soc=%s%% charged=%s kWh discharged=%s kWh grid +%s/-%s kWh "
+             "result=€%s total=€%s%s",
+             p["batteryCharge"], p["chargedToday"], p["dischargedToday"],
+             p["gridImportToday"], p["gridExportToday"], p["batteryResult"],
+             p["batteryResultTotal"], " [invalid]" if p.get("invalid") else "")
     return snapshot, "ok"
 
 
-def run_monthly(query_api, write_api, session, *, bucket: str, sys_sn: str,
-                api_key: str, config: dict, months: list[tuple[int, int]],
-                dry_run: bool, now: dt.datetime | None = None) -> None:
-    """Backfill finished months to /api/results/monthly."""
+def run_backfill(query_api, write_api, session, *, bucket: str, sys_sn: str,
+                 api_key: str, config: dict, months: list[tuple[int, int]],
+                 dry_run: bool, now: dt.datetime | None = None) -> None:
+    """Backfill finished days and months.
+
+    Two endpoints, in that order: each day to /api/results/daily, then the
+    month's totals to /api/results/monthly. The monthly endpoint carries no
+    per-day structure -- sending one is what earned a 400 -- so the daily posts
+    are the history and the monthly post is the summary over it.
+    """
     now = dt.datetime.now(dt.UTC) if now is None else now
     yesterday = now.astimezone(NL_TZ).date() - dt.timedelta(days=1)
     for year, month in months:
-        payload, report = build_monthly(
+        rows, report = build_month(
             query_api, bucket=bucket, sys_sn=sys_sn, year=year, month=month,
             until=yesterday, max_gap_s=config["max_gap_s"])
-        if not payload or not payload["days"]:
-            log.warning("%04d-%02d: no finished days with data, nothing to send",
-                        year, month)
+        label = f"{year:04d}-{month:02d}"
+        if not rows:
+            log.warning("%s: no finished days with data, nothing to send", label)
             continue
-        log.info("%s: %d days, charged %.1f kWh, discharged %.1f kWh, result €%.2f",
-                 payload["yearMonth"], len(payload["days"]), payload["batteryCharged"],
-                 payload["batteryDischarged"], payload["batteryResult"])
+
+        charged = sum(r["charged"] for r in rows)
+        discharged = sum(r["discharged"] for r in rows)
+        result = sum(r["result"] or 0.0 for r in rows)
+        # Partial when the month is not fully covered: days omitted for want of
+        # any data, or days whose euro figure was suppressed. Without the flag a
+        # short month reads as a bad month rather than an incomplete one.
+        partial = len(rows) < report["expected"] or bool(report["unpriced"])
+
+        log.info("%s: %d/%d days, charged %.1f kWh, discharged %.1f kWh, result €%.2f%s",
+                 label, len(rows), report["expected"], charged, discharged, result,
+                 " (partial)" if partial else "")
         if report["filled"]:
             log.info("%s: %d day(s) had no daily_energy row and were integrated from "
-                     "power_readings: %s", payload["yearMonth"], len(report["filled"]),
+                     "power_readings: %s", label, len(report["filled"]),
                      ", ".join(str(d) for d in report["filled"]))
         if report["unpriced"]:
-            # Named rather than summarised: each is a day pricing.gate() threw
-            # out, so each is worth knowing about on its own.
-            log.warning("%s: %d day(s) have no stored daily_cost row and were sent "
-                        "with batteryResult 0.00: %s -- the month's euro total is "
-                        "short by whatever those days were worth",
-                        payload["yearMonth"], len(report["unpriced"]),
+            # Named rather than counted: each is a day pricing.gate() threw out,
+            # so each is worth knowing about on its own.
+            log.warning("%s: %d day(s) have no stored daily_cost row, sent as €0.00 "
+                        "flagged invalid: %s -- the month's euro total is short by "
+                        "whatever those days were worth", label, len(report["unpriced"]),
                         ", ".join(str(d) for d in report["unpriced"]))
-        print(json.dumps(payload, indent=2))
+
+        day_payloads = [
+            build_daily(day=r["day"], charged_kwh=r["charged"],
+                        discharged_kwh=r["discharged"], result=r["result"],
+                        mode=config["mode"], invalid=r["derived"], test=config["test"])
+            for r in rows
+        ]
+        month_payload = build_month_totals(
+            year=year, month=month, charged_kwh=charged, discharged_kwh=discharged,
+            result=result, partial=partial, mode=config["mode"])
+
         if dry_run:
-            log.info("%s: dry run, not submitting", payload["yearMonth"])
+            print(json.dumps({"daily": day_payloads, "monthly": month_payload}, indent=2))
+            log.info("%s: dry run, not submitting", label)
             continue
-        status = submit_monthly(session, api_key, payload,
+
+        for payload in day_payloads:
+            submit_daily(session, api_key, payload,
+                         base_url=config["base_url"], timeout=config["timeout_s"])
+        log.info("%s: submitted %d daily results", label, len(day_payloads))
+        status = submit_monthly(session, api_key, month_payload,
                                 base_url=config["base_url"], timeout=config["timeout_s"])
         _write(write_api, bucket, status_point(
             None, sys_sn, "monthly-ok", status, dt.datetime.now(dt.UTC)))
-        log.info("%s: submitted (HTTP %d)", payload["yearMonth"], status)
+        log.info("%s: submitted month totals (HTTP %d)", label, status)
 
 
 def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
@@ -1115,6 +1293,9 @@ def main() -> None:
                         help="Build one payload, print it, submit, and exit")
     parser.add_argument("--dry-run", action="store_true",
                         help="Build and print the payload but do not submit")
+    parser.add_argument("--test", action="store_true",
+                        help="Submit for real but with the API's `test` flag set: it "
+                             "validates the payload and stores nothing")
     parser.add_argument("--monthly", nargs="+", metavar="YYYY-MM",
                         help="Backfill finished months to /api/results/monthly and exit. "
                              "Only whole past days are sent; today belongs to --once.")
@@ -1157,6 +1338,7 @@ def main() -> None:
     bucket = env("INFLUX_BUCKET")
     sys_sn = env("ALPHAESS_SYS_SN")
     config = load_config()
+    config["test"] = args.test
 
     # INFLUX_TOKEN_MIJNBATTERIJ is `:-` in docker-compose.yml rather than `:?`,
     # so that an unminted token cannot block every compose subcommand on the NAS
@@ -1183,9 +1365,9 @@ def main() -> None:
 
     try:
         if months:
-            run_monthly(query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
-                        api_key=api_key, config=config, months=months,
-                        dry_run=args.dry_run)
+            run_backfill(query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
+                         api_key=api_key, config=config, months=months,
+                         dry_run=args.dry_run)
         elif args.once:
             run_once(query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
                      api_key=api_key, config=config, totals=Totals(config["totals_ttl_s"]),

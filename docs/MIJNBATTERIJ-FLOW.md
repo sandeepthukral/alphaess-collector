@@ -49,17 +49,38 @@ flowchart TD
 
 ## Where each field comes from
 
+Field names, types and presence follow the published OpenAPI spec —
+[onbalansmarkt.com/help/api-docs/](https://onbalansmarkt.com/help/api-docs/),
+machine-readable at `/help/api-docs/public-schema`. **Every numeric field is a
+string there**, `loadBalancingActive` is an `on`/`off` enum, and there is no
+`batteryPower` field at all.
+
 | Payload field | Source | Note |
 |---|---|---|
 | `timestamp` | newest `power_readings` sample | the measurement's time, never the submission's |
-| `batteryCharge` | `soc_percent` | |
-| `batteryPower` | `battery_power_w` | **sign flipped by default.** AlphaESS `pbat` is + while discharging; sent charge-positive unless `MIJNBATTERIJ_CHARGE_POSITIVE=0` |
-| `chargedToday` / `dischargedToday` | `battery_power_w` integrated from local midnight | via `pricing._accumulate`, so an interval that crosses zero lands in both totals instead of netting; gaps beyond `MIJNBATTERIJ_MAX_SAMPLE_GAP_S` are skipped, never interpolated |
-| `batteryResult` | `pricing.compute_day()['saving']` over today so far | the same two-world model `daily_cost` stores, ungated |
+| `batteryCharge` | `soc_percent` | the only battery-side instantaneous value the API takes |
+| `chargedToday` / `dischargedToday` | `battery_power_w` integrated from local midnight | via `pricing._accumulate`, so an interval crossing zero lands in both totals instead of netting; gaps beyond `MIJNBATTERIJ_MAX_SAMPLE_GAP_S` are skipped, never interpolated |
+| `gridImportToday` / `gridExportToday` | `grid_power_w`, same integration | enables the platform's 15-minute household energy tracking. Measurements, so they survive a day the price feed cannot cover |
+| `solarKwhGenerated` | `pv_power_w`, same integration | |
+| `batteryResult`, `batterySavings` | `pricing.compute_day()['saving']` over today so far | the spec defines `batteryResult = batteryResultImbalance + batterySavings`; nothing here trades imbalance, so the two are one number |
 | `batteryResultTotal` | Σ stored `daily_cost.saving` at the current `model_version`, + today | |
 | `totalBatteryCycles` | (Σ `daily_energy.discharge_kwh_api` + today) / `BATTERY_CAPACITY_KWH` + `MIJNBATTERIJ_CYCLES_OFFSET` | throughput-equivalent, not an event count |
-| `mode` | `MIJNBATTERIJ_MODE` | **omitted when blank, which is the default.** The profile's own Modus field (`Handmatig/doe-het-zelf`) already says it; a sent mode is validated against the Aansturing provider's unpublished set |
-| `loadBalancingActive` | `MIJNBATTERIJ_LOAD_BALANCING` | nothing in this stack does load balancing |
+| `loadBalancingActive` | `MIJNBATTERIJ_LOAD_BALANCING` | `"on"` / `"off"`; nothing in this stack does load balancing |
+| `invalid` | set when a gap was skipped, or price coverage fell short | the spec's own flag for a figure that may be incomplete — better than publishing it silently or withholding it |
+| `mode` | `MIJNBATTERIJ_MODE` | **omitted when blank, which is the default.** The spec says it *overrides* the profile page's Modus (`Handmatig/doe-het-zelf`), and which enum values an account may use varies by provider |
+| `test` | `--test` | asks the API to validate and store nothing |
+
+### What the reverse-engineered payload got wrong
+
+The integration was first built from a third-party example, before the 400 from
+`/api/results/monthly` named the docs. Four differences, none of which the live
+endpoint complained about:
+
+- numeric fields were sent as JSON numbers, not strings
+- `loadBalancingActive` was a boolean, not `"on"` / `"off"`
+- `batteryPower` was sent every cycle and **is not in the spec** — silently ignored
+- per-day history was a `days` map on the monthly payload; it belongs in
+  `POST /api/results/daily`, and the invented field is what earned the 400
 
 ## Why `gate()` is not applied to today
 
@@ -184,10 +205,11 @@ has reset to ~0 — dropping `totalBatteryCycles` by a full day's throughput, an
 skipping the fill above that exists precisely to prevent that. A TTL alone
 cannot see a day boundary, so `Totals` compares `day_start` as well.
 
-## Backfilling months: `--monthly`
+## Backfilling history: `--monthly`
 
-`/api/live` carries today. `POST /api/results/monthly` carries finished months,
-built by `build_monthly()` from the same two sources the live path uses.
+`/api/live` carries today. History goes to **two** endpoints, and the split is
+the thing the original version got wrong: `/api/results/daily` takes the per-day
+figures, `/api/results/monthly` takes month totals and has no per-day structure.
 
 ```mermaid
 flowchart TD
@@ -197,33 +219,39 @@ flowchart TD
     C --> E{row for this day?}
     E -- yes --> F["use AlphaESS's own totals"]
     E -- no --> G["energy_from_readings()<br/>integrate power_readings"]
-    G --> H{"anything there?"}
-    H -- no --> OMIT["day left out of `days` entirely"]
-    H -- yes --> F
+    G --> H{anything there?}
+    H -- no --> OMIT["day omitted entirely"]
+    H -- yes --> F2["derived = invalid: true"]
     F --> I{stored daily_cost row?}
+    F2 --> I
     I -- yes --> J["batteryResult = saving"]
-    I -- no --> K["batteryResult = 0.00<br/>day named in the report"]
-    J --> L["sum into month totals<br/>POST /api/results/monthly"]
+    I -- no --> K["batteryResult 0.00<br/>invalid: true, day named in the log"]
+    J --> L["POST /api/results/daily, one per day"]
     K --> L
+    L --> M["POST /api/results/monthly<br/>totals only, partial: true if short"]
 
     classDef skip fill:#eceef0,stroke:#6b7280,color:#374151;
-    class OMIT,K skip;
+    class OMIT,K,F2 skip;
 ```
 
 **Energy gaps are repaired, euro gaps are not.** A day `daily_energy` has no row
 for is integrated out of `power_readings`, exactly as the cycle count does —
-those gaps are real (five days in August 2026) and a month total that omits them
-is wrong rather than incomplete. A day `pricing.gate()` rejected is sent as
-€0.00 and never recomputed ungated, for the reason `stored_saving_total` gives:
-an estimate on a public leaderboard is a number no stored row can ever be
-reconciled against. Both sets of days are named in the log, so the shortfall is
-visible instead of absorbed.
+those gaps are real (four days in August 2026) and a month total that omits them
+is wrong rather than incomplete; the day goes out flagged `invalid`. A day
+`pricing.gate()` rejected is sent as €0.00, also flagged, and never recomputed
+ungated, for the reason `stored_saving_total` gives: an estimate on a public
+leaderboard is a number no stored row can ever be reconciled against. Both sets
+are named in the log, so the shortfall is visible instead of absorbed.
 
-**A day with nothing anywhere is omitted from `days`, not sent as zero.** A zero
-day reads as "the battery did nothing"; the truth is "we were not watching", and
-the platform cannot tell those apart from a row of zeros.
+**A day with nothing anywhere is omitted, not sent as zero.** A zero day reads
+as "the battery did nothing"; the truth is "we were not watching", and the
+platform cannot tell those apart from a row of zeros.
 
-**Today is capped out.** `until` is yesterday. Today is still moving and belongs
-to `/api/live`; sending it here would publish a part-day as a whole one and then
-disagree with the live figure for the rest of the day. Re-running a month is how
-a day gets corrected once its nightly row lands.
+**Nothing is ever sent `finalized`.** The spec makes that permanent — a
+finalized result can never be updated — and a day here legitimately improves
+once its nightly `daily_cost` row lands. Re-running a month is the repair, and
+is safe.
+
+**Today is capped out.** `until` is yesterday. The spec requires the daily
+endpoint's `date` to be before today in Europe/Amsterdam, and today belongs to
+`/api/live` in any case.

@@ -847,30 +847,46 @@ reference for this API, so it is the only description of the schema anyone has.
 
 ### Backfilling finished months
 
-`/api/live` publishes today. Past months go through `/api/results/monthly`, one
-month per call:
+`/api/live` publishes today. History goes to two other endpoints, and the split
+matters: **`/api/results/daily` carries the per-day figures, and
+`/api/results/monthly` carries month TOTALS only.** The monthly endpoint has no
+per-day structure at all — an earlier version of this integration sent a `days`
+map reverse-engineered from a third-party example and got
+`400 Invalid request provided` for it.
 
 ```sh
 cd /volume1/docker/alphaess-collector
 git pull
-sudo docker compose build mijnbatterij
+sudo docker compose build mijnbatterij collector
 sudo docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --dry-run
 ```
 
 **`compose run` does not build.** It uses whatever image already exists, so a
 `git pull` on its own leaves you running the code from the last build — which
 surfaces as `error: unrecognized arguments: --monthly`, i.e. an image predating
-the flag rather than anything wrong with the command. `build` first whenever the
-source has moved.
+the flag rather than anything wrong with the command. Build first whenever the
+source has moved, and build `collector` too: Compose builds one image per
+service, so despite the shared `./collector` build context they are two images
+and `pricing.py` runs from the other one.
 
-That prints the exact body and posts nothing. Read the two warnings it can emit
-before dropping `--dry-run`:
+`--dry-run` prints the exact bodies and contacts nothing. To check them against
+the real API without storing anything, use the API's own testing flag instead:
+
+```sh
+sudo docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08 --test
+```
+
+`--test` sets `test: true` on every day payload, which the API validates and
+discards. That is the honest way to confirm a schema change — there is a
+published spec now (below), but it is the server that decides.
+
+Read the two warnings before submitting for real:
 
 - **"had no daily_energy row and were integrated from power_readings"** — the
-  same repair the live path makes. Fine, and named so you can see which days
-  rest on the derived series rather than on AlphaESS's own totals.
-- **"have no stored daily_cost row and were sent with batteryResult 0.00"** —
-  the month's euro total is short by those days. Check *why* before publishing,
+  same repair the live path makes. Those days go out flagged `invalid`, which
+  is the spec's own field for a figure that may be incomplete.
+- **"have no stored daily_cost row, sent as €0.00 flagged invalid"** — the
+  month's euro total is short by those days. Check *why* before publishing,
   because the two causes have different answers:
 
   ```sh
@@ -882,60 +898,73 @@ before dropping `--dry-run`:
   it stays €0.00, deliberately, for the reason in
   [docs/MIJNBATTERIJ-FLOW.md](docs/MIJNBATTERIJ-FLOW.md). A day that computes a
   saving cleanly simply has not been written yet, because the nightly job has
-  not run since. Write it, then submit:
+  not run since. Write it first, then submit:
 
   ```sh
   sudo docker compose run --rm collector python pricing.py --date 2026-08-31
   sudo docker compose run --rm mijnbatterij python mijnbatterij.py --monthly 2026-08
   ```
 
-  `pricing.py` runs from the `collector` image, which is built separately from
-  `mijnbatterij`'s despite the shared `./collector` build context — Compose
-  builds one image per service. After a pull that touches `collector/`, build
-  both or neither will have the change.
-
 On 2026-09-01 this installation's August came to 31 days, 747.4 kWh charged,
-713.5 kWh discharged, €113.47 — with 2026-08-29 at €0.00 (gated, coverage 0.808
-after a 35-minute outage) and five days' energy derived from `power_readings`.
+713.6 kWh discharged, €115.25, marked `partial` because 2026-08-29 carries no
+euro figure (gated at coverage 0.808 after a 35-minute outage) and four days'
+energy is derived from `power_readings`.
 
 **Only whole past days are sent.** Today is capped out of the payload: it is
-still moving, and it belongs to `/api/live`. Re-running a month is safe and is
-how a day gets corrected once its nightly row lands — the platform takes the
-newest submission for that month.
+still moving, it belongs to `/api/live`, and the spec requires the daily
+endpoint's `date` to be before today in Europe/Amsterdam anyway. Re-running a
+month is safe and is how a day gets corrected once its nightly row lands —
+nothing is ever sent `finalized`, which the spec makes permanent.
+
+### The API is documented, after all
+
+A 400 from the monthly endpoint named
+[https://onbalansmarkt.com/help/api-docs/](https://onbalansmarkt.com/help/api-docs/),
+which is a Quarkus OpenAPI UI; the machine-readable spec is at
+`/help/api-docs/public-schema` (YAML, despite the JSON-ish path). It is the only
+authoritative description of this API and it contradicts the reverse-engineered
+payload this integration started from in four ways:
+
+| | Reverse-engineered | Actually |
+|---|---|---|
+| numeric fields | JSON numbers | **strings** — `"8.80"`, `"143"` |
+| `loadBalancingActive` | boolean | **`"on"` / `"off"`** |
+| `batteryPower` | sent every cycle | **does not exist**; the API ignored it |
+| per-day history | `days` map on monthly | **`POST /api/results/daily`** |
+
+It also documents fields worth sending that nobody had guessed: `gridImportToday`
+and `gridExportToday` (which enable the platform's 15-minute household energy
+tracking), `solarKwhGenerated`, `batterySavings`, `invalid`, `partial`, `note`,
+and the `test` flag above. All of those are now populated from data this stack
+already holds.
 
 ### What `mode` should say — nothing, by default
 
-`MIJNBATTERIJ_MODE` is **blank** by default, which omits the field from the
-payload entirely. That is not timidity, it is where the answer actually lives:
-the profile page carries **Modus** (`Handmatig/doe-het-zelf`) as a setting in
-its own right, beside **Aansturing** (`Frank Energie`). Two different fields —
-Aansturing is who supplies the control, Modus is how the battery is driven — and
-it is Modus, not Aansturing, that says this installation is self-dispatched.
+`MIJNBATTERIJ_MODE` is **blank** by default, which omits the field. The spec is
+explicit about why that is right: mode "can be provided to **override** the mode
+configured on the profile page". The profile already carries **Modus**
+(`Handmatig/doe-het-zelf`) beside **Aansturing** (`Frank Energie`) — two
+different fields, and it is Modus, not Aansturing, that says this installation
+is self-dispatched. Sending nothing lets it stand.
 
-The platform validates any mode it *is* sent against the provider's own set,
-which is not published anywhere. The first live submission from here asserted
-`self_consumption` and came back:
+The published enum is `imbalance`, `imbalance_aggressive`, `manual`,
+`day_ahead`, `self_consumption`, `self_consumption_plus`, and **which subset an
+account may use varies by provider**. The first live submission from here
+asserted `self_consumption` and came back:
 
 ```
 400 {"message":"Battery mode: self_consumption is not available for frank-energie"}
 ```
 
-So the profile was right and the payload was wrong. Sending nothing lets the
-profile stand.
-
-Set `MIJNBATTERIJ_MODE` only if the platform later asks for it, or if you want
-to report a mode that changes at runtime. The documented values are
-`self_consumption`, `self_consumption_plus` and `imbalance`; which of them a
-given Aansturing accepts is discoverable only by sending one and reading the
-rejection, and a 4xx repeats every cycle until a setting changes — the log says
-so on the first one rather than leaving it looking transient.
+If you ever do want to send one, `manual` is the value matching
+`Handmatig/doe-het-zelf`, and `day_ahead` describes what the dispatcher actually
+does. A value outside the enum is refused locally with a log line naming the
+valid set, rather than sent to earn a 400 every cycle:
 
 ```sh
 cd /volume1/docker/alphaess-collector
 sed -i 's|^MIJNBATTERIJ_MODE=.*|MIJNBATTERIJ_MODE=|' .env     # blank = omit
-grep '^MIJNBATTERIJ_MODE=' .env
-sudo docker compose up -d mijnbatterij
-sudo docker compose logs --tail 20 -f mijnbatterij
+sudo docker compose up -d --build mijnbatterij
 ```
 
 ## Backing up InfluxDB
