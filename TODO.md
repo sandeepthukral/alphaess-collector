@@ -145,35 +145,25 @@ clearly caveated, since neither has an independent confirmation source. No gate/
 change needed, just extending `decode_firmware_block`/`decode_inverter_fw_block`/
 `decode_system_config_block` in `registers.py`.
 
-**15. `FAULT_BLOCK` (`0x0131`-`0x0146`) has no derived "how many faults are active" summary,
-and needs one confirmed live before it gets one.** Raised in PR #129's review: a naive
-`sum(1 for w in words if w != 0)` looked safe because it needs no bit-level knowledge to
-compute, but the range itself was not confirmed to be fault/warning bits exclusively — if even
-one word in it turned out to be a normally-nonzero status value, counter, or nameplate figure
-rather than a fault flag, that count would pin itself at 1 or more permanently, which reads on
-the health dashboard as "faults active" forever and is worse than publishing no summary at
-all, because it looks confident. UPDATE 2026-08-28: better news than feared. AlphaESS's own
-"Parameter address table" (see item 13/14's update, same source) shows `0x0131`-`0x0148` is
-*exclusively* six 32-bit fault words and six 32-bit warning words — fault1-6 then warning1-6,
-nothing else interleaved — so a nonzero-word count is structurally safe once the block is
-sized correctly. It currently is not: `FAULT_BLOCK` is 22 words (`0x0131`-`0x0146`), which
-covers fault1-6 and warning1-5 but stops one warning short of the full block — extend it to 24
-words (`0x0131`-`0x0148`) to pick up warning6 before adding the count. Live values queried
-2026-08-28 read all zero across the current 22 words, consistent with "no active faults" and a
-readable, working block. Add the derived `active_fault_count` (a straight nonzero-word count
-over the full corrected block, no scoping needed now that every word's role is confirmed) and
-an "Active faults" stat to `alphaess-battery-health.json` row 1 in the same change — today that
-row has no fault summary tile at all.
-
-Also raised in the same review, and worth deciding alongside this rather than separately: the
-block is sampled once an hour (`HEALTH_REFRESH_S`, `scheduler.py` step 8c), with no latching,
-so a fault that raises and clears again inside that hour is never observed at all -- the
-dashboard would show clean the whole time. The hourly cadence itself was the handover's own
-choice, not something to second-guess before the block's contents are even confirmed, but once
-this item and item 14 settle what these words actually mean, it's worth asking then whether a
-genuinely fault-carrying word should be sampled every tick (like the temp block) or latched
-sticky ("seen nonzero since last hourly publish") rather than read only at the instant the gate
-fires.
+**15. The fault block is read once an hour, with no latching, so a fault that raises and
+clears inside that hour is never observed at all.** The rest of this item shipped on
+2026-09-02: `FAULT_BLOCK` is now the full 24 words (`0x0131`-`0x0148`, twelve 32-bit values,
+fault1-6 then warning1-6 -- it was 22, stopping one 32-bit value short, so warning6 was never
+read), `decode_fault_block` derives `active_fault_count`/`active_warning_count` as popcounts,
+and `alphaess-battery-health.json` leads with both as row-1 stats. What did not ship is a
+decision on cadence, because it is a real trade rather than an oversight. The hourly
+`HEALTH_REFRESH_S` gate (`scheduler.py` step 8c) was the handover's own choice, made when
+nobody knew what these words held; now that the block's shape is confirmed, the question is
+whether a genuinely fault-carrying word should be sampled every tick like the temp block, or
+latched sticky ("seen nonzero since the last hourly publish"), rather than read only at the
+instant the gate fires. Note that latching without sampling more often buys nothing -- a
+sticky flag can only latch what it saw -- so the two options are really "read every tick and
+publish the count" versus "read every tick, publish the count AND a since-last-publish high
+water mark". Both cost a Modbus round-trip every tick, which step 8c's own comment is why the
+gate exists. Worth resolving against how often the count is actually nonzero: it has read zero
+every time it has been looked at, so there is no evidence yet that transient faults happen
+here at all. Live values across the full 24 words were all zero on 2026-08-28 (22 words) and
+warning6 has still never been observed.
 
 ## Docs
 
