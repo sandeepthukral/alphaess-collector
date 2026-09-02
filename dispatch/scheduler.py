@@ -191,7 +191,7 @@ class Inverter:
         return list(r.registers)
 
     async def read_fault_block(self) -> list[int]:
-        """The 22 fault/warning words, verbatim. See `registers.FAULT_BLOCK`."""
+        """The 24 fault/warning words, verbatim. See `registers.FAULT_BLOCK`."""
         addr, count = R.FAULT_BLOCK
         try:
             r = await self.c.read_holding_registers(addr,

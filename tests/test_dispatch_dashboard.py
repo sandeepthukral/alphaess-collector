@@ -37,7 +37,8 @@ CONVERTS_TO_NUMBER = re.compile(r"_value:\s*(?:float|int)\(")
 # -5m/-10m already makes, just scaled to a slower cadence. Anything not named here is assumed
 # tick-cadence and held to that tight window.
 HOURLY_HEALTH_FIELD_PREFIXES = ("fault_raw_",)
-HOURLY_HEALTH_FIELDS = {"max_charge_power_w", "max_discharge_power_w"}
+HOURLY_HEALTH_FIELDS = {"max_charge_power_w", "max_discharge_power_w",
+                        "active_fault_count", "active_warning_count"}
 WEEKLY_HEALTH_FIELD_PREFIXES = ("firmware_raw_", "inverter_fw_raw_", "system_config_raw_")
 
 
@@ -431,6 +432,13 @@ class TestAllowedLastWindows:
     def test_the_republished_limits_get_the_hourly_window(self):
         assert _allowed_last_windows("max_charge_power_w") == {"-3h"}
         assert _allowed_last_windows("max_discharge_power_w") == {"-3h"}
+
+    def test_the_derived_fault_counts_get_the_hourly_window(self):
+        """They are derived from the fault block but do not carry its name prefix, so the
+        prefix rule above does not cover them -- and a tick-cadence window on an hourly field
+        reads as "no data" for fifty-nine minutes an hour."""
+        assert _allowed_last_windows("active_fault_count") == {"-3h"}
+        assert _allowed_last_windows("active_warning_count") == {"-3h"}
 
     def test_each_weekly_block_gets_the_weekly_window(self):
         assert _allowed_last_windows("firmware_raw_0115") == {"-10d"}

@@ -122,9 +122,12 @@ def _decision_fields(
         fields["min_cell_temp_pack"] = int(temps["min_cell_temp_pack"])
         fields["max_cell_temp_c"] = float(temps["max_cell_temp_c"])
         fields["max_cell_temp_pack"] = int(temps["max_cell_temp_pack"])
-    # `registers.FAULT_BLOCK`, hourly-gated (`scheduler.py` step 8c). No fault/warning bit is
-    # named, and no derived count either -- see that block's comment in `registers.py` -- so
-    # every word is published as-is, hex-keyed, and nothing else.
+    # `registers.FAULT_BLOCK`, hourly-gated (`scheduler.py` step 8c). No fault or warning BIT
+    # is named -- none is documented -- so every word goes out as-is, hex-keyed. What
+    # `decode_fault_block` adds on top is two popcounts, `active_fault_count` and
+    # `active_warning_count`: how many bits are set, which needs no bit-level knowledge, only
+    # the block's confirmed shape. They arrive in the same dict as the raw words and are
+    # published by the same update; the dashboard's "Active faults" tile reads the first.
     if faults is not None:
         fields.update({k: int(v) for k, v in faults.items()})
     # The inverter's own charge/discharge ceiling, already read hourly by `run()`'s

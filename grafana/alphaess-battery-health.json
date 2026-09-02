@@ -56,6 +56,144 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "How many fault bits are set across fault1-6 (0x0131-0x013C), counted hourly. Zero is the normal reading and the only good one. Which bit means what is undocumented, so this number is a prompt to read the raw fault/warning table below, not a diagnosis.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1.0
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 14,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"active_fault_count\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Active faults",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "How many warning bits are set across warning1-6 (0x013D-0x0148), counted hourly. Kept apart from the fault count on purpose: warning6 was outside the block this repo read until 2026-09-02, so if it carries a normally-set bit it pins this tile above zero -- and that must not be able to reach the fault tile.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1.0
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 15,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"active_warning_count\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Active warnings",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
       "description": "The battery level the dispatcher last read, same field the Dispatch dashboard shows.",
       "fieldConfig": {
         "defaults": {
@@ -80,8 +218,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 5,
-        "x": 0,
+        "w": 4,
+        "x": 12,
         "y": 0
       },
       "id": 1,
@@ -157,8 +295,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 5,
-        "x": 5,
+        "w": 4,
+        "x": 16,
         "y": 0
       },
       "id": 2,
@@ -230,8 +368,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 5,
-        "x": 10,
+        "w": 4,
+        "x": 20,
         "y": 0
       },
       "id": 3,
@@ -271,136 +409,6 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "The inverter's own charge ceiling, read hourly and republished here under the health dashboard's field names -- the same reading `slots.clamp` already uses to cap a command, not a fresh register read.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "decimals": null,
-          "mappings": [],
-          "noValue": "unreadable",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "watt"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 5,
-        "x": 15,
-        "y": 0
-      },
-      "id": 4,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"max_charge_power_w\")\n  |> last()\n",
-          "refId": "A"
-        }
-      ],
-      "title": "Max charge power limit",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
-      "description": "The inverter's own discharge ceiling, read hourly and republished under the health dashboard's field names. Independent of the charge limit above -- one being readable does not imply the other is.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "thresholds"
-          },
-          "decimals": null,
-          "mappings": [],
-          "noValue": "unreadable",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "text",
-                "value": null
-              }
-            ]
-          },
-          "unit": "watt"
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 0
-      },
-      "id": 5,
-      "options": {
-        "colorMode": "value",
-        "graphMode": "none",
-        "justifyMode": "auto",
-        "orientation": "auto",
-        "percentChangeColorMode": "standard",
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ],
-          "fields": "",
-          "values": false
-        },
-        "showPercentChange": false,
-        "textMode": "auto",
-        "wideLayout": true
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"max_discharge_power_w\")\n  |> last()\n",
-          "refId": "A"
-        }
-      ],
-      "title": "Max discharge power limit",
-      "type": "stat"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
       "description": "The lowest cell across the whole battery, tagged with which pack it is in. See dispatch/registers.py's VOLTAGE_BLOCK comment for the address this reads and how it was confirmed.",
       "fieldConfig": {
         "defaults": {
@@ -425,7 +433,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 12,
+        "w": 6,
         "x": 0,
         "y": 4
       },
@@ -490,8 +498,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 12,
-        "x": 12,
+        "w": 6,
+        "x": 6,
         "y": 4
       },
       "id": 13,
@@ -524,6 +532,136 @@
         }
       ],
       "title": "Max cell voltage",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The inverter's own charge ceiling, read hourly and republished here under the health dashboard's field names -- the same reading `slots.clamp` already uses to cap a command, not a fresh register read.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 4
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"max_charge_power_w\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Max charge power limit",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The inverter's own discharge ceiling, read hourly and republished under the health dashboard's field names. Independent of the charge limit above -- one being readable does not imply the other is.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": null,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "watt"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 4
+      },
+      "id": 5,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"max_discharge_power_w\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Max discharge power limit",
       "type": "stat"
     },
     {
@@ -794,7 +932,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "FAULT_BLOCK, 0x0131-0x0146, read hourly. No word here is confirmed to be a fault bit specifically rather than a counter or status value (TODO.md item 15), so there is no derived 'faults active' count -- only the raw words, to be checked against the AlphaESS app's own display.",
+      "description": "FAULT_BLOCK, 0x0131-0x0148, read hourly: twelve 32-bit words, fault1-6 then warning1-6, two registers each. Which BIT means what is undocumented, so nothing here is named -- when the Active faults tile is nonzero, this is where you find out which register it came from, to check against the AlphaESS app's own display.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -876,7 +1014,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"strings\"\n\nfrom(bucket: \"alphaess\")\n  |> range(start: -3h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and (r._field == \"fault_raw_0131\" or r._field == \"fault_raw_0132\" or r._field == \"fault_raw_0133\" or r._field == \"fault_raw_0134\" or r._field == \"fault_raw_0135\" or r._field == \"fault_raw_0136\" or r._field == \"fault_raw_0137\" or r._field == \"fault_raw_0138\" or r._field == \"fault_raw_0139\" or r._field == \"fault_raw_013a\" or r._field == \"fault_raw_013b\" or r._field == \"fault_raw_013c\" or r._field == \"fault_raw_013d\" or r._field == \"fault_raw_013e\" or r._field == \"fault_raw_013f\" or r._field == \"fault_raw_0140\" or r._field == \"fault_raw_0141\" or r._field == \"fault_raw_0142\" or r._field == \"fault_raw_0143\" or r._field == \"fault_raw_0144\" or r._field == \"fault_raw_0145\" or r._field == \"fault_raw_0146\"))\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time,\n       register: \"0x\" + strings.trimPrefix(v: r._field, prefix: \"fault_raw_\"),\n       value: r._value }))\n  |> keep(columns: [\"register\", \"value\"])\n  |> group()\n  |> sort(columns: [\"register\"])\n  |> yield(name: \"faults\")\n",
+          "query": "import \"strings\"\n\nfrom(bucket: \"alphaess\")\n  |> range(start: -3h)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and (r._field == \"fault_raw_0131\" or r._field == \"fault_raw_0132\" or r._field == \"fault_raw_0133\" or r._field == \"fault_raw_0134\" or r._field == \"fault_raw_0135\" or r._field == \"fault_raw_0136\" or r._field == \"fault_raw_0137\" or r._field == \"fault_raw_0138\" or r._field == \"fault_raw_0139\" or r._field == \"fault_raw_013a\" or r._field == \"fault_raw_013b\" or r._field == \"fault_raw_013c\" or r._field == \"fault_raw_013d\" or r._field == \"fault_raw_013e\" or r._field == \"fault_raw_013f\" or r._field == \"fault_raw_0140\" or r._field == \"fault_raw_0141\" or r._field == \"fault_raw_0142\" or r._field == \"fault_raw_0143\" or r._field == \"fault_raw_0144\" or r._field == \"fault_raw_0145\" or r._field == \"fault_raw_0146\" or r._field == \"fault_raw_0147\" or r._field == \"fault_raw_0148\"))\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time,\n       register: \"0x\" + strings.trimPrefix(v: r._field, prefix: \"fault_raw_\"),\n       value: r._value }))\n  |> keep(columns: [\"register\", \"value\"])\n  |> group()\n  |> sort(columns: [\"register\"])\n  |> yield(name: \"faults\")\n",
           "refId": "A"
         }
       ],
@@ -1241,6 +1379,6 @@
   "timezone": "browser",
   "title": "Battery Health",
   "uid": "alphaess-battery-health",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

@@ -378,33 +378,65 @@ class TestTempsPlausible:
 
 
 class TestDecodeFaultBlock:
-    """0x0131-0x0146. No bit is named -- see the block comment above FAULT_BLOCK -- so this is
-    a pure raw passthrough, not a scale/sign test like the temp block. No derived count either:
-    this range is not confirmed to be fault/warning bits exclusively, so a nonzero-word summary
-    would risk pinning itself permanently active on a normally-nonzero status/counter word."""
+    """0x0131-0x0148: twelve 32-bit values, fault1-6 then warning1-6. No BIT is named -- see the
+    block comment above FAULT_BLOCK -- so the words themselves stay a raw passthrough, and the
+    only thing derived from them is how many bits are set."""
+
+    def test_the_block_covers_all_twelve_thirty_two_bit_values(self):
+        """The size is the point of this one. At 22 words the block stopped one 32-bit value
+        short and warning6 was never read at all, which is what made a summary computed over it
+        unsafe to trust."""
+        assert R.FAULT_BLOCK == (0x0131, 24)
+        assert R.FAULT_WORDS == 12
 
     def test_an_all_zero_block_decodes_to_all_zero_fields(self):
-        fields = R.decode_fault_block([0] * 22)
+        fields = R.decode_fault_block([0] * 24)
         assert fields["fault_raw_0131"] == 0
-        assert fields["fault_raw_0146"] == 0
-
-    def test_no_derived_count_is_published(self):
-        """Guards the fix, not just the feature: a future change resurrecting a nonzero-word
-        count here would reintroduce the permanently-pinned-active risk this block's comment
-        warns about."""
-        fields = R.decode_fault_block([1] * 22)
-        assert "active_fault_count" not in fields
+        assert fields["fault_raw_0148"] == 0
+        assert fields["active_fault_count"] == 0
+        assert fields["active_warning_count"] == 0
 
     def test_every_word_is_keyed_by_its_own_hex_address(self):
-        words = list(range(22))
+        words = list(range(24))
         fields = R.decode_fault_block(words)
         assert fields["fault_raw_0131"] == 0
         assert fields["fault_raw_0132"] == 1
         assert fields["fault_raw_0146"] == 21
+        assert fields["fault_raw_0148"] == 23
+
+    def test_the_counts_are_popcounts_not_nonzero_word_counts(self):
+        """One word holding three set bits is three active faults. A nonzero-word count would
+        report it as one, undercounting exactly when the number matters."""
+        words = [0b1011] + [0] * 23
+        fields = R.decode_fault_block(words)
+        assert fields["active_fault_count"] == 3
+        assert fields["active_warning_count"] == 0
+
+    def test_a_bit_in_either_half_of_a_thirty_two_bit_value_counts_once(self):
+        """fault1 spans 0x0131-0x0132; word order within the pair is irrelevant to a popcount,
+        which is half of why this summary is safe without a documented bit map."""
+        assert R.decode_fault_block([1, 1] + [0] * 22)["active_fault_count"] == 2
+
+    def test_warnings_are_counted_apart_from_faults(self):
+        """The split is load-bearing, not tidiness: warning6 (0x0147-0x0148) has never been
+        observed on this site, so if it carries a normally-set bit it must not be able to make
+        `active_fault_count` -- the number the dashboard alarms on -- read nonzero."""
+        fields = R.decode_fault_block([0] * 23 + [0xFFFF])
+        assert fields["active_fault_count"] == 0
+        assert fields["active_warning_count"] == 16
+
+    def test_the_split_falls_between_fault6_and_warning1(self):
+        """Twelve words of faults, twelve of warnings: the last fault word is 0x013c and the
+        first warning word is 0x013d."""
+        faults_only = R.decode_fault_block([1] * 12 + [0] * 12)
+        assert faults_only["active_fault_count"] == 12
+        assert faults_only["active_warning_count"] == 0
+        assert faults_only["fault_raw_013c"] == 1
+        assert faults_only["fault_raw_013d"] == 0
 
     def test_wrong_word_count_raises(self):
-        with pytest.raises(ValueError, match="expected 22 words"):
-            R.decode_fault_block([0] * 21)
+        with pytest.raises(ValueError, match="expected 24 words"):
+            R.decode_fault_block([0] * 22)
 
 
 class TestWeeklyRawBlocks:

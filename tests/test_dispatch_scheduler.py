@@ -743,7 +743,8 @@ class TestFaultBlock:
         run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False, publisher=pub)
         point = pub.points[0]
         assert point["fault_raw_0131"] == 0
-        assert "active_fault_count" not in point  # see registers.FAULT_BLOCK's comment
+        assert point["active_fault_count"] == 0
+        assert point["active_warning_count"] == 0
 
     def test_a_failed_fault_read_does_not_fail_the_tick(self, tmp_path, monkeypatch, caplog):
         client = ScriptedClient(measurement_registers(),
@@ -755,6 +756,10 @@ class TestFaultBlock:
         assert decision.kind in ("command", "release", "idle")
         point = pub.points[0]
         assert not [k for k in point if k.startswith("fault_")]
+        # The counts go with the words. A failed read publishes NO count rather than zero:
+        # "nothing is wrong" and "we could not ask" must not render as the same green tile.
+        assert "active_fault_count" not in point
+        assert "active_warning_count" not in point
         assert "setpoint_w" in point
         assert "fault block read failed" in caplog.text
 

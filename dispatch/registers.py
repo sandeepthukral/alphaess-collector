@@ -161,20 +161,26 @@ POWER_OFFSET = 32000
 # 27 * 0.392 = 10.58 both round to 11. Do not treat it as confirmation.
 SOC_STEP = 0.4
 
-# --- health poller: fault/warning block, 0x0131-0x0146 -----------------------------------
-# Twenty-two contiguous registers, a few addresses past the inverter limits above -- 0x012E,
-# 0x012F and 0x0130 sit unused in between, not part of this block. No bit-level meaning is
-# published here -- AlphaESS has not documented a fault/warning bit map anywhere this repo has
-# found, and guessing one risks mislabeling a real fault as benign, or vice versa. Every word
-# is republished raw, keyed by its own hex address.
+# --- health poller: fault/warning block, 0x0131-0x0148 -----------------------------------
+# Twenty-four contiguous registers, a few addresses past the inverter limits above -- 0x012E,
+# 0x012F and 0x0130 sit unused in between, not part of this block. AlphaESS's own "Parameter
+# address table" gives the shape: twelve 32-bit values, two words each, fault1-6 followed by
+# warning1-6, and nothing else interleaved. That is the whole of the confirmation -- WHICH BIT
+# MEANS WHAT IS STILL UNDOCUMENTED, so no fault is named here, and every word is republished
+# raw, keyed by its own hex address, so a real event is locatable even though it is not
+# interpretable.
 #
-# NO DERIVED "nonzero word count" EITHER, and that is deliberate, not an oversight: this range
-# is not confirmed to be fault/warning bits exclusively. If even one word in it is a normally-
-# nonzero status value, a counter, or a nameplate figure rather than a fault flag, a "count of
-# nonzero words" pins itself at 1 or more permanently and reads as a fault that is always
-# active -- worse than no summary at all, because it looks confident. See TODO.md #15.
-REG_FAULT_WARNING_START = 305   # 0x0131  22 words, raw hex, no decode
-FAULT_BLOCK = (REG_FAULT_WARNING_START, 22)
+# THE BLOCK WAS 22 WORDS UNTIL 2026-09-02, which covered fault1-6 and warning1-5 and stopped
+# one 32-bit value short: warning6 (0x0147-0x0148) was never read at all. The count below is
+# the reason that mattered enough to fix rather than note -- a summary computed over a block
+# that silently omits a word is the kind of confident wrongness this module exists to avoid.
+REG_FAULT_WARNING_START = 305   # 0x0131  24 words: fault1-6, then warning1-6, 2 words each
+FAULT_BLOCK = (REG_FAULT_WARNING_START, 24)
+
+# Where warning1 starts within the block, as a word offset: six 32-bit faults ahead of it.
+# The faults and the warnings are counted separately and that split is the point -- see
+# `decode_fault_block`.
+FAULT_WORDS = 12
 
 # --- health poller: weekly tripwire blocks ------------------------------------------------
 # Firmware, serial numbers, and system configuration barely change -- a missed read costs
@@ -429,17 +435,30 @@ def temps_plausible(temps: dict) -> bool:
 
 
 def decode_fault_block(words: list[int]) -> dict:
-    """A 22-word read of FAULT_BLOCK -> raw words, hex-keyed.
+    """A 24-word read of FAULT_BLOCK -> raw words hex-keyed, plus two derived counts.
 
-    No fault or warning bit is named, and no derived count either -- see the block comment
-    above FAULT_BLOCK for why a "nonzero word" summary is not safe to compute yet. Every word
-    is kept so a real event is at least visible and locatable even though it is not yet
-    interpretable.
+    Every word is kept, unchanged and unnamed: no fault or warning BIT is documented anywhere
+    this repo has found, so the raw words remain the only honest record of what was set.
+
+    THE COUNTS ARE POPCOUNTS, NOT NONZERO-WORD COUNTS. Each 32-bit value here is a bitmap, so
+    one word holding three set bits is three active faults, not one, and a nonzero-word count
+    would report `1` for it -- undercounting exactly when the number matters most. Counting
+    set bits needs no bit-level knowledge at all, only the block's confirmed shape, so it says
+    "how many are active" without pretending to know which.
+
+    FAULTS AND WARNINGS ARE COUNTED SEPARATELY, and not only because a warning is not a fault.
+    warning6 was outside the block until 2026-09-02 (see FAULT_BLOCK's comment) and has
+    therefore never been observed on this site: if it turns out to carry a normally-set bit,
+    it pins `active_warning_count` above zero for good. Keeping the split means that failure
+    mode cannot reach `active_fault_count`, which is the number the dashboard alarms on.
     """
     if len(words) != FAULT_BLOCK[1]:
         raise ValueError(f"expected {FAULT_BLOCK[1]} words, got {len(words)}")
     base = FAULT_BLOCK[0]
-    return {f"fault_raw_{base + i:04x}": word for i, word in enumerate(words)}
+    fields = {f"fault_raw_{base + i:04x}": word for i, word in enumerate(words)}
+    fields["active_fault_count"] = sum(w.bit_count() for w in words[:FAULT_WORDS])
+    fields["active_warning_count"] = sum(w.bit_count() for w in words[FAULT_WORDS:])
+    return fields
 
 
 def decode_firmware_block(words: list[int]) -> dict:

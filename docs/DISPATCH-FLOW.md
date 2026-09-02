@@ -61,7 +61,7 @@ flowchart TD
     M -- no --> N["apply via Modbus (Command) / release() /<br/>idle → release once then go silent"]
     N --> O[verify via register readback · 1 retry]
     O --> TEMP["read min/max cell voltage & temp<br/>published only, never decides"]
-    TEMP --> HEALTH["hourly/weekly health gates<br/>fault block + firmware/config<br/>published only, never decides"]
+    TEMP --> HEALTH["hourly/weekly health gates<br/>fault block (24 words + fault/warning popcounts)<br/>+ firmware/config · published only, never decides"]
     HEALTH --> PUB["publish dispatch_state → InfluxDB<br/>heartbeat → Kuma"]
     PUB --> WAIT["wait until the NEXT deadline<br/>next_deadline(): due 60s after the last tick was DUE,<br/>not after it finished · overrun skips whole intervals"]
     WAIT --> A

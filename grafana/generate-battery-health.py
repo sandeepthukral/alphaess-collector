@@ -13,9 +13,9 @@ about today's price curve, and this dashboard is scoped to it alone. It has no f
 
 SCOPE IS SMALLER THAN THE ORIGINAL HANDOVER ASKED FOR, on purpose. The health-poller backend
 (#129) only ever shipped what had unambiguous register addressing: cell temperature (already
-existed), the fault/warning block as raw hex, the already-read power limits republished under
-health-dashboard field names, and the weekly firmware/inverter-firmware/system-config blocks as
-raw hex. Cell voltage (TODO.md item 12) was added once its address discrepancy resolved --
+existed), the fault/warning block as raw hex plus the two derived popcounts row 1 leads with
+on 2026-09-02, the already-read power limits republished under health-dashboard field
+names, and the weekly firmware/inverter-firmware/system-config blocks as raw hex. Cell voltage (TODO.md item 12) was added once its address discrepancy resolved --
 see `dispatch/registers.py`'s VOLTAGE_BLOCK comment. SoH, remaining time, daily energy and
 lifetime cycles are still unconfirmed register layouts (TODO.md item 13) and
 `dispatch/state.py` never publishes them. A panel querying a field that is never written is
@@ -75,7 +75,7 @@ def _raw_field_names(prefix, start, count):
     return [f"{prefix}{start + i:04x}" for i in range(count)]
 
 
-FAULT_FIELDS = _raw_field_names("fault_raw_", 0x0131, 22)
+FAULT_FIELDS = _raw_field_names("fault_raw_", 0x0131, 24)
 FIRMWARE_FIELDS = _raw_field_names("firmware_raw_", 0x0115, 6)
 INVERTER_FW_FIELDS = _raw_field_names("inverter_fw_raw_", 0x0640, 20)
 SYSTEM_CONFIG_FIELDS = _raw_field_names("system_config_raw_", 0x0800, 16)
@@ -273,10 +273,39 @@ panels = []
 # =========================================================================================
 # Row 1, y=0 -- where things stand right now
 # =========================================================================================
+# The two tiles the page leads with. `active_fault_count` and `active_warning_count` are
+# popcounts over `registers.FAULT_BLOCK` -- see `decode_fault_block` for why bits and not
+# nonzero words, and why the two are counted separately. Neither names a fault: no bit map is
+# documented, so these say HOW MANY are set and the raw-word table further down says WHICH
+# registers they are in, which is as far as this repo can honestly go.
+#
+# ANY fault is red, with no amber step between. A threshold ladder here would be a severity
+# judgement, and severity is exactly the thing the undocumented bit map denies us -- one set
+# bit could be a cell imbalance or a contactor failure. Warnings get orange for the same
+# reason in reverse: the block says it is a warning, so the dashboard says so too, and stops.
+panels.append(stat(
+    14, "Active faults",
+    "How many fault bits are set across fault1-6 (0x0131-0x013C), counted hourly. Zero is the "
+    "normal reading and the only good one. Which bit means what is undocumented, so this "
+    "number is a prompt to read the raw fault/warning table below, not a diagnosis.",
+    HEALTH_LAST_HOURLY % "active_fault_count", "none", 0, 0, 6,
+    [{"color": "green", "value": None}, {"color": "red", "value": 1.0}],
+    no_value="unreadable"))
+
+panels.append(stat(
+    15, "Active warnings",
+    "How many warning bits are set across warning1-6 (0x013D-0x0148), counted hourly. Kept "
+    "apart from the fault count on purpose: warning6 was outside the block this repo read "
+    "until 2026-09-02, so if it carries a normally-set bit it pins this tile above zero -- "
+    "and that must not be able to reach the fault tile.",
+    HEALTH_LAST_HOURLY % "active_warning_count", "none", 0, 6, 6,
+    [{"color": "green", "value": None}, {"color": "orange", "value": 1.0}],
+    no_value="unreadable"))
+
 panels.append(stat(
     1, "SoC now",
     "The battery level the dispatcher last read, same field the Dispatch dashboard shows.",
-    HEALTH_LAST_TICK % "soc_pct", "percent", 1, 0, 5,
+    HEALTH_LAST_TICK % "soc_pct", "percent", 1, 12, 4,
     [{"color": "text", "value": None}],
     no_value="unreadable"))
 
@@ -289,7 +318,7 @@ panels.append(stat(
     "The coldest cell across the whole battery, tagged with which pack it is in. A lithium "
     "pack near freezing refuses or derates a charge, which is why this tile keeps its own "
     "cold band rather than sharing the max tile's ladder.",
-    HEALTH_LAST_TICK % "min_cell_temp_c", "celsius", 1, 5, 5,
+    HEALTH_LAST_TICK % "min_cell_temp_c", "celsius", 1, 16, 4,
     [{"color": "blue", "value": None}, {"color": "green", "value": 5.0},
      {"color": "orange", "value": 35.0}, {"color": "red", "value": 45.0}],
     no_value="unreadable"))
@@ -297,32 +326,21 @@ panels.append(stat(
 panels.append(stat(
     3, "Max cell temp",
     "The hottest cell across the whole battery, tagged with which pack it is in.",
-    HEALTH_LAST_TICK % "max_cell_temp_c", "celsius", 1, 10, 5,
+    HEALTH_LAST_TICK % "max_cell_temp_c", "celsius", 1, 20, 4,
     [{"color": "green", "value": None}, {"color": "orange", "value": 35.0},
      {"color": "red", "value": 45.0}],
     no_value="unreadable"))
 
-panels.append(stat(
-    4, "Max charge power limit",
-    "The inverter's own charge ceiling, read hourly and republished here under the health "
-    "dashboard's field names -- the same reading `slots.clamp` already uses to cap a command, "
-    "not a fresh register read.",
-    HEALTH_LAST_HOURLY % "max_charge_power_w", "watt", None, 15, 5,
-    [{"color": "text", "value": None}],
-    no_value="unreadable"))
-
-panels.append(stat(
-    5, "Max discharge power limit",
-    "The inverter's own discharge ceiling, read hourly and republished under the health "
-    "dashboard's field names. Independent of the charge limit above -- one being readable "
-    "does not imply the other is.",
-    HEALTH_LAST_HOURLY % "max_discharge_power_w", "watt", None, 20, 4,
-    [{"color": "text", "value": None}],
-    no_value="unreadable"))
-
 # =========================================================================================
-# Row 1b, y=4 -- cell voltage, same tick cadence as row 1's temperature tiles
+# Row 1b, y=4 -- cell voltage, and the inverter's republished power ceilings
 # =========================================================================================
+#
+# THE TWO LIMIT TILES MOVED HERE from row 1 when the fault counts took the top-left, and the
+# split is not arbitrary: row 1 is now "is anything wrong, and how full is it" -- the five
+# things somebody opening this page at speed came to read. Everything on this row is
+# supporting detail. The row does mix cadences (voltage is tick, the limits are hourly), which
+# row 1 already did before this change, and each tile's own `last()` window is matched to its
+# own field regardless of which row it sits on.
 #
 # No thresholds copied from anywhere -- alphaess-dashboard.json has never had a voltage panel
 # to copy from. `text` is deliberately neutral rather than a guessed red/green ladder: this
@@ -333,14 +351,32 @@ panels.append(stat(
     "The lowest cell across the whole battery, tagged with which pack it is in. See "
     "dispatch/registers.py's VOLTAGE_BLOCK comment for the address this reads and how it was "
     "confirmed.",
-    HEALTH_LAST_TICK % "min_cell_voltage_v", "volt", 3, 0, 12,
+    HEALTH_LAST_TICK % "min_cell_voltage_v", "volt", 3, 0, 6,
     [{"color": "text", "value": None}], y=4,
     no_value="unreadable"))
 
 panels.append(stat(
     13, "Max cell voltage",
     "The highest cell across the whole battery, tagged with which pack it is in.",
-    HEALTH_LAST_TICK % "max_cell_voltage_v", "volt", 3, 12, 12,
+    HEALTH_LAST_TICK % "max_cell_voltage_v", "volt", 3, 6, 6,
+    [{"color": "text", "value": None}], y=4,
+    no_value="unreadable"))
+
+panels.append(stat(
+    4, "Max charge power limit",
+    "The inverter's own charge ceiling, read hourly and republished here under the health "
+    "dashboard's field names -- the same reading `slots.clamp` already uses to cap a command, "
+    "not a fresh register read.",
+    HEALTH_LAST_HOURLY % "max_charge_power_w", "watt", None, 12, 6,
+    [{"color": "text", "value": None}], y=4,
+    no_value="unreadable"))
+
+panels.append(stat(
+    5, "Max discharge power limit",
+    "The inverter's own discharge ceiling, read hourly and republished under the health "
+    "dashboard's field names. Independent of the charge limit above -- one being readable "
+    "does not imply the other is.",
+    HEALTH_LAST_HOURLY % "max_discharge_power_w", "watt", None, 18, 6,
     [{"color": "text", "value": None}], y=4,
     no_value="unreadable"))
 
@@ -441,17 +477,16 @@ panels.append(timeseries(
 # Row 4, y=24 -- faults and warnings, raw
 # =========================================================================================
 #
-# RAW WORDS ONLY. `registers.py`'s FAULT_BLOCK comment, and TODO.md item 15, explain why: a
-# naive "count the nonzero words" summary would pin itself permanently active if even one word
-# in the range turns out not to be a fault/warning bit, which is worse than no summary. This
-# table is the same "checkable, not decoded" treatment the block gets in `dispatch_state`
-# itself -- read it against the AlphaESS app's own fault/warning display.
+# RAW WORDS ONLY, STILL -- the counts on row 1 do not replace this table, they point at it.
+# The counts say how many bits are set; no bit map is documented anywhere this repo has found,
+# so which register a set bit sits in is the only locating information available, and that is
+# what these rows carry. Read against the AlphaESS app's own fault/warning display.
 panels.append(raw_table(
     8, "Faults and warnings (raw)",
-    "FAULT_BLOCK, 0x0131-0x0146, read hourly. No word here is confirmed to be a fault bit "
-    "specifically rather than a counter or status value (TODO.md item 15), so there is no "
-    "derived 'faults active' count -- only the raw words, to be checked against the AlphaESS "
-    "app's own display.",
+    "FAULT_BLOCK, 0x0131-0x0148, read hourly: twelve 32-bit words, fault1-6 then warning1-6, "
+    "two registers each. Which BIT means what is undocumented, so nothing here is named -- "
+    "when the Active faults tile is nonzero, this is where you find out which register it "
+    "came from, to check against the AlphaESS app's own display.",
     raw_table_query("-3h", FAULT_FIELDS, "fault_raw_", "faults"),
     0, 24, 24, 10))
 
@@ -536,7 +571,11 @@ dashboard = {
     # 2: min/max cell voltage stats (row 1b, ids 12-13), now that TODO.md item 12's address
     #    discrepancy is resolved and dispatch/state.py publishes min_cell_voltage_v/
     #    max_cell_voltage_v. Every row from 2 down moves 4 rows to make room.
-    "version": 2,
+    # 3: Active faults/Active warnings stats (row 1, ids 14-15), now that FAULT_BLOCK is sized
+    #    to the full 24 words and decode_fault_block derives the two popcounts. Rows 1 and 1b
+    #    are re-laid-out to fit them -- the power-limit tiles move down to row 1b -- and the
+    #    raw fault table's field list grows from 22 registers to 24. No row below y=8 moves.
+    "version": 3,
     "weekStart": "",
 }
 
