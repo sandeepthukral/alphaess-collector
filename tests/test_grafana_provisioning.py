@@ -601,7 +601,7 @@ ALERT_FILES = sorted((PROVISIONING / "alerting").glob("*.yml"))
 
 def test_alert_rules_were_found():
     """Same failure mode as the dashboard glob: match nothing, test nothing, pass."""
-    assert len(ALERT_FILES) == 3
+    assert len(ALERT_FILES) == 4
 
 
 @pytest.mark.parametrize("path", ALERT_FILES, ids=lambda p: p.name)

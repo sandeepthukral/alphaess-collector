@@ -22,8 +22,10 @@ with `sys_sn`:
 | `soc_percent` | % | Battery state of charge |
 
 Measurement `collector_health` in the same bucket records why collection
-stopped, tagged with `sys_sn`, `event` (`failure` / `recovered`) and — on
-failures — `error_class`. Fields: `failures` (consecutive count), `error` (the
+stopped, tagged with `sys_sn`, `event` (`failure` / `recovered` /
+`heartbeat_failed`) and — on failures — `error_class`. `heartbeat_failed` is the
+watchdog reporting on itself: a push to Uptime Kuma that could not be delivered,
+which leaves the collector healthy and unwatched at the same time. Fields: `failures` (consecutive count), `error` (the
 message, failures only), `outage_seconds` (`recovered` only). Successful polls
 write nothing here: `power_readings` arriving is the healthy signal. Read it
 through the **Collector Health** dashboard

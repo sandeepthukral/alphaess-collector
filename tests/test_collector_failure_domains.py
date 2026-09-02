@@ -75,9 +75,16 @@ def harness(monkeypatch, loop_env):
         "clock": 0.0,
     }
 
-    monkeypatch.setattr(collector, "send_heartbeat",
-                        lambda url, status="up", msg="OK", timeout=5:
-                        state["heartbeats"].append((status, msg)))
+    # `heartbeat_result` is what the real `send_heartbeat` returns: "" when the ping
+    # landed, a reason when it did not. Default "" so every existing test sees the
+    # healthy path.
+    state["heartbeat_result"] = ""
+
+    def fake_send_heartbeat(url, status="up", msg="OK", timeout=5):
+        state["heartbeats"].append((status, msg))
+        return state["heartbeat_result"]
+
+    monkeypatch.setattr(collector, "send_heartbeat", fake_send_heartbeat)
 
     def fake_health_event(write_api, bucket, sys_sn, event, fields,
                           error_class=None, stage=None):
@@ -109,8 +116,10 @@ def harness(monkeypatch, loop_env):
     monkeypatch.setattr(collector.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(collector.time, "sleep", fake_sleep)
 
-    def run(*, fetch, write_fails_with=None, write_fails_first=0, stop_after=3):
+    def run(*, fetch, write_fails_with=None, write_fails_first=0, stop_after=3,
+            heartbeat_result=""):
         state["stop_after"] = stop_after
+        state["heartbeat_result"] = heartbeat_result
         write_api = FakeWriteApi(fail_with=write_fails_with,
                                  fail_first=write_fails_first)
         monkeypatch.setattr(collector, "InfluxDBClient",
@@ -283,3 +292,34 @@ def test_stage_resets_once_the_write_recovers(harness):
     # Once healthy again, points land and the heartbeat goes back up.
     assert state["write_api"].points
     assert state["heartbeats"][-1][0] == "up"
+
+
+class TestAnUndeliverableHeartbeatIsVisible:
+    """The dead man's switch going dead must itself be a recorded state.
+
+    OBSERVED 2026-08-29: the Kuma host changed IP, `.env` was updated, the container was
+    never recreated, and every ping from 23:56 onward timed out against the old address.
+    Collection was perfectly healthy the whole time, so Grafana stayed green -- correctly,
+    since no panel is supposed to know about the outbound push. The failure lived only in
+    hundreds of identical `log.warning` lines, which is to say nowhere anybody looks.
+    """
+
+    def test_a_ping_that_cannot_be_delivered_writes_a_health_event(self, harness):
+        state = harness(fetch=healthy, stop_after=2)
+        assert not [e for e in state["health_events"] if e["event"] == "heartbeat_failed"], \
+            "a delivered heartbeat writes nothing -- success is not an event"
+
+        state = harness(fetch=healthy, stop_after=2,
+                        heartbeat_result="ConnectTimeout: timed out")
+        failed = [e for e in state["health_events"] if e["event"] == "heartbeat_failed"]
+        assert failed, "an undeliverable heartbeat must leave a trace outside the log"
+        assert failed[0]["stage"] == "heartbeat"
+        assert "ConnectTimeout" in failed[0]["error"]
+
+    def test_collection_continues_while_the_heartbeat_is_unreachable(self, harness):
+        """The whole point of swallowing these errors: monitoring must never be able to
+        stop the thing it monitors. Recording the failure must not change that."""
+        state = harness(fetch=healthy, stop_after=3,
+                        heartbeat_result="ConnectTimeout: timed out")
+        assert state["write_api"].points, "polls must still be written"
+        assert state["polls"] >= 3

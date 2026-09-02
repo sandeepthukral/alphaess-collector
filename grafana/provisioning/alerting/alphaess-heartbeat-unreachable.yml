@@ -1,0 +1,99 @@
+# Alerts when the collector cannot reach its own Uptime Kuma push monitor.
+#
+# This watches the WATCHDOG, which is a different question from every other rule
+# in this folder. alphaess-staleness.yml asks "is data arriving"; this asks "if
+# it stopped, would anybody be told". Those fail independently, and the
+# combination that motivated this rule is the quiet one: collection perfectly
+# healthy, every dashboard green, and the outbound ping going nowhere.
+#
+# OBSERVED 2026-08-29. The Kuma host moved to a new IP. `.env` was updated but
+# the container was never recreated -- compose reads env only at container start
+# -- so from 23:56 onward every ping timed out against the old address. The only
+# trace was hundreds of identical `Heartbeat ping failed: ... connect timeout=5`
+# lines in the container log. Nothing went red, because nothing knew.
+#
+# `collector.send_heartbeat` now returns the reason a ping failed and the poll
+# loop records it as a `collector_health` point with event="heartbeat_failed";
+# this rule is the half that turns that point into a notification. The matching
+# tile is "Heartbeat unreachable" on the Collector Health dashboard.
+#
+# NOT noDataState: Alerting, unlike alphaess-staleness.yml, and the difference is
+# the point. There, no series means the collector has written nothing at all,
+# which is the worst case. Here, no series means no ping has FAILED -- the
+# healthy, and by a wide margin the usual, state. Alerting on it would fire
+# permanently on every deployment that never set HEARTBEAT_URL.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: alphaess-health
+    folder: AlphaESS
+    interval: 1m
+    rules:
+      - uid: alphaess-heartbeat-unreachable
+        title: AlphaESS collector heartbeat unreachable
+        condition: C
+        # Ten minutes of failures before paging. A single failed push is a blip
+        # on a home network and self-heals on the next poll; what matters is the
+        # sustained case, where the monitor has stopped being a monitor. The
+        # collector polls roughly every 30s, so this is a run of them, not one.
+        for: 10m
+        noDataState: OK
+        execErrState: Alerting
+        labels:
+          service: alphaess-collector
+        annotations:
+          summary: >-
+            The collector cannot deliver its heartbeat to Uptime Kuma
+            ({{ humanize $values.B.Value }} failed pushes in the last 10
+            minutes). Collection itself may be fine -- this is the watchdog.
+          description: >-
+            The dead man's switch is dead: Kuma is not hearing from the
+            collector, so it will either page for silence that is not real or
+            stay green through an outage that is. Read the reason with
+            `docker compose logs --tail=50 collector | grep Heartbeat`, or from
+            the `collector_health` measurement where event="heartbeat_failed".
+            Most likely HEARTBEAT_URL in .env points at a host that has moved --
+            note that compose reads env only at container start, so the fix is
+            `docker compose up -d --force-recreate collector`, NOT `restart`,
+            which reuses the old environment. Check the other *_HEARTBEAT_URL
+            values at the same time: they all point at the same Kuma host and
+            they all need the same recreate.
+        data:
+          # A: heartbeat pushes that failed to deliver, last 10 minutes.
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: alphaess
+            model:
+              refId: A
+              query: |
+                from(bucket: "alphaess")
+                  |> range(start: -10m)
+                  |> filter(fn: (r) => r._measurement == "collector_health")
+                  |> filter(fn: (r) => r.event == "heartbeat_failed")
+                  |> filter(fn: (r) => r._field == "error")
+                  |> group()
+                  |> count()
+                  |> keep(columns: ["_value"])
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          # C: any sustained run at all. Not a rate or a percentage -- there is
+          # no acceptable level of "the watchdog cannot be reached", and `for`
+          # above is what separates a blip from a fault.
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
