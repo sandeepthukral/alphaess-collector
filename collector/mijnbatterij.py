@@ -1122,16 +1122,25 @@ def run_once(query_api, write_api, session, *, bucket: str, sys_sn: str,
 
 def run_backfill(query_api, write_api, session, *, bucket: str, sys_sn: str,
                  api_key: str, config: dict, months: list[tuple[int, int]],
-                 dry_run: bool, now: dt.datetime | None = None) -> None:
-    """Backfill finished days and months.
+                 dry_run: bool, now: dt.datetime | None = None) -> int:
+    """Backfill finished days and months. Returns the number of failed posts.
 
     Two endpoints, in that order: each day to /api/results/daily, then the
     month's totals to /api/results/monthly. The monthly endpoint carries no
     per-day structure -- sending one is what earned a 400 -- so the daily posts
     are the history and the monthly post is the summary over it.
+
+    One rejected day does not abandon the rest. This runs nightly and unattended
+    (scripts/daily-mijnbatterij.sh), so a permanent 4xx on a single day -- or a
+    429 landing halfway through thirty-odd POSTs -- would otherwise mean that
+    every later day and the month totals are never sent, identically, every
+    night. Each failure is logged and counted, and the count comes back so the
+    caller can still exit nonzero and let DSM raise its task-failure
+    notification: continuing is not the same as succeeding.
     """
     now = dt.datetime.now(dt.UTC) if now is None else now
     yesterday = now.astimezone(NL_TZ).date() - dt.timedelta(days=1)
+    failures = 0
     for year, month in months:
         rows, report = build_month(
             query_api, bucket=bucket, sys_sn=sys_sn, year=year, month=month,
@@ -1179,15 +1188,36 @@ def run_backfill(query_api, write_api, session, *, bucket: str, sys_sn: str,
             log.info("%s: dry run, not submitting", label)
             continue
 
+        sent = 0
         for payload in day_payloads:
-            submit_daily(session, api_key, payload,
-                         base_url=config["base_url"], timeout=config["timeout_s"])
-        log.info("%s: submitted %d daily results", label, len(day_payloads))
-        status = submit_monthly(session, api_key, month_payload,
-                                base_url=config["base_url"], timeout=config["timeout_s"])
+            try:
+                submit_daily(session, api_key, payload,
+                             base_url=config["base_url"], timeout=config["timeout_s"])
+            except SubmitError as exc:
+                # Named, not counted: the point of continuing is that the log
+                # says which day to go and look at.
+                failures += 1
+                log.error("%s: %s rejected, skipping it: %s",
+                          label, payload["date"], exc)
+            else:
+                sent += 1
+        log.info("%s: submitted %d/%d daily results", label, sent, len(day_payloads))
+
+        # Sent even when days failed: the totals come from the stored month, not
+        # from what the platform accepted, so they are still the right summary --
+        # and `partial` already says the month is incomplete.
+        try:
+            status = submit_monthly(session, api_key, month_payload,
+                                    base_url=config["base_url"], timeout=config["timeout_s"])
+        except SubmitError as exc:
+            failures += 1
+            log.error("%s: month totals rejected: %s", label, exc)
+            continue
         _write(write_api, bucket, status_point(
             None, sys_sn, "monthly-ok", status, dt.datetime.now(dt.UTC)))
         log.info("%s: submitted month totals (HTTP %d)", label, status)
+
+    return failures
 
 
 def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
@@ -1387,9 +1417,14 @@ def main() -> None:
 
     try:
         if months:
-            run_backfill(query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
-                         api_key=api_key, config=config, months=months,
-                         dry_run=args.dry_run)
+            failures = run_backfill(
+                query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
+                api_key=api_key, config=config, months=months, dry_run=args.dry_run)
+            if failures:
+                # The days that worked are already posted; this is the exit code
+                # the nightly task's notification hangs off.
+                log.error("%d submission(s) failed", failures)
+                sys.exit(1)
         elif args.once:
             run_once(query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
                      api_key=api_key, config=config, totals=Totals(config["totals_ttl_s"]),
