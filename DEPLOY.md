@@ -1830,8 +1830,9 @@ outage is ~10 readable lines rather than several hundred frames of identical
 
 **2. `collector_health` in InfluxDB (history, after the fact).** Every failed
 poll and every recovery is written to a `collector_health` measurement in the
-same bucket, tagged `event` (`failure`/`recovered`/`heartbeat_failed`) and
-`error_class`. InfluxDB
+same bucket, tagged `event` (`failure`/`recovered`/`heartbeat_failed`),
+`error_class`, and `stage` — `fetch` or `write` for a poll, `heartbeat` for a
+push that never arrived. InfluxDB
 is local, so it keeps accepting writes precisely when the AlphaESS API is
 unreachable — it records the outage while it is happening. The
 **Collector Health** dashboard

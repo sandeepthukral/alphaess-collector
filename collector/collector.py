@@ -85,8 +85,9 @@ _URL_QUERY_RE = re.compile(r"(https?://\S+?)\?\S*")
 # A Kuma push token lives in the PATH, not the query string, so _URL_QUERY_RE does not
 # touch it -- and a connection error from `requests` quotes the URL it failed on. That was
 # tolerable while the only destination was the container log; it is not once the same string
-# is written to InfluxDB and rendered on a dashboard. The token is write-only (it can spoof a
-# heartbeat, nothing more), but there is no reason to publish it.
+# is written to InfluxDB and rendered on a dashboard -- nor, on this deployment, in the log
+# itself, which Alloy ships to Loki and Grafana renders. The token is write-only (it can spoof
+# a heartbeat, nothing more), but there is no reason to publish it.
 _PUSH_TOKEN_RE = re.compile(r"(/api/push/)[^\s/?\"']+")
 
 log = logging.getLogger("alphaess-collector")
@@ -369,9 +370,11 @@ def write_health_event(write_api, bucket: str, sys_sn: str, event: str,
         # so it is safe as a tag and lets Grafana group by failure mode.
         point = point.tag("error_class", error_class)
     if stage:
-        # "fetch" or "write" -- which half of the poll broke. The exception
-        # class alone does not say: a ReadTimeout is equally at home talking to
-        # AlphaESS and to InfluxDB, and the two demand opposite responses.
+        # Which part broke. "fetch" or "write" for a poll -- the exception class
+        # alone does not say, because a ReadTimeout is equally at home talking to
+        # AlphaESS and to InfluxDB and the two demand opposite responses -- or
+        # "heartbeat", which is neither half of the poll but the push out to Kuma
+        # that follows it, and a fault in its own right.
         point = point.tag("stage", stage)
     for key, value in fields.items():
         point = point.field(key, value)
@@ -453,8 +456,13 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
         response = requests.get(target, timeout=timeout)
         response.raise_for_status()
     except Exception as exc:
-        log.warning("Heartbeat ping failed: %s", exc)
-        return _PUSH_TOKEN_RE.sub(r"\1<token>", error_summary(exc))
+        # Redact BEFORE logging, not only before returning. The container log is
+        # not a private destination on this deployment: Alloy ships it to Loki and
+        # it renders on the NAS Grafana, which is the same audience the stored
+        # field has.
+        reason = _PUSH_TOKEN_RE.sub(r"\1<token>", error_summary(exc))
+        log.warning("Heartbeat ping failed: %s", reason)
+        return reason
     return ""
 
 
