@@ -82,6 +82,14 @@ MAX_ERROR_SUMMARY_CHARS = 160
 # the query string before it leaves the process.
 _URL_QUERY_RE = re.compile(r"(https?://\S+?)\?\S*")
 
+# A Kuma push token lives in the PATH, not the query string, so _URL_QUERY_RE does not
+# touch it -- and a connection error from `requests` quotes the URL it failed on. That was
+# tolerable while the only destination was the container log; it is not once the same string
+# is written to InfluxDB and rendered on a dashboard -- nor, on this deployment, in the log
+# itself, which Alloy ships to Loki and Grafana renders. The token is write-only (it can spoof
+# a heartbeat, nothing more), but there is no reason to publish it.
+_PUSH_TOKEN_RE = re.compile(r"(/api/push/)[^\s/?\"']+")
+
 log = logging.getLogger("alphaess-collector")
 
 
@@ -339,7 +347,8 @@ def error_summary(exc: Exception) -> str:
 def write_health_event(write_api, bucket: str, sys_sn: str, event: str,
                        fields: dict, error_class: str | None = None,
                        stage: str | None = None) -> None:
-    """Record a poll failure ("failure") or the end of an outage ("recovered").
+    """Record a poll failure ("failure"), the end of an outage ("recovered"), or a
+    heartbeat push that could not be delivered ("heartbeat_failed").
 
     An outage is otherwise only visible in the container log: it rotates, it
     cannot be read from a phone, and it answers nothing about whether this has
@@ -361,9 +370,11 @@ def write_health_event(write_api, bucket: str, sys_sn: str, event: str,
         # so it is safe as a tag and lets Grafana group by failure mode.
         point = point.tag("error_class", error_class)
     if stage:
-        # "fetch" or "write" -- which half of the poll broke. The exception
-        # class alone does not say: a ReadTimeout is equally at home talking to
-        # AlphaESS and to InfluxDB, and the two demand opposite responses.
+        # Which part broke. "fetch" or "write" for a poll -- the exception class
+        # alone does not say, because a ReadTimeout is equally at home talking to
+        # AlphaESS and to InfluxDB and the two demand opposite responses -- or
+        # "heartbeat", which is neither half of the poll but the push out to Kuma
+        # that follows it, and a fault in its own right.
         point = point.tag("stage", stage)
     for key, value in fields.items():
         point = point.field(key, value)
@@ -405,9 +416,9 @@ def recovery_message(failures: int, outage_seconds: float,
 
 
 def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
-                   timeout: float = 5) -> None:
+                   timeout: float = 5) -> str:
     """Ping a Kuma 'Push' monitor (a dead-man's switch for the whole
-    collect->write path).
+    collect->write path). Returns "" on success, or a short reason it failed.
 
     `status` and `msg` are passed through to Kuma, which renders them into the
     notification. Without them an outage only ever reads "no ping received",
@@ -415,9 +426,24 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
     the difference between diagnosing from a phone and opening the container
     logs. Best-effort: never let a monitoring hiccup disturb collection, so all
     errors are swallowed.
+
+    SWALLOWED IS NOT THE SAME AS UNREPORTED, which is why this returns a reason
+    rather than None. On 2026-08-29 the Kuma host changed IP; `.env` was updated
+    but the container was never recreated, so every ping from 23:56 onward timed
+    out against the old address. The only trace was hundreds of identical
+    `log.warning` lines. Grafana stayed green -- correctly, because collection
+    itself was healthy and no panel is supposed to know about the outbound push
+    -- and the result was the failure mode this whole design fears in miniature:
+    the dead man's switch was dead and every dashboard said ALL OK. The caller
+    turns this string into a `collector_health` point so that state is visible.
+
+    A NON-2xx REPLY COUNTS AS A FAILURE TOO. A wrong or revoked push token
+    answers 404 and the request itself succeeds, so without this check the one
+    error that silently disables a monitor forever is the one error this
+    function would have called fine.
     """
     if not url:
-        return
+        return ""
     # The push URL Kuma displays already carries a query string
     # (?status=up&msg=OK&ping=), and that is what ends up in HEARTBEAT_URL.
     # Passing params= would *append* to it rather than replace it, and Express
@@ -427,9 +453,17 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
     target = urlunsplit(
         urlsplit(url)._replace(query=urlencode({"status": status, "msg": msg})))
     try:
-        requests.get(target, timeout=timeout)
+        response = requests.get(target, timeout=timeout)
+        response.raise_for_status()
     except Exception as exc:
-        log.warning("Heartbeat ping failed: %s", exc)
+        # Redact BEFORE logging, not only before returning. The container log is
+        # not a private destination on this deployment: Alloy ships it to Loki and
+        # it renders on the NAS Grafana, which is the same audience the stored
+        # field has.
+        reason = _PUSH_TOKEN_RE.sub(r"\1<token>", error_summary(exc))
+        log.warning("Heartbeat ping failed: %s", reason)
+        return reason
+    return ""
 
 
 def parse_fields(data: dict) -> dict:
@@ -529,8 +563,18 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                 cause = last_failure
                 if cause and verdict:
                     cause = f"{cause} [{verdict}]"
-                send_heartbeat(heartbeat_url, msg=recovery_message(
+                # The heartbeat's own failures are recorded, not just logged --
+                # see `send_heartbeat`. Written from here rather than from
+                # inside it because that function has no InfluxDB handle and
+                # must not grow one: it has to keep working for callers that
+                # write nothing (efficiency.py) and it must never be able to
+                # turn a monitoring hiccup into a collection failure.
+                ping_failed = send_heartbeat(heartbeat_url, msg=recovery_message(
                     consecutive_failures, started - first_failure_at, cause))
+                if ping_failed:
+                    write_health_event(
+                        write_api, influx_bucket, sys_sn, "heartbeat_failed",
+                        {"error": ping_failed}, stage="heartbeat")
             else:
                 log.warning("No usable fields in response, skipping write")
             # An outage that ends on its own is otherwise silent: the failures
@@ -574,11 +618,19 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                 # stage is what says where to look, and is known from the
                 # first failure rather than only from the third.
                 suffix = f" [{verdict}]" if verdict else ""
-                send_heartbeat(
+                # `stage` here is the POLL's stage, so the heartbeat event
+                # carries its own -- an unreachable Kuma during an AlphaESS
+                # outage is two independent faults and the point has to say
+                # which one it is describing.
+                ping_failed = send_heartbeat(
                     heartbeat_url, status="down",
                     msg=f"{stage}: {summary} "
                         f"({consecutive_failures} consecutive failures)"
                         f"{suffix}")
+                if ping_failed:
+                    write_health_event(
+                        write_api, influx_bucket, sys_sn, "heartbeat_failed",
+                        {"error": ping_failed}, stage="heartbeat")
 
         # Back off on repeated failures to avoid hammering the API, capped so
         # that an outage does not grow a gap big enough to cost a whole day of

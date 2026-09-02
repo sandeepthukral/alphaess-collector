@@ -1830,7 +1830,9 @@ outage is ~10 readable lines rather than several hundred frames of identical
 
 **2. `collector_health` in InfluxDB (history, after the fact).** Every failed
 poll and every recovery is written to a `collector_health` measurement in the
-same bucket, tagged `event` (`failure`/`recovered`) and `error_class`. InfluxDB
+same bucket, tagged `event` (`failure`/`recovered`/`heartbeat_failed`),
+`error_class`, and `stage` — `fetch` or `write` for a poll, `heartbeat` for a
+push that never arrived. InfluxDB
 is local, so it keeps accepting writes precisely when the AlphaESS API is
 unreachable — it records the outage while it is happening. The
 **Collector Health** dashboard
@@ -1843,6 +1845,20 @@ That table is the answer to
 `docker compose logs`. Writes are best-effort and never fail a poll; if
 InfluxDB itself is the thing that is broken, nothing is recorded (the
 heartbeat still fires, which is the point of having both).
+
+`heartbeat_failed` is the mirror image of that last sentence: a push to Uptime
+Kuma that never arrived, written here because the collector is the only party
+that knows. It is the one failure the rest of this section cannot see — the
+collector is healthy, the data is arriving, every panel is green, and nobody is
+watching. Observed on 2026-08-29, when the Kuma host changed IP and `.env` was
+updated without recreating the container, so every ping for hours went to the old
+address and left nothing but log lines. The **Heartbeat unreachable** tile on the
+Collector Health dashboard counts these, and
+[`grafana/provisioning/alerting/alphaess-heartbeat-unreachable.yml`](grafana/provisioning/alerting/alphaess-heartbeat-unreachable.yml)
+pages after ten minutes of them. When it fires, remember that compose reads env
+only at container start: the fix is `up -d --force-recreate`, not `restart`, and
+every other `*_HEARTBEAT_URL` points at the same host and needs the same
+treatment.
 
 **3. Grafana staleness alert (read side, secondary).** The rule in
 [`grafana/provisioning/alerting/alphaess-staleness.yml`](grafana/provisioning/alerting/alphaess-staleness.yml)

@@ -601,7 +601,7 @@ ALERT_FILES = sorted((PROVISIONING / "alerting").glob("*.yml"))
 
 def test_alert_rules_were_found():
     """Same failure mode as the dashboard glob: match nothing, test nothing, pass."""
-    assert len(ALERT_FILES) == 3
+    assert len(ALERT_FILES) == 4
 
 
 @pytest.mark.parametrize("path", ALERT_FILES, ids=lambda p: p.name)
@@ -686,6 +686,46 @@ def test_status_panel_and_staleness_alert_share_a_threshold():
     assert steps == alert_thresholds
     assert ok["options"]["to"] == alert_thresholds[0]
     assert outage["options"]["from"] == alert_thresholds[0]
+
+
+def test_heartbeat_tile_and_alert_read_the_same_series():
+    """The "Heartbeat unreachable" tile is the alert rendered on screen, same convention as
+    `test_status_panel_and_staleness_alert_share_a_threshold` above.
+
+    Sharper here than usual, because both sides select on STRING LITERALS. A typo in
+    `event == "heartbeat_failed"` or in `_field == "error"` matches nothing, counts zero, and
+    reads as perfect health -- on either side, silently, forever. That is precisely the
+    failure class this pair was added to close, so it must not be reproducible inside the
+    monitoring itself.
+    """
+    def selectors(flux):
+        return {
+            "measurement": set(re.findall(r'_measurement == "([^"]+)"', flux)),
+            "event": set(re.findall(r'\.event == "([^"]+)"', flux)),
+            "field": set(re.findall(r'_field == "([^"]+)"', flux)),
+        }
+
+    dashboard = json.loads(
+        (REPO / "grafana" / "alphaess-collector-health.json").read_text(encoding="utf-8"))
+    panel = next(p for p in dashboard["panels"] if p["title"] == "Heartbeat unreachable")
+    assert len(panel["targets"]) == 1, panel["targets"]
+    tile = selectors(panel["targets"][0]["query"])
+
+    doc = yaml.safe_load(
+        (PROVISIONING / "alerting" / "alphaess-heartbeat-unreachable.yml")
+        .read_text(encoding="utf-8"))
+    queries = [q["model"]["query"]
+               for group in doc["groups"] for rule in group["rules"]
+               for q in rule["data"] if "query" in q["model"]]
+    assert len(queries) == 1, queries
+    alert = selectors(queries[0])
+
+    assert tile == alert, "the tile and the alert must count the same points"
+    # And that they agree on the WRONG series is the other way this can fail, so name the
+    # values `collector.write_health_event` is actually called with.
+    assert tile == {"measurement": {"collector_health"},
+                    "event": {"heartbeat_failed"},
+                    "field": {"error"}}
 
 
 def _alert_thresholds(filename):
