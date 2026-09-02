@@ -240,11 +240,32 @@ flowchart TD
     I -- no --> K["batteryResult 0.00<br/>invalid: true, day named in the log"]
     J --> L["POST /api/results/daily, one per day"]
     K --> L
-    L --> M["POST /api/results/monthly<br/>totals only, partial: true if short"]
+    L --> LF{"SubmitError?"}
+    LF -- yes --> LX["log the day, count it, next day"]
+    LF -- no --> M
+    LX --> M["POST /api/results/monthly<br/>totals only, partial: true if short"]
+    M --> MF{"SubmitError?"}
+    MF -- yes --> MX["log it, count it, no monthly-ok row"]
+    MF -- no --> MO["write mijnbatterij_submit monthly-ok"]
+    MX --> Z{"any failures?"}
+    MO --> Z
+    Z -- yes --> Z1["exit 1 -- DSM raises the task failure"]
+    Z -- no --> Z0["exit 0"]
 
     classDef skip fill:#eceef0,stroke:#6b7280,color:#374151;
-    class OMIT,K,F2 skip;
+    class OMIT,K,F2,LX,MX skip;
 ```
+
+**A rejected day is skipped, not fatal.** Unattended nightly, a permanent 4xx on
+one day — or a 429 arriving halfway through thirty-odd POSTs — would otherwise
+abandon every later day and the month totals with it, failing the same way every
+night so that yesterday never publishes at all. Each failure is logged with the
+date and counted; the month totals still go, because they are summed from the
+stored month rather than from what the platform accepted, and `partial` already
+says the month is short. A non-zero count makes the process exit 1, which is the
+signal DSM's task-failure notification hangs off — continuing is not succeeding.
+The `monthly-ok` point is written only on a real 2xx, so the metric never claims
+a submission the platform refused.
 
 **Energy gaps are repaired, euro gaps are not.** A day `daily_energy` has no row
 for is integrated out of `power_readings`, exactly as the cycle count does —

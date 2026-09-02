@@ -27,7 +27,10 @@
 # is nothing in Python to push one either. MIJNBATTERIJ_HEARTBEAT_URL belongs to
 # the live loop, whose Kuma monitor expects a push every 5 minutes; a nightly
 # job pushing to the same monitor would hold it green through a dead loop. This
-# job's failure surface is DSM's own task-failure notification.
+# job's failure surface is DSM's own task-failure notification -- and note that
+# --monthly skips a day the platform rejects rather than abandoning the month,
+# then exits nonzero, so a failure here means "some day did not publish", not
+# "nothing published".
 set -eu
 
 # DSM Task Scheduler runs with a minimal PATH; make sure docker is findable.

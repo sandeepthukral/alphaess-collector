@@ -1005,6 +1005,11 @@ sent `finalized`, so a day is corrected rather than duplicated. The script exits
 0 without doing anything when `MIJNBATTERIJ_API_KEY` is blank, so it can be
 scheduled on an installation that has not been registered yet.
 
+A day the platform rejects is logged by date and skipped, not fatal: the
+remaining days and the month totals still go, and the run ends with exit 1 so the
+notification still fires. So the failure to act on is "the same date appears in
+the log every night", not "the job stopped".
+
 **No Kuma monitor for this one**, deliberately. `MIJNBATTERIJ_HEARTBEAT_URL`
 belongs to the live loop and expects a push every 5 minutes; a nightly job
 pushing to the same monitor would hold it green through a dead loop. DSM's own

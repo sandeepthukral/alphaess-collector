@@ -1293,3 +1293,87 @@ def test_an_empty_heartbeat_url_pings_nothing(monkeypatch):
     monkeypatch.setattr(mb.requests, "get", get)
     mb.send_heartbeat("")
     assert get.urls == []
+
+
+# --------------------------------------------------------------------------
+# The backfill runs unattended: one bad day must not sink the night
+# --------------------------------------------------------------------------
+
+class _FailingSession(FakeSession):
+    """Rejects the posts whose URL path ends in one of `reject`."""
+
+    def __init__(self, reject=(), status=422):
+        super().__init__()
+        self.reject = reject
+        self.status = status
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        self.posts.append({"url": url, "headers": headers, "json": json})
+        target = json.get("date") or json.get("yearMonth")
+        if target in self.reject:
+            return FakeResponse(self.status, text="rejected")
+        return FakeResponse(200)
+
+
+def _backfill(monkeypatch, session, days=(1, 2, 3)):
+    energy, savings = {}, {}
+    for day in days:
+        energy.update(_energy(dt.date(2026, 8, day), 10.0, 9.0))
+        savings[dt.date(2026, 8, day)] = {"saving": 1.5}
+    _stub_month(monkeypatch, energy, savings)
+    return mb.run_backfill(
+        FakeQueryApi(), RecordingWriteApi(), session, bucket="alphaess", sys_sn="SN",
+        api_key="key", config=config(), months=[(2026, 8)], dry_run=False,
+        now=dt.datetime(2026, 9, 1, 1, 30, tzinfo=UTC))
+
+
+def test_a_rejected_day_does_not_stop_the_days_after_it(monkeypatch):
+    """This is scheduled, not watched. A day the platform will never accept --
+    or a 429 landing mid-month -- used to abandon every later day and the month
+    totals with it, so the same job failed the same way every night and
+    yesterday was never published."""
+    session = _FailingSession(reject={"2026-08-01"})
+
+    failures = _backfill(monkeypatch, session)
+
+    assert failures == 1
+    sent = [p["json"].get("date") for p in session.posts if "date" in p["json"]]
+    assert sent == ["2026-08-01", "2026-08-02", "2026-08-03"]
+    assert any(p["json"].get("yearMonth") == "2026-08" for p in session.posts)
+
+
+def test_the_month_totals_still_go_when_a_day_was_rejected(monkeypatch):
+    """The totals are summed from the stored month, not from what the platform
+    accepted, so they are still the right summary -- and `partial` already
+    carries the fact that the month is incomplete."""
+    session = _FailingSession(reject={"2026-08-02"})
+
+    _backfill(monkeypatch, session)
+
+    months = [p["json"] for p in session.posts if "yearMonth" in p["json"]]
+    assert len(months) == 1
+    assert months[0]["batteryCharged"] == "30.000"
+
+
+def test_a_rejected_month_is_counted_and_not_recorded(monkeypatch):
+    """mijnbatterij_submit's monthly-ok row is a claim that the platform took
+    it. Writing one after a 422 makes the metric lie."""
+    session = _FailingSession(reject={"2026-08"})
+    write_api = RecordingWriteApi()
+    _stub_month(monkeypatch, _energy(dt.date(2026, 8, 1), 10.0, 9.0),
+                {dt.date(2026, 8, 1): {"saving": 1.5}})
+
+    failures = mb.run_backfill(
+        FakeQueryApi(), write_api, session, bucket="alphaess", sys_sn="SN",
+        api_key="key", config=config(), months=[(2026, 8)], dry_run=False,
+        now=dt.datetime(2026, 9, 1, 1, 30, tzinfo=UTC))
+
+    assert failures == 1
+    assert write_api.points == []
+
+
+def test_a_clean_backfill_reports_no_failures(monkeypatch):
+    """Otherwise the nightly task would exit 1 every night and DSM's failure
+    notification would mean nothing."""
+    session = _FailingSession()
+    assert _backfill(monkeypatch, session) == 0
