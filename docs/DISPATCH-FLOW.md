@@ -12,7 +12,7 @@ flowchart LR
     P["battery-planning<br/>LP planner<br/>Wh forecast"] -->|batch, hrs ahead| T
     T["translator.py<br/>classify() / to_slots()<br/>→ slots.json"] -->|writes| S
     S["scheduler.py<br/>tick()<br/>read live SoC/grid/batt<br/>→ surplus_w"] -->|every 60s| D
-    D["slots.py<br/>decide() / clamp()"] -->|verified| I["inverter · apply/release<br/>readback verify, 1 retry<br/>+ cell voltage/temp, health gates<br/>→ InfluxDB + Kuma"]
+    D["slots.py<br/>decide() / clamp()"] -->|verified| I["inverter · apply/release<br/>readback verify, alarm debounced<br/>+ cell voltage/temp, health gates<br/>→ InfluxDB + Kuma"]
 ```
 
 `dispatch/plan.py` → `dispatch/translator.py` → `dispatch/slots.json` → `dispatch/scheduler.py`
@@ -59,7 +59,7 @@ flowchart TD
     CLAMP["clamp(): cap to min(inverter limit, 5000W)<br/>0W ceiling in that direction → hold instead"] --> M{"hijacked?<br/>another writer"}
     M -- yes --> SKIP[SKIP · log only]
     M -- no --> N["apply via Modbus (Command) / release() /<br/>idle → release once then go silent"]
-    N --> O[verify via register readback · 1 retry]
+    N --> O["verify via register readback<br/>publish verified=0 on a mismatch,<br/>but alarm only on 2 consecutive ticks"]
     O --> TEMP["read min/max cell voltage & temp<br/>published only, never decides"]
     TEMP --> HEALTH["hourly/weekly health gates<br/>fault block (24 words + fault/warning popcounts)<br/>+ firmware/config · published only, never decides"]
     HEALTH --> PUB["publish dispatch_state → InfluxDB<br/>heartbeat → Kuma"]

@@ -633,6 +633,15 @@ only input, so the failure must be visible even though the plan run itself "succ
 Three of #4-#8 depart from the obvious rule, and each departure exists to stop a monitor
 crying wolf -- which is the failure mode that ends with all of them ignored:
 
+- **#6 `dispatch-confirmed` waits for TWO consecutive unverified ticks.** The mode register
+  (0x0885) is cleared and reloaded when START goes 0 -> 1, so the first command tick after a
+  release reads it as 0 while power, target SoC and duration already hold what was written.
+  Measured between go-live and 2026-09-02: 36 occurrences in ~12,000 writes, never two in a
+  row, and the commanded power was reached every time. The point still carries `verified=0`
+  on such a tick -- that is what the block held when it was asked, and `slots.is_hijacked`
+  depends on it -- but the monitor and the ERROR line wait for a second consecutive failure.
+  A 0.5 s in-tick re-read was tried first and measured to rescue none of them.
+
 - **#6 `dispatch-confirmed` is UP when there was nothing to confirm.** A release or an idle
   tick writes no command, so a readback proving nothing is not evidence of a rejected write.
   It is also unconditionally up in dry run, where nothing is written and every readback

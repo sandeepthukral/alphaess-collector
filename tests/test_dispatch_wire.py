@@ -225,14 +225,16 @@ class TestTickEndToEnd:
         assert state["target_soc_pct"] == 20.0
         assert state["duration_s"] == S.DISPATCH_DURATION_S
 
-    def test_a_half_applied_readback_is_re_read_before_the_alarm(self, tmp_path, monkeypatch):
-        """The block does not update atomically: START is written last and lands first, so a
-        readback taken microseconds later can show `dispatch_active=1` beside a mode and power
-        the device has not ingested yet. Observed 2026-08-20 15:16:29Z on the first tick after
-        a rebuild. One re-read distinguishes that from an inverter refusing writes -- which is
-        what monitor #6 exists to say, and it can only keep saying it if it is not also said
-        on every deploy."""
-        monkeypatch.setattr(scheduler, "VERIFY_RETRY_DELAY_S", 0.0)
+    def test_a_half_applied_readback_does_not_alarm_on_the_first_tick(self, tmp_path, caplog):
+        """The mode register is cleared and reloaded when START goes 0 -> 1, so the first
+        command tick after a release reads mode=0 beside a power, target and duration that
+        already hold what was written. Measured 2026-09-01T14:15:50Z and, on the discharge
+        side, 2026-08-26T16:15:12Z; 36 times in ~12,000 writes and never twice in a row.
+
+        The tick still publishes `verified=0` -- that is what the block held when it was
+        asked -- but the ERROR line and monitor #6 wait for a second consecutive failure.
+        Monitor #6 means "the inverter is refusing our writes", and it can only keep meaning
+        that if it is not also said three times a day."""
         now = dt.datetime.now(UTC)
         path = self._slots_file(tmp_path, now)
 
@@ -245,23 +247,25 @@ class TestTickEndToEnd:
                 calls.append(1)
                 if len(calls) == 2:          # 1 = the hijack read, 2 = the verify read
                     words = list(words)
-                    words[1], words[2] = 0, R.POWER_OFFSET   # power not ingested yet
-                    words[5] = 0                             # mode not ingested yet
+                    words[5] = 0                             # mode not reloaded yet
                 return words
 
             inv.read_raw_block = flaky
             cache = {}
-            await scheduler.tick(inv, path, cache, now)
-            return cache, len(calls)
+            with caplog.at_level("WARNING", logger="dispatch"):
+                await scheduler.tick(inv, path, cache, now)
+            return cache, len(calls), [(r.levelname, r.message) for r in caplog.records]
 
-        cache, reads = on_simulator(body, seed={R.REG_BATTERY_SOC: [800]})
-        assert cache["write_verified"] is True
-        assert reads == 3, "the verify read should have been retried exactly once"
+        cache, reads, records = on_simulator(body, seed={R.REG_BATTERY_SOC: [800]})
+        assert cache["write_verified"] is False
+        assert cache["unverified_streak"] == 1
+        assert reads == 2, "no in-tick re-read: it never once rescued a real one"
+        assert not [m for lvl, m in records if lvl == "ERROR"]
+        assert any("rechecking next tick" in m for _, m in records)
 
     def test_a_block_that_stays_wrong_still_fails_verification(self, tmp_path, monkeypatch):
-        """The retry must not turn monitor #6 off. A second read that still disagrees is an
-        inverter refusing the write, and that is the failure this design fears most."""
-        monkeypatch.setattr(scheduler, "VERIFY_RETRY_DELAY_S", 0.0)
+        """The debounce must not turn monitor #6 off. A block that never takes the write is
+        an inverter refusing it, and that is the failure this design fears most."""
         now = dt.datetime.now(UTC)
         path = self._slots_file(tmp_path, now)
 
@@ -452,11 +456,21 @@ class TestTickEndToEnd:
             inv.apply = apply_then_sabotage
             cache: dict = {}
             with caplog.at_level("ERROR", logger="dispatch"):
+                # TWO ticks, because one is the mode register settling after a release and
+                # that reading is not evidence of anything. The sabotage here is permanent,
+                # so the second tick is what makes it a real failure.
                 await scheduler.tick(inv, path, cache, now)
-            return cache["write_verified"], [r.message for r in caplog.records]
+                first = [r.message for r in caplog.records]
+                await scheduler.tick(inv, path, cache, now)
+            return (cache["write_verified"], cache["unverified_streak"],
+                    first, [r.message for r in caplog.records])
 
-        verified, messages = on_simulator(body, seed={R.REG_BATTERY_SOC: [800]})
+        verified, streak, first, messages = on_simulator(
+            body, seed={R.REG_BATTERY_SOC: [800]})
         assert verified is False
+        assert streak == 2
+        assert not [m for m in first if "WRITE NOT VERIFIED" in m], (
+            "the first unverified tick must not raise the alarm")
         assert any("WRITE NOT VERIFIED" in m for m in messages)
 
     def test_surplus_is_read_as_negative_grid_plus_battery(self, tmp_path):
@@ -507,7 +521,6 @@ class TestTickEndToEnd:
         explanation was still our own write from a tick earlier, already alarmed on by
         monitor #6 (WRITE NOT VERIFIED). A write that never verifies must not ALSO read as
         a hijack next tick."""
-        monkeypatch.setattr(scheduler, "VERIFY_RETRY_DELAY_S", 0.0)
         now = dt.datetime.now(UTC)
         path = self._slots_file(tmp_path, now)
 

@@ -92,8 +92,23 @@ class TestSlotsFresh:
 
 
 class TestDispatchConfirmed:
-    def test_a_write_that_did_not_verify_takes_monitor_6_down(self):
-        status, msg = pings(commanded(), {"write_verified": False})["dispatch-confirmed"]
+    def test_one_unverified_tick_does_not_take_monitor_6_down(self):
+        """The first command tick after a release reads mode=0 while the register reloads --
+        36 times in ~12,000 writes between go-live and 2026-09-02, never twice in a row, and
+        the commanded power was reached every time. Paging on that is how monitor #6 becomes
+        something you scroll past."""
+        status, msg = pings(commanded(),
+                            {"write_verified": False, "unverified_streak": 1})[
+                                "dispatch-confirmed"]
+        assert status == "up"
+        assert "rechecking" in msg
+
+    def test_two_consecutive_unverified_ticks_take_monitor_6_down(self):
+        """Two in a row is no longer the settling register, and this monitor means what it
+        says again: the inverter is refusing our writes."""
+        status, msg = pings(commanded(),
+                            {"write_verified": False, "unverified_streak": 2})[
+                                "dispatch-confirmed"]
         assert status == "down"
         assert "did not verify" in msg
 
@@ -108,8 +123,8 @@ class TestDispatchConfirmed:
     def test_dry_run_never_reports_a_failed_write(self):
         """Dry run writes nothing, so every readback mismatches. Left unguarded this monitor
         would sit red for the whole observation phase and be ignored by the time it mattered."""
-        status, msg = pings(commanded(), {"write_verified": False}, dry_run=True)[
-            "dispatch-confirmed"]
+        status, msg = pings(commanded(), {"write_verified": False, "unverified_streak": 5},
+                            dry_run=True)["dispatch-confirmed"]
         assert status == "up"
         assert "dry run" in msg
 
