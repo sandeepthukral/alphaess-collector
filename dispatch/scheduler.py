@@ -93,11 +93,17 @@ WEEKLY_FAIL_STREAK_LIMIT = 3
 # 3x25 A connection.
 IMPLAUSIBLE_POWER_W = 30000
 
-# How long to wait before re-reading a dispatch block that did not verify. Long enough for the
-# inverter to finish ingesting a block written milliseconds earlier, short enough to be
-# invisible inside a 60 s loop -- and it is only ever paid on a tick that was about to raise an
-# alarm anyway.
-VERIFY_RETRY_DELAY_S = 0.5
+# How many CONSECUTIVE ticks may fail to verify before monitor #6 is told the inverter is
+# refusing our writes. Two, because one is the normal reading of a block that was released a
+# tick earlier -- see step 8.
+#
+# THIS REPLACED A 0.5 s IN-TICK RE-READ, which was measured and did not work. Between
+# 2026-08-21 (go-live) and 2026-09-02 the readback disagreed on 36 of ~12,000 writes, and the
+# re-read rescued exactly none of them: `write verified on re-read` appears zero times in
+# Loki against ten `WRITE NOT VERIFIED` in the same window. The mode register does not settle
+# in half a second. It settles within sixty, so the next tick is the right place to look, and
+# it costs no sleep inside the control loop.
+UNVERIFIED_TICKS_BEFORE_ALARM = 2
 
 
 def _id_kwarg() -> str:
@@ -360,11 +366,19 @@ def monitor_pings(decision: S.Decision, cache: dict, live_soc: float | None,
         pings.append(("slots-fresh", "down", decision.reason))
 
     verified = cache.get("write_verified")
+    # Not `verified is False` -- see step 8. One unverified tick is the mode register settling
+    # after a release and clears by the next look; the monitor goes down only once that
+    # explanation has been ruled out by a second consecutive failure.
+    streak = cache.get("unverified_streak", 0)
     if dry_run:
         pings.append(("dispatch-confirmed", "up", "dry run -- nothing written"))
+    elif streak >= UNVERIFIED_TICKS_BEFORE_ALARM:
+        pings.append(("dispatch-confirmed", "down",
+                      f"write did not verify on {streak} consecutive ticks: the block does "
+                      f"not hold what was just written"))
     elif verified is False:
-        pings.append(("dispatch-confirmed", "down", "write did not verify: the block does "
-                                                    "not hold what was just written"))
+        pings.append(("dispatch-confirmed", "up",
+                      "write not verified on the first look -- rechecking next tick"))
     else:
         pings.append(("dispatch-confirmed", "up",
                       "verified" if verified else "nothing commanded this tick"))
@@ -651,42 +665,48 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         ok = bool(verified["dispatch_active"]) and cmd is not None and S.matches_command(
             verified, cmd)
 
-        if not ok and not inv.dry_run:
-            # ONE RE-READ BEFORE CRYING WOLF. The block does not update atomically: START is
-            # written last and lands first, so a readback taken microseconds later can show
-            # `dispatch_active=1` beside a `mode` and `power` the device has not ingested yet.
-            #
-            # OBSERVED 2026-08-20 15:16:29Z, the first tick after a rebuild: wrote
-            # mode=2 +4848 W to 90.5 %, read back `mode=0 power=0 duration=90` with
-            # dispatch_active already 1 -- the half-applied state of a block that was released
-            # a second earlier by the outgoing container. The next tick read mode 2 at 4,848 W
-            # and every tick since has verified.
-            #
-            # It matters because of what it costs when it is wrong: monitor #6 means "the
-            # inverter is refusing our writes", and a DOWN on every single deploy is how a
-            # monitor becomes something you scroll past. The retry is a READ, so it cannot
-            # change what the battery is doing -- and if the second read still disagrees, the
-            # alarm below fires exactly as it did before and now means what it says.
-            await asyncio.sleep(VERIFY_RETRY_DELAY_S)
-            try:
-                raw_words = await inv.read_raw_block()
-                verified = R.decode_block(raw_words)
-                ok = bool(verified["dispatch_active"]) and S.matches_command(verified, cmd)
-                if ok:
-                    log.info("write verified on re-read after %.1f s -- the block was "
-                             "mid-ingest on the first look", VERIFY_RETRY_DELAY_S)
-            except OSError as e:
-                log.warning("verify re-read failed: %s", e)
+        # THE MODE REGISTER IS CLEARED AND RELOADED WHEN START GOES 0 -> 1, and for a while
+        # after our write it reads 0 while every other register in the block already holds
+        # what we sent. So the first command tick after a release reads back as a failure and
+        # is not one.
+        #
+        # MEASURED, not assumed. 2026-09-01T14:15:50Z: released at 14:14:50, commanded
+        # mode=2 +4848 W to 97.9 % at 14:15:50, read back dispatch_active=1 with power_w
+        # 4848, target_soc_pct 98.0 and duration_s 300 all correct and mode=0. At 14:16:50
+        # mode read 2 and verified; by 14:17:50 the battery was charging at 4,828 W against
+        # the 4,848 W setpoint. Identical shape on the discharge side at
+        # 2026-08-26T16:15:12Z. Across 2026-08-21 to 2026-09-02 this happened 36 times in
+        # ~12,000 writes and NO TWO WERE ON CONSECUTIVE TICKS -- every one had cleared by the
+        # next look, and the commanded power was reached every time.
+        #
+        # So the tick still publishes `verified=0`, because that is the honest reading of
+        # what the block held when it was asked and `slots.is_hijacked` depends on it. What
+        # waits is the ALARM. Monitor #6 means "the inverter is refusing our writes"; firing
+        # it three times a day for a register that settles inside a minute is how a monitor
+        # becomes something you scroll past.
+        streak = (cache.get("unverified_streak", 0) + 1) if not ok else 0
+        cache["unverified_streak"] = streak
 
         if not ok and not inv.dry_run:
-            # Monitor #6. A write that silently does not land is the failure this whole
-            # design fears most: every log line says "commanded", the battery does nothing,
-            # and no monitor notices.
-            log.error("WRITE NOT VERIFIED: wrote mode=%s power=%+dW soc=%s, read back %s",
-                      cmd.mode, cmd.power_w, cmd.target_soc_pct, verified)
+            if streak >= UNVERIFIED_TICKS_BEFORE_ALARM:
+                # A write that silently does not land is the failure this whole design fears
+                # most: every log line says "commanded", the battery does nothing, and no
+                # monitor notices. Two ticks in a row is no longer the settling register.
+                log.error("WRITE NOT VERIFIED on %d consecutive ticks: wrote mode=%s "
+                          "power=%+dW soc=%s, read back %s", streak,
+                          cmd.mode, cmd.power_w, cmd.target_soc_pct, verified)
+            else:
+                log.warning("write not verified on the first look (mode=%s, expected %s) -- "
+                            "normal on the tick after a release; rechecking next tick",
+                            verified["mode"], cmd.mode)
         cache["write_verified"] = ok
     else:
         cache["write_verified"] = None
+        # A tick with nothing to confirm breaks the run. The streak counts CONSECUTIVE ticks,
+        # so a release or an idle between two unverified writes means they are not two in a
+        # row -- and without this reset a single stale 1 would sit in the cache through a
+        # quiet night and turn the next unrelated blip into an alarm.
+        cache["unverified_streak"] = 0
 
     # 8b. Battery cell voltage and temperature, min and max across the whole fleet of packs.
     #

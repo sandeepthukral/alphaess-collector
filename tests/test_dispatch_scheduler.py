@@ -365,9 +365,10 @@ class TestTickPublishesTheWriteVerifyVerdict:
 
     def test_a_write_that_never_lands_publishes_verified_zero(self, tmp_path, monkeypatch):
         # `latch_writes=False`: the write is recorded but the register dict never moves, so
-        # the verify readback (and its one retry) keeps reporting the pre-write, released
-        # state -- exactly what "the block does not hold what was just written" looks like.
-        monkeypatch.setattr(scheduler, "VERIFY_RETRY_DELAY_S", 0)
+        # the verify readback keeps reporting the pre-write, released state -- exactly what
+        # "the block does not hold what was just written" looks like. The point is published
+        # on the FIRST such tick, before the alarm waits for a second one: `verified=0` is
+        # the honest reading of what the block held, and the debounce is about the alarm.
         client = ScriptedClient(measurement_registers(), latch_writes=False)
         pub = RecordingPublisher()
         decision, cache = run_scripted_tick(tmp_path, monkeypatch, client, dry_run=False,
