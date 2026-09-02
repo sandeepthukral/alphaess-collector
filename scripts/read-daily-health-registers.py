@@ -53,19 +53,52 @@ import registers as R  # noqa: E402
 WINDOWS = [
     (0x0115, 0x0128 - 0x0115 + 1, "firmware / SoH / lifetime energy / battery power"),
     (0x0430, 0x0440 - 0x0430 + 1, "inverter temperature / inverter faults / inverter PV"),
-    (0x08D0, 5, "system lifetime PV energy"),
+    (0x08D0, 6, "system lifetime PV energy (const.py has only 0x08D4, System Fault)"),
 ]
 
-# The four candidates, as (label, address, word count, kind). `kind` only selects which
-# scale hypotheses get printed -- nothing here is treated as confirmed.
+# The candidates, as (label, address, word count, kind). `kind` only selects which scale
+# hypotheses get printed -- nothing here is treated as confirmed.
+#
+# TWO ALIGNMENTS ARE LISTED FOR EVERY 32-BIT FIELD, one register apart, and settling that is
+# the main job of this run. TODO.md item 13 read AlphaESS's parameter table as addressing a
+# 32-bit value at its SECOND word; senalse/ha-alphaess-modbus's const.py addresses it at its
+# FIRST, which shifts charge/discharge/grid-charge and the PV totals up by one and puts the
+# inverter temperature at 0x0435 rather than 0x0434.
+#
+# THE SECOND SOURCE LOOKS STRONGER ON PAPER, which is exactly why it is not simply adopted
+# here. Its layout runs 0x0120-0x0125 contiguously into 0x0126, a register this repo has
+# already confirmed live as battery power, with no gap; item 13's alignment has to posit an
+# unexplained unused word at 0x0125 to fit. It is also self-consistent at the inverter
+# (temperature 0x0435, warning1 0x0436), where item 13's reading would have the warning word
+# overlap the temperature. But "the tidier document wins" is how 0x0883 got written down as
+# the mode register, so the tie is broken by the live values below, not by which table reads
+# better.
+#
+# WHAT TO LOOK FOR: only one alignment can produce three plausible, correctly ORDERED
+# counters (charge > discharge > grid-charge). A misaligned pair splices the low word of one
+# counter onto the high word of the next and produces a number that is wrong by orders of
+# magnitude, which is unmistakable once both are printed side by side.
 CANDIDATES = [
-    ("SoH",                        0x011B, 1, "percent"),
-    ("lifetime charge energy",     0x011F, 2, "energy"),
-    ("lifetime discharge energy",  0x0121, 2, "energy"),
-    ("lifetime grid-charge energy", 0x0123, 2, "energy"),
-    ("inverter heatsink temp",     0x0434, 1, "temp"),
-    ("inverter lifetime PV energy", 0x043D, 2, "energy"),
-    ("system lifetime PV energy",  0x08D1, 2, "energy"),
+    ("SoH (both sources agree)",              0x011B, 1, "percent"),
+    ("lifetime charge  [item 13]",            0x011F, 2, "energy"),
+    ("lifetime charge  [const.py]",           0x0120, 2, "energy"),
+    ("lifetime discharge  [item 13]",         0x0121, 2, "energy"),
+    ("lifetime discharge  [const.py]",        0x0122, 2, "energy"),
+    ("lifetime grid-charge  [item 13]",       0x0123, 2, "energy"),
+    ("lifetime grid-charge  [const.py]",      0x0124, 2, "energy"),
+    ("inverter temperature  [item 13]",       0x0434, 1, "temp"),
+    ("inverter temperature  [const.py]",      0x0435, 1, "temp"),
+    ("inverter lifetime PV  [item 13]",       0x043D, 2, "energy"),
+    ("inverter lifetime PV  [const.py]",      0x043E, 2, "energy"),
+    # No second source at all: const.py lists nothing between 0x08D0 and 0x08D4 (System
+    # Fault). Both alignments printed anyway, since there is nothing to prefer either.
+    ("system lifetime PV  [item 13]",         0x08D1, 2, "energy"),
+    ("system lifetime PV  [+1]",              0x08D2, 2, "energy"),
+    # Already confirmed by both sources and by this repo. Printed so the run carries its own
+    # proof that the scale hypotheses below are being applied to sane numbers: 0.1 kWh/bit is
+    # const.py's factor for every energy total here, and 0x0119 at that scale must come out
+    # at the 27.9 kWh this site is independently known to have.
+    ("battery capacity (0x0119, known 27.9 kWh)", 0x0119, 1, "energy"),
 ]
 
 # Already confirmed live on this site. Read alongside, so a run that produces nonsense
@@ -184,12 +217,16 @@ def main():
         print()
 
     print("Sanity checks worth doing by eye, none of which need a bit map:")
+    print("  * FIRST, pick the alignment. Only one of [item 13] / [const.py] can give three")
+    print("    counters that are all plausible AND ordered charge > discharge > grid-charge.")
+    print("    The other splices adjacent counters together and will be obviously wrong.")
+    print("  * battery capacity at 0x0119 must read 27.9 kWh at 0.1 kWh/bit. If it does not,")
+    print("    distrust every energy scale below it -- that one is independently known.")
     print("  * SoH should sit just under 100 %, not at 0 and not in the thousands.")
-    print("  * discharge < charge, and grid-charge <= charge: a round trip loses energy,")
-    print("    and grid charging is a subset of all charging.")
     print("  * discharge/charge should land near 0.90-0.96. That ratio is scale-free, so it")
-    print("    is the one check that survives not knowing the units.")
-    print("  * heatsink temp should be above ambient and below ~60 C while inverting.")
+    print("    is the one check that survives not knowing the units at all.")
+    print("  * grid-charge <= charge: grid charging is a subset of all charging.")
+    print("  * inverter temperature should be above ambient and below ~60 C while running.")
     print("  * every lifetime counter must be >= what this repo has already recorded for")
     print("    the period it has been running -- compare against daily_energy in InfluxDB.")
     print("\nRemember: sudo docker compose start dispatch")

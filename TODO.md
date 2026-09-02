@@ -92,24 +92,50 @@ Raised in that PR's review.
 
 **13. The health-poller's daily tier (SoH, lifetime energy, heatsink temp, PV energy) has no
 confirmed register layout.** UPDATE 2026-08-28: found AlphaESS's own "Parameter address table"
-(via `ha-alphaess-modbus`'s `all_registers.txt`), and it corrects the handover's guessed
-addresses by one register in three places — the same class of off-by-one #12 turned out to be
-before it was resolved. Per that table: SoH is `0x011B` (unsigned, 0.1%/bit — matches the
-handover). Lifetime charge/discharge/grid-charge energy is a 3×2-word block starting at
-**`0x011F`**, not `0x0120` — charge (`0x011F`-`0x0120`), discharge (`0x0121`-`0x0122`),
-grid-charge (`0x0123`-`0x0124`); `0x0125` is a gap, then `0x0126` is the already-confirmed
-`REG_BATTERY_POWER`, which is what pins this boundary. Inverter heatsink temp ("INV
-Temperature") is **`0x0434`**, not `0x0435` — `0x0435`-`0x0436` is actually the start of the
-inverter's own fault/warning words. PV energy is two 2-word fields, not two 1-word ones:
-inverter lifetime PV energy is **`0x043D`-`0x043E`**, system lifetime PV energy is
-**`0x08D1`-`0x08D2`**. Still needs live-inverter verification before shipping, per this
-module's own rule — checked what the AlphaESS app shows on 2026-08-28 and it does not surface
-SoH%, lifetime energy totals, or a heatsink temperature reading at all, so the cross-check
-path this item originally proposed doesn't exist for these four; a `--once` read is still the
-right move, just checked for plausibility (bounds, monotonicity across two reads) rather than
-against an app number. Once confirmed, add a `DAILY_HEALTH_REFRESH_S` gate (`~86400s`) next to
-`HEALTH_REFRESH_S`. `alphaess-battery-health.json` carries no SoH/daily-energy/lifetime-cycle
-panels until these fields exist, so add both in one change.
+(via `ha-alphaess-modbus`'s `all_registers.txt`), which corrects the handover's guessed
+addresses by one register in three places. UPDATE 2026-09-02: a SECOND source disagrees with
+that reading, and it is the more credible of the two. `senalse/ha-alphaess-modbus`'s
+`custom_components/alphaess_modbus/const.py` addresses every 32-bit value at its FIRST word,
+where the 2026-08-28 note read the manufacturer table as addressing it at its SECOND -- which
+is precisely the one-register shift that produced all three "corrections". Per `const.py`:
+
+| field | 2026-08-28 note | `const.py` |
+|---|---|---|
+| lifetime charge | `0x011F`-`0x0120` | `0x0120`-`0x0121` |
+| lifetime discharge | `0x0121`-`0x0122` | `0x0122`-`0x0123` |
+| lifetime grid-charge | `0x0123`-`0x0124` | `0x0124`-`0x0125` |
+| inverter temperature | `0x0434` | `0x0435` |
+| inverter lifetime PV | `0x043D`-`0x043E` | `0x043E`-`0x043F` |
+
+`const.py`'s layout is gapless -- charge/discharge/grid-charge run `0x0120`-`0x0125` straight
+into `0x0126`, which this repo has confirmed live as battery power -- where the 2026-08-28
+reading has to posit an unused word at `0x0125` to fit. It is also self-consistent at the
+inverter (temperature `0x0435`, warning1 `0x0436`), where the other reading would have the
+warning word overlap the temperature. So the handover's original addresses were probably right
+all along and the "correction" was the error. NOT ADOPTED ON THAT BASIS ALONE: "the tidier
+document wins" is how `0x0883` came to be written down as the mode register.
+`scripts/read-daily-health-registers.py` prints both alignments side by side from a live read,
+and only one can produce three plausible, correctly ordered counters -- that is what settles
+it. Run it (dispatch stopped, read-only) before anything here ships.
+
+`const.py` also supplies the scales the earlier note did not: SoH `0x011B` is `int16` at
+0.1 %/bit, every lifetime energy total is `uint32` at 0.1 kWh/bit, inverter temperature is
+`int16` at 0.1 C/bit. Battery capacity `0x0119` at 0.1 kWh/bit gives 27.9 kWh, matching what
+this repo already has independently from the plan, which is a free check that those scales are
+being read correctly.
+
+Two things remain unsourced. System lifetime PV energy at `0x08D1`-`0x08D2` appears in neither
+`const.py` (which lists nothing between `0x08D0` and `0x08D4`, System Fault) nor anywhere else
+found; treat it as unconfirmed regardless of what the probe shows. And checking the AlphaESS
+app on 2026-08-28 found it surfaces no SoH%, no lifetime totals and no heatsink temperature at
+all, so the cross-check path this item originally proposed does not exist for these four --
+plausibility (bounds, ordering, monotonicity across two reads) is the whole of the evidence.
+
+Once the alignment is settled: add a `DAILY_HEALTH_REFRESH_S` gate (~86400s) next to
+`HEALTH_REFRESH_S`, and add the SoH/daily-energy/lifetime-cycle panels to
+`alphaess-battery-health.json` in the SAME change -- it deliberately carries none today,
+because a panel naming a field `dispatch/state.py` never writes is what
+`test_every_field_filter_names_a_field_we_publish` exists to catch.
 
 **14. The health-poller's weekly firmware/system-config blocks are published as raw hex, not
 decoded fields.** UPDATE 2026-08-28: the same manufacturer table resolves the word-by-word
@@ -127,11 +153,16 @@ live reads `0`, which does not obviously match a battery that is plainly in use;
 app checked 2026-08-28 has no explicit "battery ready" indicator, only charge/discharge
 activity, so this one flag's meaning stays unconfirmed even though its address is now solid),
 IP method (`0x0808`), local IP/subnet/gateway/Modbus address (`0x0809`-`0x080F`, mostly
-useless on a dashboard). `INVERTER_FW_BLOCK` (`0x0640`-`0x0653`) is three ASCII version
-strings, 2 chars/word: inverter master firmware (`0x0640`-`0x0644`, 5 words), inverter slave
-firmware (`0x0645`-`0x0649`, 5 words), inverter arm firmware (`0x064A`-`0x0653`, 10 words) —
-live master and slave words are byte-identical and decode to printable ASCII including a
-literal `.`, which is consistent with this being right. Decode the numeric/enum fields with
+useless on a dashboard). `INVERTER_FW_BLOCK` (`0x0640`-`0x0653`) is ASCII version
+strings, 2 chars/word: master firmware (`0x0640`-`0x0644`), slave firmware
+(`0x0645`-`0x0649`), arm firmware (`0x064A`-`0x0653`) — live master and slave words are
+byte-identical and decode to printable ASCII including a literal `.`. UPDATE 2026-09-02:
+`senalse/ha-alphaess-modbus`'s `const.py` lists only TWO strings here, inverter version
+(`0x0640`, 5 words) and inverter **ARM** version (`0x0645`, 5 words), with nothing at
+`0x064A`. The byte-identical observation that made the three-string reading look right is
+equally well explained by there being no slave string at all and `0x0645` holding the ARM
+version. Decode the two `const.py` names and leave `0x064A`-`0x0653` raw until something
+confirms what is in it. Decode the numeric/enum fields with
 confidence; leave battery-ready and system-mode's human-readable labels either raw or
 clearly caveated, since neither has an independent confirmation source. No gate/cadence
 change needed, just extending `decode_firmware_block`/`decode_inverter_fw_block`/
