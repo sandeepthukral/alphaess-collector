@@ -92,8 +92,12 @@ the host's zone: left unset, containers run UTC while Grafana and Uptime Kuma
 show local time, and the same failure appears at two different clock times.
 
 Then open Grafana at `http://<nas-host>:3000` (or your `GRAFANA_PORT`). The
-InfluxDB datasource and all three dashboards — **Overview**, **Energy Flow**
-(Sankey), and **Battery Savings** — are provisioned automatically, and
+InfluxDB datasource and every dashboard in `grafana/` are provisioned
+automatically. Start on **Overview**: it is the status board, four verdict
+tiles across the top — battery, dispatcher, collector, nightly jobs — over one
+row of detail each, and a link out to the dashboard behind every tile. The
+energy detail (the source→use Sankey, solar against load, the daily and hourly
+totals) is on **Energy** and **Energy Flow**, and
 the bundled Grafana installs the `volkovlabs-echarts-panel` plugin the Sankey
 needs. Nothing to configure by hand. (The Battery Savings dashboard shows "No
 data" until the pricing jobs have run — see

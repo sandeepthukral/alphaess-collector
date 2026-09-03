@@ -215,6 +215,8 @@ def test_price_line_reads_the_plan_ahead_of_now():
 COPIED_PANELS = {
     "alphaess-battery-plan.json": ("alphaess-dashboard.json", [
         "Planned SoC vs actual SoC",
+        "Plan age",
+        "Planned benefit over horizon",
     ]),
     "alphaess-dispatch.json": ("alphaess-dashboard.json", [
         "Dispatcher",
@@ -223,9 +225,32 @@ COPIED_PANELS = {
         "Command expires in",
         "What the dispatcher will do next",
     ]),
+    "alphaess-battery-health.json": ("alphaess-dashboard.json", [
+        "Active faults",
+        "Active warnings",
+        "State of health",
+    ]),
+    "alphaess-battery-savings.json": ("alphaess-dashboard.json", [
+        "Total saving to date",
+    ]),
     "alphaess-dashboard.json": ("alphaess-battery-health.json", [
         "Battery cell temperature (min/max)",
     ]),
+}
+
+# Panels the main dashboard shows a version of that is NOT a copy: same idea, different
+# window. They are deliberately retitled with the window in the title, because the copy
+# rule above is what makes a shared title mean "these two run the same query", and a panel
+# that quietly answered a different question under the same name would break that promise
+# for every other entry.
+#
+# The reason they cannot be copies: this dashboard's range runs 36 hours into the FUTURE
+# for the plan panels, so a count over `v.timeRange` -- which is what Collector Health asks
+# -- is not a number about anything here.
+RESCOPED_PANELS = {
+    "Failed polls (24h)": ("alphaess-collector-health.json", "Failed polls"),
+    "Heartbeat pushes failing (24h)": ("alphaess-collector-health.json",
+                                       "Heartbeat unreachable"),
 }
 
 # Every (destination, title) pair, flat -- the horizon rule below applies only to the pairs
@@ -291,6 +316,30 @@ def test_copied_panels_match_their_source(source):
         assert _overrides(main[title]) == _overrides(origin[title]), f"{title} ({source})"
 
 
+@pytest.mark.parametrize("title", sorted(RESCOPED_PANELS))
+def test_rescoped_panels_count_the_same_series_over_a_fixed_window(title):
+    """A re-scoped panel may change its WINDOW and nothing else.
+
+    The two things it must not change are the series it counts -- both of these select on
+    string literals, where a typo matches nothing, counts zero and reads as perfect health
+    -- and its independence from the picker. Between them that is the whole panel: a fixed
+    window over the right series, or a tile that is confidently green for the wrong reason.
+    """
+    source_name, source_title = RESCOPED_PANELS[title]
+    _, main = _panels_by_title("alphaess-dashboard.json")
+    _, source = _panels_by_title(source_name)
+
+    assert title in main, f"{title} is missing from alphaess-dashboard.json"
+    query = main[title]["targets"][0]["query"]
+    origin = source[source_title]["targets"][0]["query"]
+
+    assert "v.timeRange" not in query, (
+        f"{title} reads the time picker, which on this dashboard runs 36h into the future")
+    assert "range(start: -24h)" in query, title
+    for literal in re.findall(r'(?:_measurement|\.event|_field) == "[^"]+"', origin):
+        assert literal in query, f"{title} no longer selects {literal!r}, but {source_title} does"
+
+
 def test_the_copy_list_is_not_empty():
     """Guards the guard: an emptied list, or a source/target dashboard renamed, would make
     the test above iterate nothing and pass."""
@@ -344,13 +393,51 @@ def test_live_panels_keep_their_own_window():
     an override they would draw six hours of data against a day and a half of blank -- the
     live view spending most of its width on the future it knows nothing about.
 
-    Only the three that read v.timeRange need it; the four stat panels range over a fixed
-    -1h or -90d by design and are unaffected by the picker.
+    One panel left where there were three. "Energy Flow: Sources -> Uses" and "Solar vs
+    Load vs SoC" were dropped when the main dashboard became a status board: both are still
+    on the Energy dashboard, which is what the picker exists for, and both were duplicated
+    there in full. "Power" stayed because a status board that cannot say what the house is
+    doing right now sends you to a second dashboard to answer the easiest question on it.
+
+    Every other panel here ranges over a fixed window by design -- -5m, -3h, -24h, -90d --
+    and is unaffected by the picker, which is the rule for anything that reads as a verdict.
     """
     _, main = _panels_by_title("alphaess-dashboard.json")
 
-    for title in ("Energy Flow: Sources -> Uses", "Solar vs Load vs SoC", "Power"):
+    for title in ("Power",):
         assert main[title].get("timeFrom") == "24h", title
+
+    # The two that left must not come back by a Grafana UI export, which would restore them
+    # without the override and draw them across the plan's empty future.
+    for title in ("Energy Flow: Sources -> Uses", "Solar vs Load vs SoC"):
+        assert title not in main, (
+            f"{title} is back on the main dashboard; it belongs on Energy / Energy Flow")
+
+
+# Dashboards the title-keyed tests above look panels up on. Uniqueness matters on exactly
+# these: _panels_by_title builds a dict, so a second panel with the same title SHADOWS the
+# first and the test then checks the wrong panel -- or passes because a row happened to
+# land on the name. Caught while adding the status rows, where a row titled "Battery" sat
+# above a stat titled "Battery" and the row won.
+#
+# Not applied to every dashboard: alphaess-collector-health.json deliberately carries a
+# stat and a table both called "Outages", nothing looks either up by title, and renaming
+# one to satisfy a test nobody needed would be the tail wagging the dog.
+TITLE_KEYED = [
+    "alphaess-dashboard.json",
+    "alphaess-battery-plan.json",
+    "alphaess-battery-health.json",
+    "alphaess-battery-savings.json",
+    "alphaess-dispatch.json",
+]
+
+
+@pytest.mark.parametrize("name", TITLE_KEYED)
+def test_panel_titles_are_unique_where_tests_key_on_them(name):
+    dash = json.loads((REPO / "grafana" / name).read_text(encoding="utf-8"))
+    titles = [p.get("title") for p in dash["panels"]]
+    duplicates = sorted({t for t in titles if titles.count(t) > 1})
+    assert duplicates == [], f"{name}: {duplicates} -- _panels_by_title would shadow one"
 
 
 @pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
@@ -705,11 +792,17 @@ def test_heartbeat_tile_and_alert_read_the_same_series():
             "field": set(re.findall(r'_field == "([^"]+)"', flux)),
         }
 
-    dashboard = json.loads(
-        (REPO / "grafana" / "alphaess-collector-health.json").read_text(encoding="utf-8"))
-    panel = next(p for p in dashboard["panels"] if p["title"] == "Heartbeat unreachable")
-    assert len(panel["targets"]) == 1, panel["targets"]
-    tile = selectors(panel["targets"][0]["query"])
+    # Both tiles: Collector Health's, and the main dashboard's own 24h copy of the
+    # question. Two places to make the same silent typo, so both are pinned.
+    tiles = []
+    for name, title in (("alphaess-collector-health.json", "Heartbeat unreachable"),
+                        ("alphaess-dashboard.json", "Heartbeat pushes failing (24h)")):
+        dashboard = json.loads((REPO / "grafana" / name).read_text(encoding="utf-8"))
+        panel = next(p for p in dashboard["panels"] if p["title"] == title)
+        assert len(panel["targets"]) == 1, panel["targets"]
+        tiles.append(selectors(panel["targets"][0]["query"]))
+    assert tiles[0] == tiles[1], "the two heartbeat tiles count different points"
+    tile = tiles[0]
 
     doc = yaml.safe_load(
         (PROVISIONING / "alerting" / "alphaess-heartbeat-unreachable.yml")

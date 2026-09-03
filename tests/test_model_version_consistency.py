@@ -25,6 +25,17 @@ VERSIONED = [
                  id="pricing"),
     pytest.param(efficiency.MODEL_VERSION, "alphaess-energy-losses.json", "daily_energy",
                  id="efficiency"),
+    # The main dashboard's `Total saving to date` sums daily_cost, so it carries a third
+    # copy of the same list and gets the same pins: unfiltered, that tile would add two
+    # models' worth of euros together and the number would look entirely reasonable.
+    #
+    # Only pricing. The two jobs are at different versions (daily_cost 4, daily_energy 1),
+    # so one `model_version` variable cannot serve both, and the main dashboard's is
+    # pricing's -- the only daily_energy it reads is the nightly-jobs liveness pair, which
+    # is exempt below for reasons that have nothing to do with which variable exists. A
+    # panel there that ever SUMS daily_energy needs its own variable, not this one.
+    pytest.param(pricing.MODEL_VERSION, "alphaess-dashboard.json", "daily_cost",
+                 id="pricing-main"),
 ]
 
 
@@ -55,7 +66,12 @@ def test_current_model_version_is_a_selectable_option(version, dashboard_name,
 # MODEL_VERSION is bumped, before any backfill has had a chance to run, and the
 # provisioned alert that mirrors it cannot reference a dashboard variable in the
 # first place. Listed rather than pattern-matched so adding one is a decision.
-UNVERSIONED_PANELS = {"Job age"}
+#
+# `Nightly jobs` and `Which job is late` are the main dashboard's pair of the same
+# argument, over five jobs rather than one -- and the reason to keep them unfiltered is
+# sharper there: a bump would paint the verdict tile red for every job at once, which is
+# the single tile most likely to be believed.
+UNVERSIONED_PANELS = {"Job age", "Nightly jobs", "Which job is late"}
 
 
 @pytest.mark.parametrize("version, dashboard_name, measurement", VERSIONED)
