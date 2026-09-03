@@ -233,9 +233,6 @@ COPIED_PANELS = {
     "alphaess-battery-savings.json": ("alphaess-dashboard.json", [
         "Total saving to date",
     ]),
-    "alphaess-dashboard.json": ("alphaess-battery-health.json", [
-        "Battery cell temperature (min/max)",
-    ]),
 }
 
 # Panels the main dashboard shows a version of that is NOT a copy: same idea, different
@@ -276,8 +273,12 @@ def _overrides(panel):
 
 
 def _panels_by_title(name):
+    """Rows are excluded: a row is a heading, never a thing with a query, and every test
+    here looks up panels that have one. Naming a row after the tile that summarises the
+    section is the obvious thing to do -- "Battery" above the battery detail -- and it
+    should not have to be avoided to keep this lookup honest."""
     dash = json.loads((REPO / "grafana" / name).read_text(encoding="utf-8"))
-    return dash, {p.get("title"): p for p in dash["panels"]}
+    return dash, {p.get("title"): p for p in dash["panels"] if p.get("type") != "row"}
 
 
 @pytest.mark.parametrize("source", sorted(COPIED_PANELS))
@@ -366,12 +367,9 @@ def test_copied_panels_span_the_plan_horizon():
     timeFrom override on it would leave a panel whose entire subject is the future
     rendering a blank strip -- the same failure as 2026-08-08, on a different panel.
 
-    Scoped to copies landing on alphaess-dashboard.json only. The battery-health copy of
-    "Battery cell temperature (min/max)" is carved out: that dashboard has no relationship
-    to the plan's horizon at all (it runs a plain 30-day lookback), and the copied panel
-    pins its own `timeFrom: "7d"` regardless of either parent's range -- the same override
-    test_the_temperature_history_keeps_its_own_window already requires of the original.
-    test_the_battery_health_copy_keeps_the_same_window below is that carve-out's own guard.
+    Scoped to copies landing on alphaess-dashboard.json only, which is every entry in the
+    list today; the scoping stays because a copy onto any other board answers to that
+    board's range, not the plan's.
     """
     plan_dash, _ = _panels_by_title("alphaess-battery-plan.json")
     main_dash, main = _panels_by_title("alphaess-dashboard.json")
@@ -418,7 +416,9 @@ def test_live_panels_keep_their_own_window():
 # these: _panels_by_title builds a dict, so a second panel with the same title SHADOWS the
 # first and the test then checks the wrong panel -- or passes because a row happened to
 # land on the name. Caught while adding the status rows, where a row titled "Battery" sat
-# above a stat titled "Battery" and the row won.
+# above a stat titled "Battery" and the row won. That pair is deliberate now and allowed:
+# _panels_by_title skips rows, so the collision it was shadowing cannot happen. Rows are
+# checked against each other, because two sections with one name is its own confusion.
 #
 # Not applied to every dashboard: alphaess-collector-health.json deliberately carries a
 # stat and a table both called "Outages", nothing looks either up by title, and renaming
@@ -435,9 +435,11 @@ TITLE_KEYED = [
 @pytest.mark.parametrize("name", TITLE_KEYED)
 def test_panel_titles_are_unique_where_tests_key_on_them(name):
     dash = json.loads((REPO / "grafana" / name).read_text(encoding="utf-8"))
-    titles = [p.get("title") for p in dash["panels"]]
-    duplicates = sorted({t for t in titles if titles.count(t) > 1})
-    assert duplicates == [], f"{name}: {duplicates} -- _panels_by_title would shadow one"
+    for kind in ("panel", "row"):
+        titles = [p.get("title") for p in dash["panels"]
+                  if (p.get("type") == "row") == (kind == "row")]
+        duplicates = sorted({t for t in titles if titles.count(t) > 1})
+        assert duplicates == [], f"{name}: duplicate {kind} titles {duplicates}"
 
 
 @pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
@@ -506,27 +508,15 @@ def test_the_two_app_tables_share_a_row():
 
 
 def test_the_temperature_history_keeps_its_own_window():
-    """A fourth case of `test_live_panels_keep_their_own_window`'s rule, on the same board.
+    """Battery Health runs a plain `now-30d` to `now` lookback, so without an override the
+    temperature history would spend most of its width on three weeks the thermal story does
+    not need. `timeFrom` pins it to seven days regardless of the picker -- seven rather than
+    the live panels' 24h because a battery's thermal story is a week long, not a day.
 
-    The main dashboard carries the plan's `now-6h` to `now+36h` range (the test above pins
-    that), so a temperature history drawn against it spends most of its width on a future no
-    measurement can fill -- the 2026-08-08 failure in a different panel. `timeFrom` pins this
-    one to seven days regardless of the picker; seven rather than the trio's 24h because a
-    battery's thermal story is a week long, not a day.
-
-    Kept separate from the trio's test rather than folded into its title list, because that
-    test asserts one shared value and this panel deliberately differs from it.
-    """
-    _, main = _panels_by_title("alphaess-dashboard.json")
-    assert main["Battery cell temperature (min/max)"].get("timeFrom") == "7d"
-
-
-def test_the_battery_health_copy_keeps_the_same_window():
-    """The battery-health dashboard's own copy of the same panel must carry the same
-    `timeFrom` override as its source, for the same reason as the test above -- Battery
-    Health runs a plain `now-30d` to `now` lookback (no plan horizon involved at all), so
-    without the override this copy would spend most of its width on three weeks the
-    temperature story doesn't need.
+    Battery Health is now the only board carrying this panel. The main dashboard had a copy
+    until the Battery section became one row of tiles: a week-long history is a question you
+    go somewhere to ask, not a thing a status board answers, and the tiles above it already
+    say whether the pack is hot or cold right now.
     """
     _, health = _panels_by_title("alphaess-battery-health.json")
     panel = health["Battery cell temperature (min/max)"]

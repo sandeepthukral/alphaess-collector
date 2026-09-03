@@ -575,7 +575,7 @@
       },
       "id": 33,
       "panels": [],
-      "title": "Battery, in detail",
+      "title": "Battery",
       "type": "row"
     },
     {
@@ -615,7 +615,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 4,
         "x": 0,
         "y": 5
       },
@@ -685,8 +685,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
+        "w": 4,
+        "x": 4,
         "y": 5
       },
       "id": 10,
@@ -751,7 +751,7 @@
       "gridPos": {
         "h": 4,
         "w": 4,
-        "x": 12,
+        "x": 8,
         "y": 5
       },
       "id": 34,
@@ -819,8 +819,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 16,
+        "w": 3,
+        "x": 12,
         "y": 5
       },
       "id": 35,
@@ -888,8 +888,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 4,
-        "x": 20,
+        "w": 3,
+        "x": 15,
         "y": 5
       },
       "id": 36,
@@ -965,9 +965,9 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 0,
-        "y": 9
+        "w": 3,
+        "x": 18,
+        "y": 5
       },
       "id": 28,
       "options": {
@@ -1006,146 +1006,6 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Seven days of the coldest and hottest cell. The two tiles above say where the battery is now; this says what it has been doing, which is the only way to tell a warm afternoon from a pack that has been climbing all week. The band between the lines is the spread across the fleet - it widens under load and closes overnight, and a spread that stops closing is worth looking into.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 0,
-            "gradientMode": "none",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
-            },
-            "insertNulls": false,
-            "lineInterpolation": "stepAfter",
-            "lineWidth": 2,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
-          },
-          "mappings": [],
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              }
-            ]
-          },
-          "unit": "celsius"
-        },
-        "overrides": [
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "min_cell_temp_c"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "blue",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.lineInterpolation",
-                "value": "linear"
-              },
-              {
-                "id": "displayName",
-                "value": "min cell"
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "max_cell_temp_c"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              },
-              {
-                "id": "custom.lineInterpolation",
-                "value": "linear"
-              },
-              {
-                "id": "displayName",
-                "value": "max cell"
-              }
-            ]
-          }
-        ]
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 16,
-        "x": 8,
-        "y": 9
-      },
-      "id": 30,
-      "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "pluginVersion": "11.6.0",
-      "targets": [
-        {
-          "datasource": {
-            "type": "influxdb",
-            "uid": "${DS_ALPHAESS}"
-          },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\"\n                   and (r._field == \"min_cell_temp_c\" or r._field == \"max_cell_temp_c\"))\n  |> yield(name: \"cell temps\")\n",
-          "refId": "A"
-        }
-      ],
-      "timeFrom": "7d",
-      "title": "Battery cell temperature (min/max)",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "influxdb",
-        "uid": "${DS_ALPHAESS}"
-      },
       "description": "The HOTTEST cell in the whole battery, across all three packs. This is the one that decides whether the inverter starts derating: a sustained 4.7 kW discharge is also the hardest thermal load the pack sees, so a shortfall that appears only on long sessions is worth checking against this tile before blaming the dispatcher. 'unreadable' is a failed or implausible register read, not a cold battery -- dispatch/registers.py refuses to publish a temperature it cannot vouch for rather than publishing a wrong one.",
       "fieldConfig": {
         "defaults": {
@@ -1178,9 +1038,9 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 8,
-        "x": 0,
-        "y": 13
+        "w": 3,
+        "x": 21,
+        "y": 5
       },
       "id": 29,
       "options": {
@@ -1220,7 +1080,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 9
       },
       "id": 37,
       "panels": [],
@@ -1280,7 +1140,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 18
+        "y": 10
       },
       "id": 24,
       "options": {
@@ -1363,7 +1223,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 18
+        "y": 10
       },
       "id": 25,
       "options": {
@@ -1436,7 +1296,7 @@
         "h": 4,
         "w": 6,
         "x": 12,
-        "y": 18
+        "y": 10
       },
       "id": 26,
       "options": {
@@ -1508,7 +1368,7 @@
         "h": 4,
         "w": 6,
         "x": 18,
-        "y": 18
+        "y": 10
       },
       "id": 38,
       "options": {
@@ -1704,7 +1564,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 22
+        "y": 14
       },
       "id": 20,
       "options": {
@@ -1824,7 +1684,7 @@
         "h": 4,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 23
       },
       "id": 27,
       "options": {
@@ -1863,7 +1723,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 27
       },
       "id": 39,
       "panels": [],
@@ -1900,7 +1760,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 36
+        "y": 28
       },
       "id": 15,
       "options": {
@@ -1976,7 +1836,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 36
+        "y": 28
       },
       "id": 40,
       "options": {
@@ -2056,7 +1916,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 36
+        "y": 28
       },
       "id": 41,
       "options": {
@@ -2096,7 +1956,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 40
+        "y": 32
       },
       "id": 42,
       "panels": [],
@@ -2212,7 +2072,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 41
+        "y": 33
       },
       "id": 43,
       "options": {
@@ -2253,7 +2113,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 49
+        "y": 41
       },
       "id": 44,
       "panels": [],
@@ -2294,7 +2154,7 @@
         "h": 4,
         "w": 12,
         "x": 0,
-        "y": 50
+        "y": 42
       },
       "id": 45,
       "options": {
@@ -2362,7 +2222,7 @@
         "h": 4,
         "w": 12,
         "x": 12,
-        "y": 50
+        "y": 42
       },
       "id": 46,
       "options": {
@@ -2402,7 +2262,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 54
+        "y": 46
       },
       "id": 47,
       "panels": [],
@@ -2507,7 +2367,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 55
+        "y": 47
       },
       "id": 1,
       "options": {
@@ -2619,5 +2479,5 @@
   "timezone": "browser",
   "title": "Overview",
   "uid": "alphaess-main",
-  "version": 22
+  "version": 23
 }
