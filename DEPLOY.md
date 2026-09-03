@@ -459,6 +459,94 @@ disagrees with the reported capacity by more than 1%. Worth doing because
 `battery_loss_kwh` is directly proportional to a number typed into `.env` by
 hand.
 
+## Reaching Kuma from a container
+
+Ten `*_HEARTBEAT_URL` settings point at Uptime Kuma: the collector's
+`HEARTBEAT_URL`, `EFFICIENCY_HEARTBEAT_URL`, `MIJNBATTERIJ_HEARTBEAT_URL` and
+the seven dispatch monitors. **Write every one of them against the host name
+`kuma`**, exactly as Kuma shows the URL but with its host part replaced:
+
+```
+HEARTBEAT_URL='http://kuma:3001/api/push/abc123?status=up&msg=OK&ping='
+```
+
+`kuma` is not a DNS name and nothing resolves it. `docker-compose.yml` gives
+each service that pings Kuma an `extra_hosts` entry, `kuma:${KUMA_ADDR:-host-gateway}`,
+and Docker writes that into the container's `/etc/hosts`. A hosts file is
+consulted ahead of any resolver, which is what makes this work at all: the
+collector pins `dns: 1.1.1.1` for unrelated reasons, and a container's resolver
+has no mDNS, none of the NAS's search domains, and no Tailscale MagicDNS. Those
+three facts are why these URLs originally carried a literal `192.168.68.105`.
+
+`host-gateway` is Docker's own name for the host as seen from inside a
+container, so the alias follows the NAS rather than an address it happens to
+hold. That is the whole point. **Set `KUMA_ADDR` to a literal IP only if Kuma
+moves to a different machine** — it is a plain `:-` default, not a `:?` guard,
+so leaving it unset is fine and means `host-gateway`.
+
+Kuma listens on the NAS's own port 3001 — confirmed 2026-09-03 — so `kuma:3001`
+reaches it whether Kuma runs from Container Manager, its own compose project, or
+is joined to `alphaess-net`. The pings stay on the host instead of hairpinning
+out to the LAN and back.
+
+**Why this replaced a hard-coded IP.** The address changed twice in five days —
+2026-08-29 and 2026-09-02 — and each time every ping went to the old one. That
+failure is close to silent: Kuma reports the monitor as down, which reads like
+the thing being monitored has died, and the collector meanwhile kept collecting
+perfectly. It cost hours on the first occasion before anyone looked at the
+address rather than at the service.
+
+**When you change any of these URLs, recreate the containers, do not restart
+them.** Compose reads `.env` only when it creates a container:
+
+```sh
+cd /volume1/docker/alphaess-collector
+sudo docker compose up -d --force-recreate collector mijnbatterij dispatch
+```
+
+Verify the alias resolves inside each container, and that Kuma answers:
+
+```sh
+cd /volume1/docker/alphaess-collector
+for s in collector mijnbatterij dispatch; do
+  printf '%s: ' "$s"
+  sudo docker compose exec -T "$s" python -c "import socket, urllib.request; print(socket.gethostbyname('kuma'), urllib.request.urlopen('http://kuma:3001', timeout=5).status)"
+done
+```
+
+Three lines each reading an address and `200` is the whole check: the name
+resolves *and* Kuma answers over that path. Anything else is diagnosed below.
+
+Use `python`, not `getent` — DSM's own shell is busybox and has no `getent`, so
+a check written with it cannot be sanity-tested outside the container. All three
+images are `python:3.12-slim`, so the one-liner runs in each. To see the alias
+itself rather than test it: `sudo docker compose exec -T collector cat /etc/hosts`.
+
+A service missing the entry silently loses its heartbeat, so
+`tests/test_heartbeat_hosts.py` fails the build if a service declares a
+`*_HEARTBEAT_URL` without the alias — a monitor added later cannot regress to an
+IP without someone deciding to.
+
+Two ways this can fail, with different fixes:
+
+- **`gethostbyname` raises `gaierror`.** The name did not resolve, so the alias
+  is missing: either the container predates the compose change (recreate it, and
+  note that `restart` will not do), or the Docker daemon is too old for
+  `host-gateway`, which needs 20.10+. Set `KUMA_ADDR` to the NAS's current LAN
+  IP in `.env` and recreate; the alias still buys one place to change instead of
+  ten.
+- **It resolves but the connection is refused or times out.** The alias reaches
+  the NAS over the bridge gateway, a different interface from the LAN address
+  these URLs used until 2026-09-03, so a DSM firewall rule that allowed the old
+  path need not allow this one. Kuma is confirmed listening on 3001, so if
+  nothing opens from a container the firewall is the remaining explanation:
+  Control Panel → Security → Firewall, and the rule has to admit the Docker
+  bridge subnet (`sudo docker network inspect alphaess-net` prints it). This has
+  not been observed here — it is written down because the path changed and
+  nobody has tested that path against the firewall. Setting `KUMA_ADDR` to the
+  LAN IP restores the old route exactly, at the cost of the property this change
+  was made for.
+
 ## Monitoring the nightly efficiency job
 
 A job that runs once a night and stops is invisible. There is no container to
@@ -497,7 +585,8 @@ interval *is* the deadline, so the slack has to come from the retry interval.
 Set this one to `60` and the monitor goes down 24 hours and one minute after
 the last push, i.e. any night the job starts a few minutes late. Paste the URL into
 `EFFICIENCY_HEARTBEAT_URL` in `.env`, quoted, for the same `. ./.env` reason as
-`HEARTBEAT_URL`.
+`HEARTBEAT_URL`, with its host part rewritten to `kuma` —
+["Reaching Kuma from a container"](#reaching-kuma-from-a-container).
 
 The job pushes it itself, after a row actually lands — not the shell script on
 exit 0, which is precisely what would report case (c) as healthy:
@@ -874,21 +963,25 @@ all"](#the-api-is-documented-after-all)) covers the fields, but the server is
 what decides, and its 400 text is the most specific description of a
 disagreement anyone gets.
 
-**Use an IP address, not a hostname.** The container resolves through Docker's
-resolver, which has neither the NAS's `search` domain nor mDNS, so a bare
-`data42` or a `.local` name fails with `Failed to resolve` on every ping — and
-because heartbeat errors are logged and swallowed by design, the only symptom
-is a monitor that never goes green:
+**Address Kuma as `kuma`, per ["Reaching Kuma from a container"](#reaching-kuma-from-a-container).**
+That host name comes from an `extra_hosts` entry in `docker-compose.yml`, not
+from DNS, and it is the only form that survives the NAS changing address. Do not
+substitute a real hostname: the container resolves through Docker's resolver,
+which has neither the NAS's `search` domain nor mDNS, so a bare `data42` or a
+`.local` name fails with `Failed to resolve` on every ping — and because
+heartbeat errors are logged and swallowed by design, the only symptom is a
+monitor that never goes green:
 
 ```
 WARNING mijnbatterij: Heartbeat push failed: HTTPConnectionPool(host='data42',
 port=3001): ... Failed to resolve 'data42' ([Errno -2] Name or service not known)
 ```
 
-Tailscale does not help here. MagicDNS resolves on the *host*; the container is
-on a Docker bridge network and never sees that resolver. Use the NAS's LAN IP
-(`ip -4 addr show eth0`), or `100.x.y.z` from `tailscale ip -4` if you want the
-tailnet address — both are addresses, which is the point.
+Tailscale does not help either. MagicDNS resolves on the *host*; the container
+is on a Docker bridge network and never sees that resolver. A LAN IP
+(`ip -4 addr show eth0`) or a tailnet `100.x.y.z` (`tailscale ip -4`) does work,
+and that is what this setting held until 2026-09-03 — but both are addresses,
+and an address is the thing that moved twice.
 
 **Paste the URL Kuma shows you, query string and all.** `send_heartbeat`
 rebuilds the query rather than appending to it, so the trailing
@@ -1753,8 +1846,9 @@ Four checks cover this: three live signals, two of them from opposite ends of
 the pipeline and independent of each other, plus a record of what went wrong.
 
 **1. `HEARTBEAT_URL` (write side, primary).** Set it to an Uptime Kuma
-**Push** monitor URL and the collector pings it after each successful
-InfluxDB write — a dead-man's switch over the whole collect→write path. Set
+**Push** monitor URL — host part rewritten to `kuma`,
+["Reaching Kuma from a container"](#reaching-kuma-from-a-container) — and the
+collector pings it after each successful InfluxDB write — a dead-man's switch over the whole collect→write path. Set
 the Kuma monitor's grace period above `POLL_INTERVAL_SECONDS`; allow for the
 2-minute backoff cap (`MAX_BACKOFF_SECONDS`, `DEFAULT_MAX_BACKOFF_S = 120`),
 so ~10 minutes is a sensible floor or you will get
@@ -1858,7 +1952,10 @@ Collector Health dashboard counts these, and
 pages after ten minutes of them. When it fires, remember that compose reads env
 only at container start: the fix is `up -d --force-recreate`, not `restart`, and
 every other `*_HEARTBEAT_URL` points at the same host and needs the same
-treatment.
+treatment. Since 2026-09-03 the URLs name `kuma` rather than an address, so an
+IP change no longer causes this at all — see "Reaching Kuma from a container".
+An alert after that date means Kuma itself is down, or the alias is missing from
+a service that pings it.
 
 **3. Grafana staleness alert (read side, secondary).** The rule in
 [`grafana/provisioning/alerting/alphaess-staleness.yml`](grafana/provisioning/alerting/alphaess-staleness.yml)

@@ -22,26 +22,32 @@ and renumbering would break every reference to it in a commit message or a PR.
 `plan.run_sort_key` exists precisely because these tags are not sortable as strings: runs
 before 2026-07-30 carry `+02:00` where later ones carry `Z`. Use it.
 
-**18. Every `*_HEARTBEAT_URL` still hard-codes an IP.** The second half of this item
-shipped on 2026-09-02 and the first did not. `collector.send_heartbeat` now returns the
-reason a ping failed instead of only logging it, the poll loop records that as a
-`collector_health` point with `event="heartbeat_failed"`, the Collector Health dashboard has
-a "Heartbeat unreachable" tile, and
-`grafana/provisioning/alerting/alphaess-heartbeat-unreachable.yml` pages after ten minutes
-of failures -- so "the watchdog is unreachable" is a visible state rather than something you
-find by reading `docker logs`. A non-2xx reply counts as a failure too, which catches the
-revoked-token case that previously looked entirely healthy from this side.
+**18. Heartbeat failures are silent everywhere except the collector.** The other two
+thirds of this item have shipped. `collector.send_heartbeat` returns the reason a ping
+failed instead of only logging it, the poll loop records that as a `collector_health` point
+with `event="heartbeat_failed"`, the Collector Health dashboard has a "Heartbeat unreachable"
+tile, and `grafana/provisioning/alerting/alphaess-heartbeat-unreachable.yml` pages after ten
+minutes of failures -- so "the watchdog is unreachable" is a visible state rather than
+something you find by reading `docker logs`. A non-2xx reply counts as a failure too, which
+catches the revoked-token case that previously looked entirely healthy from this side.
+And as of 2026-09-03 the URLs no longer carry a LAN address at all: they name `kuma`, an
+`extra_hosts` alias resolving to `host-gateway`, so the NAS can change IP without taking
+the heartbeats with it (DEPLOY.md, "Reaching Kuma from a container").
 
-What remains is the cause rather than the detection: point every `*_HEARTBEAT_URL` at a DNS
-or Tailscale name for the Kuma host so the next IP change costs nothing. The same stale
-address lives in `EFFICIENCY_HEARTBEAT_URL`, `MIJNBATTERIJ_HEARTBEAT_URL` and all seven
-dispatch URLs (`PLAN_INFLUX_`, `SLOTS_WRITTEN_`, `SLOTS_FRESH_`, `DISPATCHER_ALIVE_`,
-`DISPATCH_CONFIRMED_`, `INVERTER_NOT_HIJACKED_`, `SOC_FLOOR_`), and compose reads env only at
-container start, so every service needs a `--force-recreate`, not just the collector. Note
-that the detection above covers ONLY the collector's own heartbeat: `efficiency.py`,
-`mijnbatterij.py` and the seven dispatch monitors still fail silently, and are worth the same
-treatment once the URLs stop moving. Two IP-change incidents so far, 2026-08-29 and the
-2026-09-02 Kuma monitors still holding `192.168.68.105` in their own URL fields.
+What remains is that the detection covers ONLY the collector's own heartbeat. `efficiency.py`,
+`mijnbatterij.py` and the seven dispatch monitors still swallow their push failures --
+logged, never counted, never alerted on. The collector's treatment generalises: return the
+reason, write a `heartbeat_failed` point, let the existing alert rule cover the new rows.
+Worth doing now that the URLs have stopped moving, because until they did, this would have
+alerted constantly and correctly and taught nobody anything.
+
+Separately, and outside this repo: the Kuma monitors address the NAS by IP in their own URL
+fields. Those entries live in the Kuma UI, so nothing here can change them and nothing here
+will notice when one is stale -- which is the same failure this item just fixed on the
+outbound side, from the other direction. Worth an audit rather than a fix: `.env` was found
+on 2026-09-03 still holding `192.168.2.105`, meaning the NAS had already moved off
+`192.168.68.0/24` per `router-migration.md` while the documentation here still named the old
+subnet. Check what each monitor actually points at before trusting any address written down.
 
 ---
 

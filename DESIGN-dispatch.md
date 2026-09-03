@@ -587,7 +587,9 @@ it, and it is the number the whole page turns on.
 ## 6. Monitoring
 
 Uptime Kuma, following this repo's existing pattern: `send_heartbeat(url, status, msg)` in
-`collector.py:407`, configured through `*_HEARTBEAT_URL` env vars.
+`collector.py:407`, configured through `*_HEARTBEAT_URL` env vars. All seven address Kuma as
+`kuma:3001` -- a `/etc/hosts` alias from `docker-compose.yml`, not DNS, so the URLs do not
+carry a LAN address that moves. DEPLOY.md, "Reaching Kuma from a container".
 
 Three principles:
 

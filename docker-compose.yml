@@ -130,6 +130,19 @@ services:
       # no heartbeat. Separate from HEARTBEAT_URL above: that one is the live
       # collector's dead-man's switch and fires every 30s, this one once a night.
       EFFICIENCY_HEARTBEAT_URL: ${EFFICIENCY_HEARTBEAT_URL:-}
+    extra_hosts:
+      # Uptime Kuma runs on the NAS itself but outside this compose project, so
+      # every *_HEARTBEAT_URL has to leave the bridge network to reach it. This
+      # maps the name `kuma` to the host as seen from the container, written
+      # into /etc/hosts -- which is consulted before any resolver, so it works
+      # despite the pinned `dns:` below and needs nothing from Kuma's side.
+      #
+      # It replaces a hard-coded LAN IP in each URL, and with it the failure
+      # that IP caused twice (2026-08-29, 2026-09-02): the NAS changed address,
+      # .env still held the old one, and every ping went nowhere. See DEPLOY.md,
+      # "Reaching Kuma from a container". Set KUMA_ADDR to a literal IP only if
+      # Kuma moves to a different machine.
+      - "kuma:${KUMA_ADDR:-host-gateway}"
     depends_on:
       influxdb:
         condition: service_healthy
@@ -266,6 +279,11 @@ services:
       # Optional Kuma "Push" monitor. Pushes down from the 2nd consecutive
       # rejection, with the platform's own validation message as the reason.
       MIJNBATTERIJ_HEARTBEAT_URL: ${MIJNBATTERIJ_HEARTBEAT_URL:-}
+    extra_hosts:
+      # `kuma` -> the host, so MIJNBATTERIJ_HEARTBEAT_URL needs no LAN IP.
+      # Reasoning on the collector service above; DEPLOY.md, "Reaching Kuma
+      # from a container".
+      - "kuma:${KUMA_ADDR:-host-gateway}"
     depends_on:
       influxdb:
         condition: service_healthy
@@ -361,6 +379,11 @@ services:
       # The floor monitor #8 reports against. Matches the planner's `minBatterySOCPct`; it is
       # a backstop, not a control input -- nothing refuses a command because of it.
       SOC_FLOOR_PCT: ${SOC_FLOOR_PCT:-10}
+    extra_hosts:
+      # `kuma` -> the host, so none of the seven push URLs above needs a LAN IP.
+      # Reasoning on the collector service; DEPLOY.md, "Reaching Kuma from a
+      # container".
+      - "kuma:${KUMA_ADDR:-host-gateway}"
     volumes:
       # slots.json, the heartbeat file and the audit log. On a volume rather than in the image
       # so a rebuild does not discard the schedule the battery is currently following.
