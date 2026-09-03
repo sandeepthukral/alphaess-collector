@@ -447,9 +447,11 @@ panels.append(stat(
 panels.append(stat(
     19, "Lifetime grid-charged",
     "The part of the lifetime charge total that came from the grid (0x0124-0x0125), read "
-    "daily -- i.e. energy the dispatcher paid for, as opposed to surplus PV it stored. A "
-    "subset of Lifetime charged by construction, which is one of the two orderings "
-    "`registers.daily_battery_plausible` uses to reject a misaligned read.",
+    "daily -- i.e. energy the dispatcher paid for, as opposed to surplus PV it stored. It "
+    "should sit below Lifetime charged, but that is NOT enforced: the subset argument only "
+    "holds if both counters are metered in the same domain, which this repo has no evidence "
+    "of, and a guard that inverts would silence four working fields. See "
+    "`registers.daily_battery_plausible`.",
     HEALTH_LAST_DAILY % "lifetime_grid_charge_kwh", "kwatth", 1, 12, 4,
     [{"color": "text", "value": None}], y=8,
     no_value="unreadable"))
