@@ -223,6 +223,7 @@ COPIED_PANELS = {
         "Decision",
         "Doing",
         "Command expires in",
+        "Why",
         "What the dispatcher will do next",
     ]),
     "alphaess-battery-health.json": ("alphaess-dashboard.json", [
