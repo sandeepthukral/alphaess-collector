@@ -1355,7 +1355,6 @@ def test_a_non_2xx_reply_counts_as_a_failure(monkeypatch):
     """A revoked or wrong push token answers 404 and the request itself succeeds -- without
     checking the status code, the one error that disables a monitor forever is the one this
     function would call fine."""
-    get = _RecordingGet()
     monkeypatch.setattr(mb.requests, "get",
                         lambda *a, **kw: FakeResponse(404, text="not found"))
     reason = mb.send_heartbeat(KUMA_URL)
