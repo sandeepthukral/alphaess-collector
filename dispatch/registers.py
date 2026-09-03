@@ -182,6 +182,139 @@ FAULT_BLOCK = (REG_FAULT_WARNING_START, 24)
 # `decode_fault_block`.
 FAULT_WORDS = 12
 
+# --- health poller: daily tier, 0x011B / 0x0120-0x0125 / 0x0435 / 0x08D0 ----------------
+# State of health, three lifetime energy counters, the inverter's own heatsink temperature,
+# and lifetime PV. Slow-moving by nature -- a lifetime counter that moved measurably within an
+# hour would be news -- so these get their own DAILY gate rather than riding the hourly one.
+#
+# EVERY ADDRESS HERE WAS CONFIRMED BY A LIVE READ ON 2026-09-03, and the reason that mattered
+# is the module docstring's 0x0883 story in a new form. Two documentary sources disagreed by
+# exactly one register: `senalse/ha-alphaess-modbus`'s `const.py` addresses a 32-bit value at
+# its FIRST word, while this repo's 2026-08-28 reading of AlphaESS's own parameter table put
+# it at the SECOND. `scripts/read-daily-health-registers.py` printed both alignments side by
+# side against the live inverter and only one survived:
+#
+#     0x011F  0            0x0120  10481  ->  1048.1 kWh charge
+#     0x0121  686882816    0x0122  10221  ->  1022.1 kWh discharge
+#     0x0123  669843456    0x0124   5811  ->   581.1 kWh grid-charge
+#     0x0434  0            0x0435    370  ->     37.0 C
+#
+# The rejected column is not merely wrong, it is wrong in the diagnostic way: 686882816 is one
+# counter's low word spliced onto the next one's high word. So const.py's convention wins, the
+# 2026-08-28 "correction" was itself the error, and the addresses below are the first-word ones.
+#
+# THE SCALE IS CONFIRMED TWICE OVER, independently of the addresses. Battery capacity 0x0119
+# read 279 in the same run, and this site's battery is 27.9 kWh -- a fact this repo already had
+# from the planner, not from any register document. Then on 2026-09-03, once these fields were
+# publishing, 0x0120 moved by 0.9-1.8 kWh over a window in which `power_readings` independently
+# integrated 1.27 kWh of charging: right at 0.1 kWh/bit, and fourteen times wrong at 0.01.
+#
+# THAT SECOND CHECK REPLACED AN ARGUMENT FROM MAGNITUDE, which had also cited lifetime PV at
+# 0x08D0 as agreeing on 0.1 -- and it does not (see DAILY_PV_BLOCK). "This number looks about
+# right for a house" is not evidence, and using it twice does not make it evidence; comparing a
+# counter's DELTA against a meter that measured the same energy is.
+REG_SOH = 283                    # 0x011B  1 word,  raw / 10 -> %
+REG_LIFETIME_CHARGE = 288        # 0x0120  2 words, raw / 10 -> kWh
+REG_LIFETIME_DISCHARGE = 290     # 0x0122  2 words, raw / 10 -> kWh
+REG_LIFETIME_GRID_CHARGE = 292   # 0x0124  2 words, raw / 10 -> kWh
+
+# One read spanning 0x011B-0x0125, not four. The three counters run gapless into 0x0126
+# (battery power, confirmed live long before this), which is the shape that told us the
+# alignment was right; reading them as one block keeps that adjacency visible and costs one
+# Modbus round-trip instead of four. 0x011C-0x011F are read and discarded -- they were all
+# zero in the confirming run and nothing here claims to know what they are.
+DAILY_BATTERY_BLOCK = (REG_SOH, 11)
+
+# 0.1 kWh/bit and 0.1 %/bit. Named rather than inlined because the same figure is applied to
+# four different counters and to lifetime PV, and a scale silently differing between two of
+# them is the exact class of error the confirming run above exists to rule out.
+ENERGY_STEP_KWH = 0.1
+SOH_STEP_PCT = 0.1
+
+# Lifetime PV's own factor, deliberately a separate constant rather than a reuse of the one
+# above. See DAILY_PV_BLOCK: they are different registers from different sources with different
+# scales, and a single shared constant is what let one register's confirmed factor be applied
+# to another that had never been checked.
+PV_ENERGY_STEP_KWH = 0.01
+
+REG_INVERTER_TEMP = 1077         # 0x0435  1 word,  SIGNED, raw / 10 -> degrees C
+DAILY_INVERTER_BLOCK = (REG_INVERTER_TEMP, 1)
+
+# Lifetime PV energy, 2 words at 0x08D0. NOT in `const.py` at all, which lists nothing between
+# 0x08D0 and 0x08D4 -- so unlike everything else in this section, the live read is the only
+# evidence there is for the address.
+#
+# ITS SCALE IS 0.01 kWh/BIT, NOT THE 0.1 THE BATTERY COUNTERS USE, and getting that wrong is
+# what nearly shipped an 8671 kWh lifetime for an array that has made 867. The register shipped
+# at 0.1 on 2026-09-03 because 8671 kWh "looked right for an array of this age" -- which is not
+# a measurement, and the first day of published values disproved it three ways at once:
+#
+#   - it moved 18.9 kWh in 2 h 24 min, a 7.9 kW average through a 5 kW inverter
+#   - `power_readings.pv_power_w` integrated 1.98 kWh over the identical window, which is the
+#     same delta at 0.01
+#   - `daily_energy.pv_kwh_api` totals 835 kWh across the collector's whole 46-day history,
+#     against a "lifetime" of 8671 that would need some 500 days of it
+#
+# THE TWO SCALES ARE NOT AN INCONSISTENCY TO BE TIDIED AWAY. The battery counters come from a
+# documented block and are confirmed at 0.1 by their own delta test; this address is documented
+# nowhere. There was never a reason to assume they shared a factor, and assuming it is the whole
+# of the mistake.
+#
+# 0x08D2 HOLDS THE SAME VALUE. The confirming run read `0001 52b7 0001 52b7` across
+# 0x08D0-0x08D3: two identical 32-bit values. Only the first is published. They are NOT
+# required to agree -- a decode that failed whenever they diverged would silence the field the
+# moment the second one turns out to be a related-but-different total (feed-in, say), which is
+# the more likely explanation than a genuine duplicate.
+#
+# THIS SITE'S PV IS AC-COUPLED, behind APsystems micro-inverters (see REG_PV_METER), which is
+# why the INVERTER's own lifetime PV registers at 0x043D-0x043F are not read here: the whole
+# 0x0430-0x0440 window read zero in the confirming run except the heatsink temperature. That
+# is not an alignment question -- both candidate addresses read 0 -- it is a register this
+# install does not populate.
+REG_LIFETIME_PV = 2256           # 0x08D0  2 words, raw / 100 -> kWh (NOT / 10, see above)
+DAILY_PV_BLOCK = (REG_LIFETIME_PV, 2)
+
+# Decode checks, not health thresholds -- same standing as TEMP_PLAUSIBLE_C and wide for the
+# same reason. What they have to catch is a scale wrong by a factor of ten and the misaligned
+# read above, which lands at 68,688,281 kWh.
+#
+# ZERO IS THE ONLY THING THESE BOUNDS RELIABLY CATCH, and it is worth being exact about that.
+# An unsupported register range, a proxy padding a short reply, and the losing alignment above
+# all produce zero words, and zero is otherwise perfectly in range -- this tier's version of
+# the all-zero temp block that PACK_ID_RANGE exists to catch, except there are no 1-based IDs
+# here to break the tie.
+#
+# WHAT THEY DO NOT CATCH IS A SCALE WRONG BY A FACTOR OF TEN, which is the usual justification
+# for a range check in this module and does not apply here. The confirmed 1048.1 kWh reads as
+# 10,481 at 1 kWh/bit and 104.81 at 0.01, both comfortably inside these bounds -- and a uniform
+# scale error preserves the orderings below too, so nothing in this file would notice. What
+# ruled the scale out was external: 0x0119 against a battery known to be 27.9 kWh. A range
+# check cannot do that job and this comment should not imply it can.
+#
+# The zero floor costs a battery on its commissioning day its lifetime totals, which is a day
+# this site is nearly two thousand cycles past.
+SOH_PLAUSIBLE_PCT = (20.0, 110.0)
+LIFETIME_ENERGY_PLAUSIBLE_KWH = (0.1, 1_000_000.0)
+
+# GRID-CHARGE GETS ITS OWN FLOOR, AND IT INCLUDES ZERO. The other three counters cannot be zero
+# on a running system -- a battery that has discharged has charged, and a BMS reporting SoH is a
+# BMS that has one. Lifetime grid-charge genuinely can be, indefinitely, on any site that only
+# ever stores surplus PV: that is a configuration choice, not a broken read. Sharing the 0.1
+# floor with the others would have let such a site's legitimate zero silence SoH and both
+# working counters along with it, for as long as the owner kept that policy.
+LIFETIME_GRID_CHARGE_PLAUSIBLE_KWH = (0.0, 1_000_000.0)
+
+# Wider than TEMP_PLAUSIBLE_C on the hot side: this is a heatsink, not a cell, and a derating
+# inverter can sit well above anything a pack would survive. Wide on the cold side too, because
+# this sensor is on an inverter that is not necessarily indoors and a winter morning is a real
+# reading -- the docstring on `decode_daily_inverter_block` promises exactly that, and an
+# earlier version of this bound started at +1.0 C and quietly broke the promise, blanking the
+# tile for the duration of any cold snap and backing the block's gate off while it did.
+#
+# The all-zero block is caught by rejecting EXACTLY 0.0 instead (see `inverter_temp_plausible`),
+# which costs one specific reading rather than a whole season of them.
+INVERTER_TEMP_PLAUSIBLE_C = (-30.0, 100.0)
+
 # --- health poller: weekly tripwire blocks ------------------------------------------------
 # Firmware, serial numbers, and system configuration barely change -- a missed read costs
 # nothing here, unlike the hourly/tick tiers above. Like the fault block, these are republished
@@ -459,6 +592,116 @@ def decode_fault_block(words: list[int]) -> dict:
     fields["active_fault_count"] = sum(w.bit_count() for w in words[:FAULT_WORDS])
     fields["active_warning_count"] = sum(w.bit_count() for w in words[FAULT_WORDS:])
     return fields
+
+
+def decode_daily_battery_block(words: list[int]) -> dict:
+    """An 11-word read of DAILY_BATTERY_BLOCK -> SoH and the three lifetime energy counters.
+
+    Unlike the fault and firmware blocks, this one IS decoded into named fields: the addresses
+    and the scale were both confirmed against the live inverter (see DAILY_BATTERY_BLOCK's
+    comment), which is the bar this module sets for naming anything.
+
+    The four words between SoH and the counters (0x011C-0x011F) are read as part of one
+    round-trip and dropped. Publishing them raw would imply this repo knows they mean
+    something; all it knows is that they were zero.
+    """
+    if len(words) != DAILY_BATTERY_BLOCK[1]:
+        raise ValueError(f"expected {DAILY_BATTERY_BLOCK[1]} words, got {len(words)}")
+    base = DAILY_BATTERY_BLOCK[0]
+    def at(addr, n=1):
+        i = addr - base
+        return words[i:i + n]
+
+    return {
+        "soh_pct": round(decode(at(REG_SOH)) * SOH_STEP_PCT, 1),
+        "lifetime_charge_kwh":
+            round(decode(at(REG_LIFETIME_CHARGE, 2)) * ENERGY_STEP_KWH, 1),
+        "lifetime_discharge_kwh":
+            round(decode(at(REG_LIFETIME_DISCHARGE, 2)) * ENERGY_STEP_KWH, 1),
+        "lifetime_grid_charge_kwh":
+            round(decode(at(REG_LIFETIME_GRID_CHARGE, 2)) * ENERGY_STEP_KWH, 1),
+    }
+
+
+def daily_battery_plausible(daily: dict) -> bool:
+    """False when a decoded daily battery block cannot be describing this battery.
+
+    Bounds, then ONE ORDERING, and the ordering is what makes this more than a range check.
+    Every kWh that came out of the battery went in first, so discharge <= charge cannot be
+    violated by a correct decode of a real reading at any scale -- which is what makes it the
+    check that survives being wrong about the units. The losing alignment in
+    DAILY_BATTERY_BLOCK's comment fails it outright, because it splices adjacent counters
+    together and destroys the relationship between them.
+
+    GRID-CHARGE <= CHARGE IS DELIBERATELY NOT CHECKED, though it reads as just as obvious --
+    grid charging is a subset of all charging. The subset argument only holds if both counters
+    are measured in the same domain, and this repo does not know that they are: an AC-metered
+    grid-charge total against a DC-side charge total would run HIGHER than it, by the conversion
+    losses, on a site that grid-charges most of its energy. This one currently sits at 581.1
+    against 1048.1, so nothing here is evidence either way -- and a guard that inverts on some
+    future site silences SoH and three working counters permanently. The splice case it would
+    have caught is already caught twice over, by the zero floor and by the ordering above.
+
+    ROUND-TRIP IS NOT CHECKED, deliberately. The confirmed read gives 1022.1/1048.1 = 97.5%,
+    above the 90-96% an AC round trip would show -- consistent with these being DC-side
+    counters, which is the same distinction that makes the collector's `load_power_w` a derived
+    figure. A tighter bound here would encode that inference as a fact and start silencing a
+    working register on the strength of it.
+    """
+    lo, hi = LIFETIME_ENERGY_PLAUSIBLE_KWH
+    grid_lo, grid_hi = LIFETIME_GRID_CHARGE_PLAUSIBLE_KWH
+    soh_lo, soh_hi = SOH_PLAUSIBLE_PCT
+    charge = daily["lifetime_charge_kwh"]
+    return (soh_lo <= daily["soh_pct"] <= soh_hi
+            and lo <= charge <= hi
+            and lo <= daily["lifetime_discharge_kwh"] <= hi
+            and grid_lo <= daily["lifetime_grid_charge_kwh"] <= grid_hi
+            and daily["lifetime_discharge_kwh"] <= charge)
+
+
+def decode_daily_inverter_block(words: list[int]) -> dict:
+    """A 1-word read of DAILY_INVERTER_BLOCK -> the inverter's heatsink temperature.
+
+    SIGNED, for the same reason the cell temperatures are: read unsigned, a heatsink at -0.1 C
+    publishes as +6553.5 C. A cold start on a winter morning is the case, and it is a real one
+    here in a way it is not for a battery pack that lives indoors.
+    """
+    if len(words) != DAILY_INVERTER_BLOCK[1]:
+        raise ValueError(f"expected {DAILY_INVERTER_BLOCK[1]} words, got {len(words)}")
+    return {"inverter_temp_c": round(decode(words, signed=True) * 0.1, 1)}
+
+
+def inverter_temp_plausible(daily: dict) -> bool:
+    """False when a decoded heatsink temperature cannot be describing this inverter.
+
+    One value and no cross-check, so this is the weakest guard in the module. EXACTLY 0.0 IS
+    REJECTED, rather than a whole band above it: an all-zero block has to be caught somehow and
+    there is no second word here to catch it with, but the temperatures on either side of zero
+    are ordinary winter readings that a band would throw away along with it. The `!=` costs one
+    genuine reading -- a heatsink sitting at precisely 0.0 C, on a scale of 0.1 C -- and keeps
+    the rest of the season.
+    """
+    lo, hi = INVERTER_TEMP_PLAUSIBLE_C
+    return lo <= daily["inverter_temp_c"] <= hi and daily["inverter_temp_c"] != 0.0
+
+
+def decode_daily_pv_block(words: list[int]) -> dict:
+    """A 2-word read of DAILY_PV_BLOCK -> lifetime PV energy. See DAILY_PV_BLOCK's comment for
+    why the address rests on the live read alone."""
+    if len(words) != DAILY_PV_BLOCK[1]:
+        raise ValueError(f"expected {DAILY_PV_BLOCK[1]} words, got {len(words)}")
+    return {"lifetime_pv_kwh": round(decode(words) * PV_ENERGY_STEP_KWH, 2)}
+
+
+def lifetime_pv_plausible(daily: dict) -> bool:
+    """False when a decoded lifetime PV total cannot be describing this array.
+
+    Same zero-rejecting bound as the battery counters, and it carries more weight here: this
+    address appears in no document at all, so an unsupported-register zero is a likelier
+    failure for this field than for any other in the tier.
+    """
+    lo, hi = LIFETIME_ENERGY_PLAUSIBLE_KWH
+    return lo <= daily["lifetime_pv_kwh"] <= hi
 
 
 def decode_firmware_block(words: list[int]) -> dict:

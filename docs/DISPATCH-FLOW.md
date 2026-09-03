@@ -12,7 +12,7 @@ flowchart LR
     P["battery-planning<br/>LP planner<br/>Wh forecast"] -->|batch, hrs ahead| T
     T["translator.py<br/>classify() / to_slots()<br/>→ slots.json"] -->|writes| S
     S["scheduler.py<br/>tick()<br/>read live SoC/grid/batt<br/>→ surplus_w"] -->|every 60s| D
-    D["slots.py<br/>decide() / clamp()"] -->|verified| I["inverter · apply/release<br/>readback verify, alarm debounced<br/>+ cell voltage/temp, health gates<br/>→ InfluxDB + Kuma"]
+    D["slots.py<br/>decide() / clamp()"] -->|verified| I["inverter · apply/release<br/>readback verify, alarm debounced<br/>+ cell voltage/temp, hourly/daily/weekly health gates<br/>→ InfluxDB + Kuma"]
 ```
 
 `dispatch/plan.py` → `dispatch/translator.py` → `dispatch/slots.json` → `dispatch/scheduler.py`
@@ -62,7 +62,8 @@ flowchart TD
     N --> O["verify via register readback<br/>publish verified=0 on a mismatch,<br/>but alarm only on 2 consecutive ticks"]
     O --> TEMP["read min/max cell voltage & temp<br/>published only, never decides"]
     TEMP --> HEALTH["hourly/weekly health gates<br/>fault block (24 words + fault/warning popcounts)<br/>+ firmware/config · published only, never decides"]
-    HEALTH --> PUB["publish dispatch_state → InfluxDB<br/>heartbeat → Kuma"]
+    HEALTH --> DAILY["daily health gate<br/>SoH + lifetime charge/discharge/grid-charge, lifetime PV, heatsink<br/>3 independent gates · implausible read publishes NO field<br/>published only, never decides"]
+    DAILY --> PUB["publish dispatch_state → InfluxDB<br/>heartbeat → Kuma"]
     PUB --> WAIT["wait until the NEXT deadline<br/>next_deadline(): due 60s after the last tick was DUE,<br/>not after it finished · overrun skips whole intervals"]
     WAIT --> A
 

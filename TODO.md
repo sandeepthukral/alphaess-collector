@@ -90,26 +90,70 @@ battery. Deliberately left out of #128, which is the change that created the fie
 on a field with no history to calibrate against would be a threshold picked from nothing.
 Raised in that PR's review.
 
-**13. The health-poller's daily tier (SoH, lifetime energy, heatsink temp, PV energy) has no
-confirmed register layout.** UPDATE 2026-08-28: found AlphaESS's own "Parameter address table"
-(via `ha-alphaess-modbus`'s `all_registers.txt`), and it corrects the handover's guessed
-addresses by one register in three places — the same class of off-by-one #12 turned out to be
-before it was resolved. Per that table: SoH is `0x011B` (unsigned, 0.1%/bit — matches the
-handover). Lifetime charge/discharge/grid-charge energy is a 3×2-word block starting at
-**`0x011F`**, not `0x0120` — charge (`0x011F`-`0x0120`), discharge (`0x0121`-`0x0122`),
-grid-charge (`0x0123`-`0x0124`); `0x0125` is a gap, then `0x0126` is the already-confirmed
-`REG_BATTERY_POWER`, which is what pins this boundary. Inverter heatsink temp ("INV
-Temperature") is **`0x0434`**, not `0x0435` — `0x0435`-`0x0436` is actually the start of the
-inverter's own fault/warning words. PV energy is two 2-word fields, not two 1-word ones:
-inverter lifetime PV energy is **`0x043D`-`0x043E`**, system lifetime PV energy is
-**`0x08D1`-`0x08D2`**. Still needs live-inverter verification before shipping, per this
-module's own rule — checked what the AlphaESS app shows on 2026-08-28 and it does not surface
-SoH%, lifetime energy totals, or a heatsink temperature reading at all, so the cross-check
-path this item originally proposed doesn't exist for these four; a `--once` read is still the
-right move, just checked for plausibility (bounds, monotonicity across two reads) rather than
-against an app number. Once confirmed, add a `DAILY_HEALTH_REFRESH_S` gate (`~86400s`) next to
-`HEALTH_REFRESH_S`. `alphaess-battery-health.json` carries no SoH/daily-energy/lifetime-cycle
-panels until these fields exist, so add both in one change.
+**13. DONE 2026-09-03 — the daily tier ships: SoH, lifetime charge/discharge/grid-charge,
+lifetime PV, inverter heatsink.** Kept here rather than deleted because the ADDRESSES are the
+finding, and the next person to read a register document for this inverter needs the outcome.
+
+Two documentary sources disagreed by exactly one register.
+`senalse/ha-alphaess-modbus`'s `const.py` addresses a 32-bit value at its FIRST word; this
+repo's 2026-08-28 reading of AlphaESS's own parameter table put it at the SECOND, which is what
+generated all three of that note's "corrections". `scripts/read-daily-health-registers.py` read
+both alignments side by side off the live inverter and const.py won outright:
+
+| field | rejected (2026-08-28) | CONFIRMED live |
+|---|---|---|
+| lifetime charge | `0x011F` → 0 | `0x0120`-`0x0121` → 1048.1 kWh |
+| lifetime discharge | `0x0121` → 686,882,816 | `0x0122`-`0x0123` → 1022.1 kWh |
+| lifetime grid-charge | `0x0123` → 669,843,456 | `0x0124`-`0x0125` → 581.1 kWh |
+| inverter heatsink | `0x0434` → 0 | `0x0435` → 37.0 C |
+| SoH | `0x011B` (both agreed) | `0x011B` → 100.0 % |
+| lifetime PV | `0x08D1` → 1,387,724,801 | `0x08D0`-`0x08D1` → 867.11 kWh |
+
+The rejected column is not just wrong, it is wrong diagnostically: those two nine-digit numbers
+are one counter's low word spliced onto the next one's high word. So the handover's ORIGINAL
+addresses were right all along and the 2026-08-28 "correction" was itself the error — the same
+failure mode as `0x0883`, and caught the same way, by refusing to ship a documented address
+until the hardware agreed.
+
+The scale (0.1 kWh/bit, 0.1 %/bit, 0.1 C/bit) is confirmed twice over and independently of the
+addresses: battery capacity `0x0119` read 279 against a battery this repo knows from the planner
+is 27.9 kWh, and lifetime PV read 8671.1 kWh, right for this array where 1 kWh/bit would claim
+86 MWh.
+
+UPDATE, SAME DAY, AFTER DEPLOYING: the first day of published values caught a wrong scale, and
+it was the field the item itself flagged as least confirmed. **Lifetime PV is 0.01 kWh/bit, not
+the 0.1 the battery counters use — 867.1 kWh, not 8671.1.** Three independent disproofs, none of
+which the probe could have produced:
+
+- the register moved 18.9 kWh in 2 h 24 min: a 7.9 kW average through a 5 kW inverter
+- `power_readings.pv_power_w` integrated **1.98 kWh** over the identical window — the same
+  delta at 0.01
+- `daily_energy.pv_kwh_api` totals **835 kWh across the collector's entire 46-day history**,
+  against a claimed lifetime of 8671 that would need ~500 days of it
+
+It shipped at 0.1 because 8671 kWh "looked right for an array of this age". That is not a
+measurement, and the tier's own comments said as much about everything else while this one got
+a pass. THE LESSON IS ABOUT THE METHOD, not the register: a lifetime counter is confirmed by
+comparing its DELTA against a meter that measured the same energy, and this repo has such a
+meter for PV and for battery charge. The battery counters passed that same test the same day
+(+0.9–1.8 kWh published against 1.27 kWh integrated), so 0.1 is confirmed for them by
+measurement rather than by the capacity register alone.
+
+Two things the probe could not settle, both now closed by the deployed fields:
+
+- **Monotonicity.** Nothing moved across the probe's 180 s gap — at 1479 W the battery makes
+  74 Wh, under the resolution. The published series settled it within hours: every counter
+  rose, by amounts the site can produce, and the heatsink tracked the afternoon.
+- **`0x08D2` held the same value as `0x08D0`.** Only the first is published, and they are
+  deliberately not required to agree — see `registers.DAILY_PV_BLOCK`.
+
+Still open: the round trip reads 97.5%, above the 90–96% an AC round trip would show. Consistent
+with DC-side counters, still unproven, and deliberately not encoded in any guard.
+
+The inverter's own lifetime PV (`0x043D`-`0x043F`) is NOT published and should not be added:
+the whole `0x0430`-`0x0440` window read zero except the heatsink. Not an alignment question,
+both candidates read 0 — this is an AC-coupled site behind APsystems micro-inverters (see
+`REG_PV_METER`) and the inverter has no strings of its own to count.
 
 **14. The health-poller's weekly firmware/system-config blocks are published as raw hex, not
 decoded fields.** UPDATE 2026-08-28: the same manufacturer table resolves the word-by-word
@@ -127,11 +171,16 @@ live reads `0`, which does not obviously match a battery that is plainly in use;
 app checked 2026-08-28 has no explicit "battery ready" indicator, only charge/discharge
 activity, so this one flag's meaning stays unconfirmed even though its address is now solid),
 IP method (`0x0808`), local IP/subnet/gateway/Modbus address (`0x0809`-`0x080F`, mostly
-useless on a dashboard). `INVERTER_FW_BLOCK` (`0x0640`-`0x0653`) is three ASCII version
-strings, 2 chars/word: inverter master firmware (`0x0640`-`0x0644`, 5 words), inverter slave
-firmware (`0x0645`-`0x0649`, 5 words), inverter arm firmware (`0x064A`-`0x0653`, 10 words) —
-live master and slave words are byte-identical and decode to printable ASCII including a
-literal `.`, which is consistent with this being right. Decode the numeric/enum fields with
+useless on a dashboard). `INVERTER_FW_BLOCK` (`0x0640`-`0x0653`) is ASCII version
+strings, 2 chars/word: master firmware (`0x0640`-`0x0644`), slave firmware
+(`0x0645`-`0x0649`), arm firmware (`0x064A`-`0x0653`) — live master and slave words are
+byte-identical and decode to printable ASCII including a literal `.`. UPDATE 2026-09-02:
+`senalse/ha-alphaess-modbus`'s `const.py` lists only TWO strings here, inverter version
+(`0x0640`, 5 words) and inverter **ARM** version (`0x0645`, 5 words), with nothing at
+`0x064A`. The byte-identical observation that made the three-string reading look right is
+equally well explained by there being no slave string at all and `0x0645` holding the ARM
+version. Decode the two `const.py` names and leave `0x064A`-`0x0653` raw until something
+confirms what is in it. Decode the numeric/enum fields with
 confidence; leave battery-ready and system-mode's human-readable labels either raw or
 clearly caveated, since neither has an independent confirmation source. No gate/cadence
 change needed, just extending `decode_firmware_block`/`decode_inverter_fw_block`/

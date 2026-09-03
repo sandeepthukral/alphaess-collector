@@ -40,11 +40,18 @@ HOURLY_HEALTH_FIELD_PREFIXES = ("fault_raw_",)
 HOURLY_HEALTH_FIELDS = {"max_charge_power_w", "max_discharge_power_w",
                         "active_fault_count", "active_warning_count"}
 WEEKLY_HEALTH_FIELD_PREFIXES = ("firmware_raw_", "inverter_fw_raw_", "system_config_raw_")
+# The daily tier (`scheduler.py` step 8e). Listed by name rather than by prefix because these
+# six are named, decoded fields -- the only tier that is -- so there is no shared prefix to
+# match on, and typing them out is what makes adding a seventh a deliberate act.
+DAILY_HEALTH_FIELDS = {"soh_pct", "lifetime_charge_kwh", "lifetime_discharge_kwh",
+                      "lifetime_grid_charge_kwh", "lifetime_pv_kwh", "inverter_temp_c"}
 
 
 def _allowed_last_windows(field: str) -> set[str]:
     if field.startswith(HOURLY_HEALTH_FIELD_PREFIXES) or field in HOURLY_HEALTH_FIELDS:
         return {"-3h"}
+    if field in DAILY_HEALTH_FIELDS:
+        return {"-3d"}
     if field.startswith(WEEKLY_HEALTH_FIELD_PREFIXES):
         return {"-10d"}
     return {"-5m", "-10m"}
@@ -70,6 +77,17 @@ FIRMWARE = R.decode_firmware_block([0] * R.FIRMWARE_BLOCK[1])
 INVERTER_FW = R.decode_inverter_fw_block([0] * R.INVERTER_FW_BLOCK[1])
 SYSTEM_CONFIG = R.decode_system_config_block([0] * R.SYSTEM_CONFIG_BLOCK[1])
 
+# The daily tier, same reasoning again -- but NOT from an all-zero block, unlike the four
+# above. These decodes have plausibility guards that reject zero (see
+# `registers.daily_battery_plausible`), so a zero fixture would be a shape the poller can
+# never publish. The words are the ones the live inverter actually returned on 2026-09-03,
+# which makes the fixture double as a record of the read that confirmed the addresses:
+# 100.0 %, 1048.1 / 1022.1 / 581.1 kWh, 37.0 C, 867.11 kWh (PV has its own 0.01
+# kWh/bit scale -- see registers.DAILY_PV_BLOCK).
+DAILY_BATTERY = R.decode_daily_battery_block([1000, 0, 0, 0, 0, 0, 10481, 0, 10221, 0, 5811])
+DAILY_INVERTER = R.decode_daily_inverter_block([370])
+DAILY_PV = R.decode_daily_pv_block([1, 21175])
+
 
 def published_field_values() -> dict:
     """A fully populated `dispatch_state` point, values kept.
@@ -87,7 +105,8 @@ def published_field_values() -> dict:
         reason="discharge 4500 W to 20.0%", live=True, live_soc_pct=41.2,
         write_verified=True, actual_battery_w=-4300.0, voltages=VOLTAGES, temps=TEMPS,
         faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
-        inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG)
+        inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG,
+        daily_battery=DAILY_BATTERY, daily_inverter=DAILY_INVERTER, daily_pv=DAILY_PV)
 
 
 def published_fields() -> set[str]:
@@ -109,7 +128,8 @@ def degraded_field_values() -> dict:
         decision_kind="idle", reason="live SoC unreadable", live=True,
         live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0, voltages=VOLTAGES,
         temps=TEMPS, faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
-        inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG)
+        inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG,
+        daily_battery=DAILY_BATTERY, daily_inverter=DAILY_INVERTER, daily_pv=DAILY_PV)
 
 
 def degraded_fields() -> set[str]:
@@ -233,6 +253,21 @@ class TestFieldContract:
                       "Battery cell temperature (min/max)"):
             assert title in seen, f"{title} is not among the queries this class checks"
 
+    def test_the_daily_tier_panels_are_under_this_contract(self):
+        """Same anti-vacuity argument as the temperature panels above, for the six tiles added
+        with `scheduler.py` step 8e.
+
+        Worth naming explicitly rather than trusting the loop, because these six are the first
+        panels on this page to read DECODED field names. Every other health field is raw hex
+        generated from a base address, where a typo changes the register a row claims to show;
+        these are hand-typed strings, where a typo produces a permanently blank tile that no
+        live query would complain about.
+        """
+        seen = {title for _dash, title, _q in dispatch_queries()}
+        for title in ("State of health", "Lifetime charged", "Lifetime discharged",
+                      "Lifetime grid-charged", "Lifetime PV", "Inverter heatsink"):
+            assert title in seen, f"{title} is not among the queries this class checks"
+
     def test_every_field_filter_names_a_field_we_publish(self):
         """`_field == "..."` is the other way a name enters a query."""
         known = published_fields() | degraded_fields()
@@ -284,7 +319,8 @@ class TestConditionalFields:
              "min_cell_temp_c", "min_cell_temp_pack",
              "max_cell_temp_c", "max_cell_temp_pack",
              "max_charge_power_w", "max_discharge_power_w"}
-            | set(FAULTS) | set(FIRMWARE) | set(INVERTER_FW) | set(SYSTEM_CONFIG))
+            | set(FAULTS) | set(FIRMWARE) | set(INVERTER_FW) | set(SYSTEM_CONFIG)
+            | set(DAILY_BATTERY) | set(DAILY_INVERTER) | set(DAILY_PV))
 
     def test_the_decode_table_reads_only_unconditionally_written_fields(self):
         """`last()` returns each field's newest point WITH ITS OWN TIMESTAMP, and `pivot`

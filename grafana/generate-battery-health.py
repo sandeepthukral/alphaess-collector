@@ -15,14 +15,20 @@ SCOPE IS SMALLER THAN THE ORIGINAL HANDOVER ASKED FOR, on purpose. The health-po
 (#129) only ever shipped what had unambiguous register addressing: cell temperature (already
 existed), the fault/warning block as raw hex plus the two derived popcounts row 1 leads with
 on 2026-09-02, the already-read power limits republished under health-dashboard field
-names, and the weekly firmware/inverter-firmware/system-config blocks as raw hex. Cell voltage (TODO.md item 12) was added once its address discrepancy resolved --
-see `dispatch/registers.py`'s VOLTAGE_BLOCK comment. SoH, remaining time, daily energy and
-lifetime cycles are still unconfirmed register layouts (TODO.md item 13) and
-`dispatch/state.py` never publishes them. A panel querying a field that is never written is
-not "no data yet", it is the exact mistake
+names, and the weekly firmware/inverter-firmware/system-config blocks as raw hex.
+
+THAT SCOPE HAS GROWN TWICE SINCE, both times by the same rule: a panel ships when its backend
+field does, never before. Cell voltage (TODO.md item 12) arrived once its address discrepancy
+was resolved -- see `dispatch/registers.py`'s VOLTAGE_BLOCK comment -- and row 1c's daily tier
+(SoH, the three lifetime energy counters, lifetime PV, the inverter heatsink) arrived on
+2026-09-03 once a live read confirmed its addresses against two documents that disagreed, which
+is what TODO.md item 13 was waiting for. What is still deferred under this rule: remaining time
+and daily energy, which `dispatch/state.py` does not publish.
+
+A panel querying a field that is never written is not "no data yet", it is the exact mistake
 `tests/test_dispatch_dashboard.py::TestFieldContract::test_every_field_filter_names_a_field_we_publish`
-exists to catch -- so those panels are deferred to the same follow-up PR that adds their
-backend fields, rather than shipped now pointed at names nothing writes.
+exists to catch -- so a panel waits for the change that adds its field, rather than shipping
+now pointed at a name nothing writes.
 
 STALENESS WINDOWS ARE CADENCE-MATCHED, not one constant for the whole page. Section 7.3's
 original argument (`generate-dispatch.py`) was written for tick-cadence fields alone: a dead
@@ -59,6 +65,16 @@ HEALTH_LAST_TICK = '''from(bucket: "alphaess")
 # cadence it guards, same argument as the tick window above, just scaled.
 HEALTH_LAST_HOURLY = '''from(bucket: "alphaess")
   |> range(start: -3h)
+  |> filter(fn: (r) => r._measurement == "dispatch_state" and r._field == "%s")
+  |> last()
+'''
+
+# `dispatch/scheduler.py` step 8e, `DAILY_HEALTH_REFRESH_S = 86400`. Three days rather than
+# two: a daily block that fails once backs off to an hourly retry and can legitimately be a
+# day and a bit late (see `_read_weekly_block`), and a tile that reads "no data" while the
+# poller is healthily retrying would be reporting on the wrong thing.
+HEALTH_LAST_DAILY = '''from(bucket: "alphaess")
+  |> range(start: -3d)
   |> filter(fn: (r) => r._measurement == "dispatch_state" and r._field == "%s")
   |> last()
 '''
@@ -381,7 +397,88 @@ panels.append(stat(
     no_value="unreadable"))
 
 # =========================================================================================
-# Row 2, y=8 -- the week's thermal story
+# Row 1c, y=8 -- the daily tier: state of health, and the counters that never reset
+# =========================================================================================
+#
+# Six tiles from three separate register blocks, read once a day (`scheduler.py` step 8e).
+# Every address and both scales were confirmed against the live inverter on 2026-09-03 --
+# `registers.DAILY_BATTERY_BLOCK` records the run and what it ruled out -- which is why these
+# are named fields rather than the raw-hex tables the fault and firmware blocks still get.
+#
+# NO THRESHOLD LADDERS ON ANY OF THEM, and that is a deliberate repeat of the argument the
+# cell-voltage tiles make one row up. A red band on SoH would be asserting where this
+# hardware's degradation stops being normal, and a red band on the heatsink would be asserting
+# where this inverter starts derating; this repo knows neither, and an invented threshold is a
+# health judgement wearing the costume of a fact. The numbers are here to be read against each
+# other and against last month, which is what the tiles are actually good for.
+#
+# WHAT THESE FOUR COUNTERS ARE FOR, since none of them changes visibly day to day: the ratio
+# between them is the reading. discharge/charge is the round trip, grid-charge/charge is how
+# much of the battery's throughput the dispatcher bought rather than harvested, and both move
+# slowly enough that a step change in either is a real event -- a derate, a strategy change, or
+# a decode that has started lying.
+panels.append(stat(
+    16, "State of health",
+    "The BMS's own SoH figure (0x011B), read daily. Recomputed by the BMS on the order of "
+    "weeks, so this tile is a slow trend and nothing else -- a day-to-day change here would "
+    "mean the register, not the battery. No colour ladder: this repo has no basis for where "
+    "normal degradation ends on this hardware.",
+    HEALTH_LAST_DAILY % "soh_pct", "percent", 1, 0, 4,
+    [{"color": "text", "value": None}], y=8,
+    no_value="unreadable"))
+
+panels.append(stat(
+    17, "Lifetime charged",
+    "Everything that has ever gone INTO the battery (0x0120-0x0121), read daily. Includes "
+    "both PV and grid charging -- the tile beside it says how much was bought.",
+    HEALTH_LAST_DAILY % "lifetime_charge_kwh", "kwatth", 1, 4, 4,
+    [{"color": "text", "value": None}], y=8,
+    no_value="unreadable"))
+
+panels.append(stat(
+    18, "Lifetime discharged",
+    "Everything that has ever come OUT of the battery (0x0122-0x0123), read daily. Against "
+    "the tile to its left this is the lifetime round trip; on 2026-09-03 that stood at 97.5%, "
+    "which is high for an AC round trip and consistent with these being DC-side counters.",
+    HEALTH_LAST_DAILY % "lifetime_discharge_kwh", "kwatth", 1, 8, 4,
+    [{"color": "text", "value": None}], y=8,
+    no_value="unreadable"))
+
+panels.append(stat(
+    19, "Lifetime grid-charged",
+    "The part of the lifetime charge total that came from the grid (0x0124-0x0125), read "
+    "daily -- i.e. energy the dispatcher paid for, as opposed to surplus PV it stored. It "
+    "should sit below Lifetime charged, but that is NOT enforced: the subset argument only "
+    "holds if both counters are metered in the same domain, which this repo has no evidence "
+    "of, and a guard that inverts would silence four working fields. See "
+    "`registers.daily_battery_plausible`.",
+    HEALTH_LAST_DAILY % "lifetime_grid_charge_kwh", "kwatth", 1, 12, 4,
+    [{"color": "text", "value": None}], y=8,
+    no_value="unreadable"))
+
+panels.append(stat(
+    20, "Lifetime PV",
+    "Everything the array has ever produced (0x08D0), read daily. Its address is in no "
+    "register document this repo has found, and it does NOT share the battery counters' "
+    "0.1 kWh/bit scale -- it is 0.01, established by checking a day's movement against "
+    "power_readings and daily_energy, which is also how it was caught reading ten times high "
+    "on the day it shipped. See registers.DAILY_PV_BLOCK.",
+    HEALTH_LAST_DAILY % "lifetime_pv_kwh", "kwatth", 1, 16, 4,
+    [{"color": "text", "value": None}], y=8,
+    no_value="unreadable"))
+
+panels.append(stat(
+    21, "Inverter heatsink",
+    "The inverter's own heatsink temperature (0x0435), read daily. Not a thermal trend -- one "
+    "reading a day cannot be one -- but a tripwire for an inverter running hot, which is the "
+    "same thing the hourly power-limit tiles catch from the other side when it starts "
+    "derating. Signed, so a winter morning reads below zero rather than as 6553.5 C.",
+    HEALTH_LAST_DAILY % "inverter_temp_c", "celsius", 1, 20, 4,
+    [{"color": "text", "value": None}], y=8,
+    no_value="unreadable"))
+
+# =========================================================================================
+# Row 2, y=12 -- the week's thermal story
 # =========================================================================================
 #
 # DUPLICATED VERBATIM from alphaess-dashboard.json's panel id 30, query and series overrides
@@ -438,7 +535,7 @@ panels.append({
                 {"id": "displayName", "value": "max cell"}]),
         ],
     },
-    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+    "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12},
     "id": 6,
     "options": {
         "legend": {"calcs": [], "displayMode": "list", "placement": "bottom",
@@ -458,7 +555,7 @@ panels.append({
 })
 
 # =========================================================================================
-# Row 3, y=16 -- the inverter's own ceilings, over time
+# Row 3, y=20 -- the inverter's own ceilings, over time
 # =========================================================================================
 panels.append(timeseries(
     7, "Charge / discharge power limits",
@@ -466,7 +563,7 @@ panels.append(timeseries(
     "time -- rather than jumping back up on the next hourly read -- is the inverter derating "
     "itself, which is worth noticing well before it shows up as a shortfall on the Dispatch "
     "dashboard.",
-    [target(LIMITS_HISTORY)], 0, 16, 24, 8, "watt",
+    [target(LIMITS_HISTORY)], 0, 20, 24, 8, "watt",
     [series_override("max charge", [
         {"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]),
      series_override("max discharge", [
@@ -474,7 +571,7 @@ panels.append(timeseries(
     fill=0))
 
 # =========================================================================================
-# Row 4, y=24 -- faults and warnings, raw
+# Row 4, y=28 -- faults and warnings, raw
 # =========================================================================================
 #
 # RAW WORDS ONLY, STILL -- the counts on row 1 do not replace this table, they point at it.
@@ -488,10 +585,10 @@ panels.append(raw_table(
     "when the Active faults tile is nonzero, this is where you find out which register it "
     "came from, to check against the AlphaESS app's own display.",
     raw_table_query("-3h", FAULT_FIELDS, "fault_raw_", "faults"),
-    0, 24, 24, 10))
+    0, 28, 24, 10))
 
 # =========================================================================================
-# Row 5, y=34 -- weekly tripwires, raw
+# Row 5, y=38 -- weekly tripwires, raw
 # =========================================================================================
 #
 # -10D RANGE, matching the poller's weekly gate (`WEEKLY_HEALTH_REFRESH_S`,
@@ -504,21 +601,21 @@ panels.append(raw_table(
     "weekly. Which word is which named value is not confirmed anywhere in this repo yet "
     "(TODO.md item 14), so this is the raw words rather than named fields.",
     raw_table_query("-10d", FIRMWARE_FIELDS, "firmware_raw_", "firmware"),
-    0, 34, 8, 10))
+    0, 38, 8, 10))
 
 panels.append(raw_table(
     10, "Inverter firmware (raw)",
     "INVERTER_FW_BLOCK, 0x0640-0x0653 (inverter master/slave firmware and serial), read "
     "weekly. Same raw-hex treatment as Firmware versions, and for the same reason.",
     raw_table_query("-10d", INVERTER_FW_FIELDS, "inverter_fw_raw_", "inverter_fw"),
-    8, 34, 8, 10))
+    8, 38, 8, 10))
 
 panels.append(raw_table(
     11, "System config (raw)",
     "SYSTEM_CONFIG_BLOCK, 0x0800-0x080F (max feed-into-grid %, PV capacity settings, system "
     "mode, battery-ready flag), read weekly. Same raw-hex treatment, and for the same reason.",
     raw_table_query("-10d", SYSTEM_CONFIG_FIELDS, "system_config_raw_", "system_config"),
-    16, 34, 8, 10))
+    16, 38, 8, 10))
 
 
 dashboard = {
@@ -575,7 +672,15 @@ dashboard = {
     #    to the full 24 words and decode_fault_block derives the two popcounts. Rows 1 and 1b
     #    are re-laid-out to fit them -- the power-limit tiles move down to row 1b -- and the
     #    raw fault table's field list grows from 22 registers to 24. No row below y=8 moves.
-    "version": 3,
+    # 4: the daily tier (row 1c, ids 16-21) -- SoH, three lifetime energy counters, lifetime
+    #    PV and the inverter heatsink, deferred by version 1 above until their addresses were
+    #    confirmed. They were, by a live read on 2026-09-03 that also ruled out a competing
+    #    one-register alignment; see registers.DAILY_BATTERY_BLOCK. Every row from 2 down
+    #    moves 4 rows to make room, the same way version 2 made room for the voltage tiles.
+    # 5: lifetime PV corrected from 0.1 to 0.01 kWh/bit -- 867 kWh, not 8671. Tile text only;
+    #    the fix itself is in dispatch/registers.py. Bumped because version 4 did reach a live
+    #    Grafana, so the provisioner has a stored copy to beat.
+    "version": 5,
     "weekStart": "",
 }
 

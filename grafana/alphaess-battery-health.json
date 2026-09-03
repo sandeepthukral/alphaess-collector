@@ -669,6 +669,396 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
+      "description": "The BMS's own SoH figure (0x011B), read daily. Recomputed by the BMS on the order of weeks, so this tile is a slow trend and nothing else -- a day-to-day change here would mean the register, not the battery. No colour ladder: this repo has no basis for where normal degradation ends on this hardware.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 8
+      },
+      "id": 16,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3d)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"soh_pct\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "State of health",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Everything that has ever gone INTO the battery (0x0120-0x0121), read daily. Includes both PV and grid charging -- the tile beside it says how much was bought.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 8
+      },
+      "id": 17,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3d)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"lifetime_charge_kwh\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Lifetime charged",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Everything that has ever come OUT of the battery (0x0122-0x0123), read daily. Against the tile to its left this is the lifetime round trip; on 2026-09-03 that stood at 97.5%, which is high for an AC round trip and consistent with these being DC-side counters.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 8
+      },
+      "id": 18,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3d)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"lifetime_discharge_kwh\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Lifetime discharged",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The part of the lifetime charge total that came from the grid (0x0124-0x0125), read daily -- i.e. energy the dispatcher paid for, as opposed to surplus PV it stored. It should sit below Lifetime charged, but that is NOT enforced: the subset argument only holds if both counters are metered in the same domain, which this repo has no evidence of, and a guard that inverts would silence four working fields. See `registers.daily_battery_plausible`.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 8
+      },
+      "id": 19,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3d)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"lifetime_grid_charge_kwh\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Lifetime grid-charged",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Everything the array has ever produced (0x08D0), read daily. Its address is in no register document this repo has found, and it does NOT share the battery counters' 0.1 kWh/bit scale -- it is 0.01, established by checking a day's movement against power_readings and daily_energy, which is also how it was caught reading ten times high on the day it shipped. See registers.DAILY_PV_BLOCK.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "kwatth"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 8
+      },
+      "id": 20,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3d)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"lifetime_pv_kwh\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Lifetime PV",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "The inverter's own heatsink temperature (0x0435), read daily. Not a thermal trend -- one reading a day cannot be one -- but a tripwire for an inverter running hot, which is the same thing the hourly power-limit tiles catch from the other side when it starts derating. Signed, so a winter morning reads below zero rather than as 6553.5 C.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1,
+          "mappings": [],
+          "noValue": "unreadable",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "unit": "celsius"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 8
+      },
+      "id": 21,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "from(bucket: \"alphaess\")\n  |> range(start: -3d)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"inverter_temp_c\")\n  |> last()\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Inverter heatsink",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
       "description": "Seven days of the coldest and hottest cell. The two tiles above say where the battery is now; this says what it has been doing, which is the only way to tell a warm afternoon from a pack that has been climbing all week. The band between the lines is the spread across the fleet - it widens under load and closes overnight, and a spread that stops closing is worth looking into.",
       "fieldConfig": {
         "defaults": {
@@ -773,7 +1163,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 8
+        "y": 12
       },
       "id": 6,
       "options": {
@@ -897,7 +1287,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 16
+        "y": 20
       },
       "id": 7,
       "options": {
@@ -992,7 +1382,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 24
+        "y": 28
       },
       "id": 8,
       "options": {
@@ -1100,7 +1490,7 @@
         "h": 10,
         "w": 8,
         "x": 0,
-        "y": 34
+        "y": 38
       },
       "id": 9,
       "options": {
@@ -1208,7 +1598,7 @@
         "h": 10,
         "w": 8,
         "x": 8,
-        "y": 34
+        "y": 38
       },
       "id": 10,
       "options": {
@@ -1316,7 +1706,7 @@
         "h": 10,
         "w": 8,
         "x": 16,
-        "y": 34
+        "y": 38
       },
       "id": 11,
       "options": {
@@ -1379,6 +1769,6 @@
   "timezone": "browser",
   "title": "Battery Health",
   "uid": "alphaess-battery-health",
-  "version": 3,
+  "version": 5,
   "weekStart": ""
 }
