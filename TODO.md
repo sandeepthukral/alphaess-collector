@@ -41,10 +41,13 @@ reason, write a `heartbeat_failed` point, let the existing alert rule cover the 
 Worth doing now that the URLs have stopped moving, because until they did, this would have
 alerted constantly and correctly and taught nobody anything.
 
-Separately, and outside this repo: the Kuma monitors still hold `192.168.68.105` in their
-own URL fields, which is the NAS. `router-migration.md` renumbers that network, so each of
-those entries needs editing in the Kuma UI when it happens -- nothing here can do it, and
-nothing here will notice it was missed.
+Separately, and outside this repo: the Kuma monitors address the NAS by IP in their own URL
+fields. Those entries live in the Kuma UI, so nothing here can change them and nothing here
+will notice when one is stale -- which is the same failure this item just fixed on the
+outbound side, from the other direction. Worth an audit rather than a fix: `.env` was found
+on 2026-09-03 still holding `192.168.2.105`, meaning the NAS had already moved off
+`192.168.68.0/24` per `router-migration.md` while the documentation here still named the old
+subnet. Check what each monitor actually points at before trusting any address written down.
 
 ---
 
