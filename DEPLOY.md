@@ -362,12 +362,21 @@ Schedule [scripts/refresh-prices.sh](scripts/refresh-prices.sh), which runs
 `prices.py` with no arguments — yesterday, today and tomorrow:
 
 - **General**: User = `root`
-- **Schedule**: Daily, first run time `00:05`, **Repeat every 3 hours**
+- **Schedule**: Daily, first run time `00:05`, **Repeat every 3 hours**, and
+  **Last run time `21:05`** — see below
 - **Task Settings → Run command**:
 
   ```sh
   /volume1/docker/alphaess-collector/scripts/refresh-prices.sh
   ```
+
+**`Last run time` is the end of the repeat window, not a record of the previous
+run.** DSM defaults it to the first run time, which makes the window zero minutes
+wide: the task fires once and "Repeat every 3 hours" never happens, while the task
+list still shows a next run time and the task history still shows it succeeding.
+Found on 2026-09-03 with start and last both `13:05` — the single daily run landed
+before the day-ahead was published, nothing tried again, and the planner spent the
+evening with no prices past midnight.
 
 It repeats through the day because tomorrow's day-ahead prices are not published
 until early afternoon. A day with no prices yet is logged and skipped, not an
@@ -377,7 +386,9 @@ but an API call.
 
 Worth one check after setting it up: an empty price series looks exactly like a
 working panel in a quiet market, which is how this went unnoticed from the day
-the dashboard was built until 2026-08-02.
+the dashboard was built until 2026-08-02. The Overview's `Which job is late` row
+for `prices` is the standing version of that check — it reads how many hours of
+prices are known ahead of now, so it goes red before the plan does.
 
 ### Nightly conversion-loss update
 
