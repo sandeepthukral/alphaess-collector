@@ -561,24 +561,34 @@ class TestDailyTier:
             assert decoded["inverter_temp_c"] < 0
             assert R.inverter_temp_plausible(decoded), decoded
 
-    def test_lifetime_pv_decodes_the_confirmed_words(self):
-        assert R.decode_daily_pv_block([1, 21175]) == {"lifetime_pv_kwh": 8671.1}
+    def test_lifetime_pv_decodes_at_its_own_scale_not_the_battery_counters(self):
+        """0.01 kWh/bit, and the difference from the battery counters' 0.1 is the point.
+
+        These same words shipped as 8671.1 kWh on 2026-09-03 because that magnitude "looked
+        right for an array". The first day of published values disproved it: the register moved
+        18.9 kWh in 2 h 24 min -- 7.9 kW average through a 5 kW inverter -- while
+        `power_readings` integrated 1.98 kWh over the same window, and the collector's entire
+        46-day energy history totals 835 kWh against a claimed lifetime of 8671.
+        """
+        assert R.decode_daily_pv_block([1, 21175]) == {"lifetime_pv_kwh": 867.11}
+        assert R.PV_ENERGY_STEP_KWH != R.ENERGY_STEP_KWH
 
     def test_lifetime_pv_rejects_zero_and_the_misalignment_but_not_a_wrong_scale(self):
-        """What the bound actually catches, which is less than it looks.
+        """What the bound actually catches, which is less than it looks -- and this is not a
+        hypothetical any more.
 
         Zero (an unsupported register) and the splice magnitude both fail. A SCALE ERROR DOES
-        NOT: 1 kWh/bit reads this array's lifetime as 86,711 kWh -- decades of production, and
-        obviously wrong to a human -- and sails through, because no honest bound on "how much
-        PV could a house have made" excludes it without also excluding a large commercial
-        array. The scale was settled by comparing against a battery capacity this repo knew
-        independently, not by a range check, and this assertion is here to stop anyone
-        believing otherwise.
+        NOT, and one shipped: 8671.1 kWh, this register read at ten times its true factor, is
+        the value that passed every guard in this module and every test in this file for a day.
+        Nothing here could have caught it, because no honest bound on "how much PV could a
+        house have made" excludes 8671 kWh. What caught it was a DELTA compared against a meter
+        measuring the same energy. This assertion stands as the record that a range check
+        cannot do that job.
         """
-        assert R.lifetime_pv_plausible({"lifetime_pv_kwh": 8671.1})
+        assert R.lifetime_pv_plausible({"lifetime_pv_kwh": 867.11})
         assert not R.lifetime_pv_plausible({"lifetime_pv_kwh": 0.0})
-        assert not R.lifetime_pv_plausible({"lifetime_pv_kwh": 68688281.6})
-        assert R.lifetime_pv_plausible({"lifetime_pv_kwh": 86711.0})  # NOT caught, by design
+        assert not R.lifetime_pv_plausible({"lifetime_pv_kwh": 6868828.16})
+        assert R.lifetime_pv_plausible({"lifetime_pv_kwh": 8671.1})  # NOT caught, by design
 
     def test_the_pv_block_reads_only_the_first_of_the_two_identical_values(self):
         """0x08D0 and 0x08D2 both held 86711. Only the first is published, and they are not

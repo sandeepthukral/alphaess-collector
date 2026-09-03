@@ -82,7 +82,8 @@ SYSTEM_CONFIG = R.decode_system_config_block([0] * R.SYSTEM_CONFIG_BLOCK[1])
 # `registers.daily_battery_plausible`), so a zero fixture would be a shape the poller can
 # never publish. The words are the ones the live inverter actually returned on 2026-09-03,
 # which makes the fixture double as a record of the read that confirmed the addresses:
-# 100.0 %, 1048.1 / 1022.1 / 581.1 kWh, 37.0 C, 8671.1 kWh.
+# 100.0 %, 1048.1 / 1022.1 / 581.1 kWh, 37.0 C, 867.11 kWh (PV has its own 0.01
+# kWh/bit scale -- see registers.DAILY_PV_BLOCK).
 DAILY_BATTERY = R.decode_daily_battery_block([1000, 0, 0, 0, 0, 0, 10481, 0, 10221, 0, 5811])
 DAILY_INVERTER = R.decode_daily_inverter_block([370])
 DAILY_PV = R.decode_daily_pv_block([1, 21175])

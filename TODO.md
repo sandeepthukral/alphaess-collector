@@ -107,7 +107,7 @@ both alignments side by side off the live inverter and const.py won outright:
 | lifetime grid-charge | `0x0123` → 669,843,456 | `0x0124`-`0x0125` → 581.1 kWh |
 | inverter heatsink | `0x0434` → 0 | `0x0435` → 37.0 C |
 | SoH | `0x011B` (both agreed) | `0x011B` → 100.0 % |
-| lifetime PV | `0x08D1` → 1,387,724,801 | `0x08D0`-`0x08D1` → 8671.1 kWh |
+| lifetime PV | `0x08D1` → 1,387,724,801 | `0x08D0`-`0x08D1` → 867.11 kWh |
 
 The rejected column is not just wrong, it is wrong diagnostically: those two nine-digit numbers
 are one counter's low word spliced onto the next one's high word. So the handover's ORIGINAL
@@ -120,16 +120,35 @@ addresses: battery capacity `0x0119` read 279 against a battery this repo knows 
 is 27.9 kWh, and lifetime PV read 8671.1 kWh, right for this array where 1 kWh/bit would claim
 86 MWh.
 
-Three things the run could not settle, all cheap to close now the fields publish:
+UPDATE, SAME DAY, AFTER DEPLOYING: the first day of published values caught a wrong scale, and
+it was the field the item itself flagged as least confirmed. **Lifetime PV is 0.01 kWh/bit, not
+the 0.1 the battery counters use — 867.1 kWh, not 8671.1.** Three independent disproofs, none of
+which the probe could have produced:
 
-- **Monotonicity was never demonstrated.** Nothing moved across the probe's 180 s gap — at
-  1479 W the battery makes 74 Wh, under the 0.1 kWh resolution. The alignment rests on
-  magnitude, ordering and the two scale confirmations. A week of published points closes it.
-- **`0x08D0` is in no document at all.** `const.py` lists nothing between `0x08D0` and `0x08D4`.
-  Magnitude is the whole of the evidence for what it means. Check it against the collector's own
-  lifetime PV total; the tile's own description says so.
+- the register moved 18.9 kWh in 2 h 24 min: a 7.9 kW average through a 5 kW inverter
+- `power_readings.pv_power_w` integrated **1.98 kWh** over the identical window — the same
+  delta at 0.01
+- `daily_energy.pv_kwh_api` totals **835 kWh across the collector's entire 46-day history**,
+  against a claimed lifetime of 8671 that would need ~500 days of it
+
+It shipped at 0.1 because 8671 kWh "looked right for an array of this age". That is not a
+measurement, and the tier's own comments said as much about everything else while this one got
+a pass. THE LESSON IS ABOUT THE METHOD, not the register: a lifetime counter is confirmed by
+comparing its DELTA against a meter that measured the same energy, and this repo has such a
+meter for PV and for battery charge. The battery counters passed that same test the same day
+(+0.9–1.8 kWh published against 1.27 kWh integrated), so 0.1 is confirmed for them by
+measurement rather than by the capacity register alone.
+
+Two things the probe could not settle, both now closed by the deployed fields:
+
+- **Monotonicity.** Nothing moved across the probe's 180 s gap — at 1479 W the battery makes
+  74 Wh, under the resolution. The published series settled it within hours: every counter
+  rose, by amounts the site can produce, and the heatsink tracked the afternoon.
 - **`0x08D2` held the same value as `0x08D0`.** Only the first is published, and they are
   deliberately not required to agree — see `registers.DAILY_PV_BLOCK`.
+
+Still open: the round trip reads 97.5%, above the 90–96% an AC round trip would show. Consistent
+with DC-side counters, still unproven, and deliberately not encoded in any guard.
 
 The inverter's own lifetime PV (`0x043D`-`0x043F`) is NOT published and should not be added:
 the whole `0x0430`-`0x0440` window read zero except the heatsink. Not an alignment question,

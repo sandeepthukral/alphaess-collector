@@ -458,10 +458,11 @@ panels.append(stat(
 
 panels.append(stat(
     20, "Lifetime PV",
-    "Everything the array has ever produced (0x08D0), read daily. THE LEAST CONFIRMED FIELD "
-    "ON THIS PAGE: the address is in no register document this repo has found, and a live "
-    "read of the right order of magnitude is the whole of the evidence for it. Read it as "
-    "indicative until it has been checked against the collector's own PV totals.",
+    "Everything the array has ever produced (0x08D0), read daily. Its address is in no "
+    "register document this repo has found, and it does NOT share the battery counters' "
+    "0.1 kWh/bit scale -- it is 0.01, established by checking a day's movement against "
+    "power_readings and daily_energy, which is also how it was caught reading ten times high "
+    "on the day it shipped. See registers.DAILY_PV_BLOCK.",
     HEALTH_LAST_DAILY % "lifetime_pv_kwh", "kwatth", 1, 16, 4,
     [{"color": "text", "value": None}], y=8,
     no_value="unreadable"))
@@ -676,7 +677,10 @@ dashboard = {
     #    confirmed. They were, by a live read on 2026-09-03 that also ruled out a competing
     #    one-register alignment; see registers.DAILY_BATTERY_BLOCK. Every row from 2 down
     #    moves 4 rows to make room, the same way version 2 made room for the voltage tiles.
-    "version": 4,
+    # 5: lifetime PV corrected from 0.1 to 0.01 kWh/bit -- 867 kWh, not 8671. Tile text only;
+    #    the fix itself is in dispatch/registers.py. Bumped because version 4 did reach a live
+    #    Grafana, so the provisioner has a stored copy to beat.
+    "version": 5,
     "weekStart": "",
 }
 

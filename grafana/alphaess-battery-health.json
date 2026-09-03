@@ -929,7 +929,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Everything the array has ever produced (0x08D0), read daily. THE LEAST CONFIRMED FIELD ON THIS PAGE: the address is in no register document this repo has found, and a live read of the right order of magnitude is the whole of the evidence for it. Read it as indicative until it has been checked against the collector's own PV totals.",
+      "description": "Everything the array has ever produced (0x08D0), read daily. Its address is in no register document this repo has found, and it does NOT share the battery counters' 0.1 kWh/bit scale -- it is 0.01, established by checking a day's movement against power_readings and daily_energy, which is also how it was caught reading ten times high on the day it shipped. See registers.DAILY_PV_BLOCK.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1769,6 +1769,6 @@
   "timezone": "browser",
   "title": "Battery Health",
   "uid": "alphaess-battery-health",
-  "version": 4,
+  "version": 5,
   "weekStart": ""
 }

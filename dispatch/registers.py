@@ -205,10 +205,14 @@ FAULT_WORDS = 12
 #
 # THE SCALE IS CONFIRMED TWICE OVER, independently of the addresses. Battery capacity 0x0119
 # read 279 in the same run, and this site's battery is 27.9 kWh -- a fact this repo already had
-# from the planner, not from any register document. Lifetime PV at 0x08D0 read 86711, which is
-# 8671.1 kWh at the same 0.1 kWh/bit: right for an array of this age, where 1 kWh/bit would
-# claim 86 MWh. Two unrelated registers agreeing on 0.1 is what makes the scale an observation
-# rather than a third document.
+# from the planner, not from any register document. Then on 2026-09-03, once these fields were
+# publishing, 0x0120 moved by 0.9-1.8 kWh over a window in which `power_readings` independently
+# integrated 1.27 kWh of charging: right at 0.1 kWh/bit, and fourteen times wrong at 0.01.
+#
+# THAT SECOND CHECK REPLACED AN ARGUMENT FROM MAGNITUDE, which had also cited lifetime PV at
+# 0x08D0 as agreeing on 0.1 -- and it does not (see DAILY_PV_BLOCK). "This number looks about
+# right for a house" is not evidence, and using it twice does not make it evidence; comparing a
+# counter's DELTA against a meter that measured the same energy is.
 REG_SOH = 283                    # 0x011B  1 word,  raw / 10 -> %
 REG_LIFETIME_CHARGE = 288        # 0x0120  2 words, raw / 10 -> kWh
 REG_LIFETIME_DISCHARGE = 290     # 0x0122  2 words, raw / 10 -> kWh
@@ -227,12 +231,34 @@ DAILY_BATTERY_BLOCK = (REG_SOH, 11)
 ENERGY_STEP_KWH = 0.1
 SOH_STEP_PCT = 0.1
 
+# Lifetime PV's own factor, deliberately a separate constant rather than a reuse of the one
+# above. See DAILY_PV_BLOCK: they are different registers from different sources with different
+# scales, and a single shared constant is what let one register's confirmed factor be applied
+# to another that had never been checked.
+PV_ENERGY_STEP_KWH = 0.01
+
 REG_INVERTER_TEMP = 1077         # 0x0435  1 word,  SIGNED, raw / 10 -> degrees C
 DAILY_INVERTER_BLOCK = (REG_INVERTER_TEMP, 1)
 
 # Lifetime PV energy, 2 words at 0x08D0. NOT in `const.py` at all, which lists nothing between
 # 0x08D0 and 0x08D4 -- so unlike everything else in this section, the live read is the only
-# evidence there is for the address, and the magnitude is the only evidence for its meaning.
+# evidence there is for the address.
+#
+# ITS SCALE IS 0.01 kWh/BIT, NOT THE 0.1 THE BATTERY COUNTERS USE, and getting that wrong is
+# what nearly shipped an 8671 kWh lifetime for an array that has made 867. The register shipped
+# at 0.1 on 2026-09-03 because 8671 kWh "looked right for an array of this age" -- which is not
+# a measurement, and the first day of published values disproved it three ways at once:
+#
+#   - it moved 18.9 kWh in 2 h 24 min, a 7.9 kW average through a 5 kW inverter
+#   - `power_readings.pv_power_w` integrated 1.98 kWh over the identical window, which is the
+#     same delta at 0.01
+#   - `daily_energy.pv_kwh_api` totals 835 kWh across the collector's whole 46-day history,
+#     against a "lifetime" of 8671 that would need some 500 days of it
+#
+# THE TWO SCALES ARE NOT AN INCONSISTENCY TO BE TIDIED AWAY. The battery counters come from a
+# documented block and are confirmed at 0.1 by their own delta test; this address is documented
+# nowhere. There was never a reason to assume they shared a factor, and assuming it is the whole
+# of the mistake.
 #
 # 0x08D2 HOLDS THE SAME VALUE. The confirming run read `0001 52b7 0001 52b7` across
 # 0x08D0-0x08D3: two identical 32-bit values. Only the first is published. They are NOT
@@ -245,7 +271,7 @@ DAILY_INVERTER_BLOCK = (REG_INVERTER_TEMP, 1)
 # 0x0430-0x0440 window read zero in the confirming run except the heatsink temperature. That
 # is not an alignment question -- both candidate addresses read 0 -- it is a register this
 # install does not populate.
-REG_LIFETIME_PV = 2256           # 0x08D0  2 words, raw / 10 -> kWh
+REG_LIFETIME_PV = 2256           # 0x08D0  2 words, raw / 100 -> kWh (NOT / 10, see above)
 DAILY_PV_BLOCK = (REG_LIFETIME_PV, 2)
 
 # Decode checks, not health thresholds -- same standing as TEMP_PLAUSIBLE_C and wide for the
@@ -664,7 +690,7 @@ def decode_daily_pv_block(words: list[int]) -> dict:
     why the address rests on the live read alone."""
     if len(words) != DAILY_PV_BLOCK[1]:
         raise ValueError(f"expected {DAILY_PV_BLOCK[1]} words, got {len(words)}")
-    return {"lifetime_pv_kwh": round(decode(words) * ENERGY_STEP_KWH, 1)}
+    return {"lifetime_pv_kwh": round(decode(words) * PV_ENERGY_STEP_KWH, 2)}
 
 
 def lifetime_pv_plausible(daily: dict) -> bool:

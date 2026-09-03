@@ -146,7 +146,7 @@ def daily_registers() -> dict[int, int]:
         R.REG_LIFETIME_DISCHARGE: 0, R.REG_LIFETIME_DISCHARGE + 1: 10221,    # 1022.1 kWh
         R.REG_LIFETIME_GRID_CHARGE: 0, R.REG_LIFETIME_GRID_CHARGE + 1: 5811,  # 581.1 kWh
         R.REG_INVERTER_TEMP: 370,              # 37.0 C
-        R.REG_LIFETIME_PV: 1, R.REG_LIFETIME_PV + 1: 21175,                  # 8671.1 kWh
+        R.REG_LIFETIME_PV: 1, R.REG_LIFETIME_PV + 1: 21175,                  # 867.11 kWh
     }
 
 
@@ -1163,7 +1163,7 @@ class TestDailyHealthTier:
         assert merged["lifetime_discharge_kwh"] == 1022.1
         assert merged["lifetime_grid_charge_kwh"] == 581.1
         assert merged["inverter_temp_c"] == 37.0
-        assert merged["lifetime_pv_kwh"] == 8671.1
+        assert merged["lifetime_pv_kwh"] == 867.11
 
     def test_absent_when_the_gate_has_not_elapsed(self, tmp_path, monkeypatch):
         client = ScriptedClient(measurement_registers())
