@@ -68,6 +68,7 @@ from influxdb_client.client.write_api import SYNCHRONOUS
 
 import efficiency
 import pricing
+from collector import redact_push_token, write_health_event
 from prices import NL_TZ
 from pricing import Sample, _accumulate
 
@@ -89,6 +90,11 @@ MODES = ("imbalance", "imbalance_aggressive", "manual", "day_ahead",
 
 STATUS_MEASUREMENT = "mijnbatterij_submit"
 RANK_MEASUREMENT = "mijnbatterij_rank"
+
+# Cap on the stored/logged reason a heartbeat push failed. Same purpose as
+# collector.MAX_ERROR_SUMMARY_CHARS: a requests exception chain is unbounded and
+# an InfluxDB field is a poor place to discover that.
+MAX_HEARTBEAT_ERROR_CHARS = 200
 
 # The daily_cost model whose savings are summed into batteryResultTotal. Pinned
 # to whatever pricing.py currently writes, so a model bump moves both together
@@ -1000,8 +1006,16 @@ def _write(write_api, bucket: str, point: Point) -> None:
 
 
 def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
-                   timeout: float = 5) -> None:
+                   timeout: float = 5) -> str:
     """Ping a Kuma "Push" monitor. Never raises; an empty URL means not monitored.
+
+    Returns "" on success, or a short reason the push failed -- the caller turns
+    that into a `collector_health` row, the same treatment `collector.py` gives
+    its own heartbeat. Swallowing the exception keeps a monitoring hiccup from
+    taking down the submission loop it monitors; returning the reason is what
+    stops "the watchdog is unreachable" from living only in a log line nobody
+    reads. Both are needed: on 2026-08-29 the collector's pushes went nowhere
+    for hours while every dashboard stayed green.
 
     The query string is REBUILT, not appended to -- the same fix as
     `collector/collector.py:407` and `dispatch/heartbeat.py:22`, arrived at here
@@ -1018,15 +1032,26 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
     broken call looks more correct than the fix does.
     """
     if not url:
-        return
+        return ""
     target = urlunsplit(urlsplit(url)._replace(query=urlencode({"status": status, "msg": msg})))
     try:
-        requests.get(target, timeout=timeout)
+        response = requests.get(target, timeout=timeout)
+        # A NON-2xx REPLY IS A FAILURE. A wrong or revoked push token answers 404
+        # and the request itself succeeds, so without this the one error that
+        # disables a monitor forever is the one that reads as fine from here.
+        response.raise_for_status()
     except Exception as exc:
         # Bare, like both siblings: a bad URL in .env raises out of urlsplit or
         # requests' own validation, and a monitoring convenience must never take
         # down the submission loop it is monitoring.
-        log.warning("Heartbeat push failed: %s", exc)
+        #
+        # Redacted BEFORE the log call, not only before the return: Alloy ships
+        # this container's log to Loki and Grafana renders it, so the log is not
+        # a more private destination than the stored field.
+        reason = redact_push_token(f"{type(exc).__name__}: {exc}")
+        log.warning("Heartbeat push failed: %s", reason)
+        return reason[:MAX_HEARTBEAT_ERROR_CHARS]
+    return ""
 
 
 # --------------------------------------------------------------------------
@@ -1251,8 +1276,9 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
                 query_api, write_api, session, bucket=bucket, sys_sn=sys_sn,
                 api_key=api_key, config=config, totals=totals, dry_run=False)
             consecutive_failures = 0
+            ping_failed = ""
             if snapshot is not None:
-                send_heartbeat(heartbeat_url)
+                ping_failed = send_heartbeat(heartbeat_url)
             elif outcome == "day-start":
                 # The one benign empty cycle: the day rolled over seconds ago
                 # and its first poll has not landed. It clears itself within one
@@ -1266,7 +1292,13 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
                 # exactly that. Not counted as a consecutive failure either --
                 # backing off would not help, since the fault is upstream of
                 # this service and retrying costs one cheap query.
-                send_heartbeat(heartbeat_url, "down", f"nothing submitted: {outcome}")
+                ping_failed = send_heartbeat(heartbeat_url, "down",
+                                             f"nothing submitted: {outcome}")
+            if ping_failed:
+                write_health_event(
+                    write_api, bucket, sys_sn, "heartbeat_failed",
+                    {"error": ping_failed}, stage="heartbeat",
+                    component="mijnbatterij", monitor="mijnbatterij")
         except SubmitError as exc:
             consecutive_failures += 1
             log.error("Submission failed (%d consecutive): %s", consecutive_failures, exc)
@@ -1291,7 +1323,12 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
             # Down from the second failure, matching the collector: one blip is
             # noise, a run of them is the thing worth waking up for.
             if consecutive_failures >= 2:
-                send_heartbeat(heartbeat_url, "down", str(exc)[:200])
+                ping_failed = send_heartbeat(heartbeat_url, "down", str(exc)[:200])
+                if ping_failed:
+                    write_health_event(
+                        write_api, bucket, sys_sn, "heartbeat_failed",
+                        {"error": ping_failed}, stage="heartbeat",
+                        component="mijnbatterij", monitor="mijnbatterij")
         except Exception as exc:
             consecutive_failures += 1
             log.exception("Submission cycle failed (%d consecutive)", consecutive_failures)
@@ -1303,7 +1340,13 @@ def run_loop(query_api, write_api, session, *, bucket: str, sys_sn: str,
             _write(write_api, bucket, status_point(
                 None, sys_sn, "error", None, dt.datetime.now(dt.UTC)))
             if consecutive_failures >= 2:
-                send_heartbeat(heartbeat_url, "down", f"{type(exc).__name__}: {exc}"[:200])
+                ping_failed = send_heartbeat(
+                    heartbeat_url, "down", f"{type(exc).__name__}: {exc}"[:200])
+                if ping_failed:
+                    write_health_event(
+                        write_api, bucket, sys_sn, "heartbeat_failed",
+                        {"error": ping_failed}, stage="heartbeat",
+                        component="mijnbatterij", monitor="mijnbatterij")
 
         if config["rank_interval_s"] > 0 and time.monotonic() >= next_rank:
             # Bare `except Exception`, not `except SubmitError`. The rank is a

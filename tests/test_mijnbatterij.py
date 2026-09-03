@@ -31,6 +31,10 @@ class FakeResponse:
             raise ValueError("no json")
         return self._payload
 
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(f"{self.status_code} error", response=self)
+
 
 class FakeSession:
     """Records what was sent instead of sending it."""
@@ -1050,6 +1054,44 @@ def test_an_outage_does_push_down(monkeypatch):
     assert heartbeats == [("down", "nothing submitted: stale")]
 
 
+def test_a_failed_kuma_push_is_recorded_not_just_swallowed(monkeypatch):
+    """TODO.md #18: mijnbatterij was the second of three processes still swallowing
+    heartbeat push failures. `send_heartbeat` now returns the reason and run_loop must turn
+    a non-empty one into a `collector_health` row, tagged so it does not get confused with
+    the collector's own heartbeat."""
+    recorded = []
+    monkeypatch.setattr(mb, "run_once", lambda *a, **k: (None, "stale"))
+    monkeypatch.setenv("MIJNBATTERIJ_HEARTBEAT_URL", "http://kuma.invalid/push/x")
+    monkeypatch.setattr(mb, "send_heartbeat",
+                        lambda url, status="up", msg="OK": "connection refused")
+    monkeypatch.setattr(
+        mb, "write_health_event",
+        lambda write_api, bucket, sys_sn, event, fields, **kw:
+            recorded.append((event, fields, kw)))
+
+    mb.run_loop(FakeQueryApi(), RecordingWriteApi(), FakeSession(), bucket="alphaess",
+                sys_sn="SN", api_key="key", config=config(interval_s=0), max_cycles=1)
+
+    assert recorded == [("heartbeat_failed", {"error": "connection refused"},
+                         {"stage": "heartbeat", "component": "mijnbatterij",
+                          "monitor": "mijnbatterij"})]
+
+
+def test_a_successful_kuma_push_records_nothing(monkeypatch):
+    recorded = []
+    monkeypatch.setattr(mb, "run_once", lambda *a, **k: (None, "stale"))
+    monkeypatch.setenv("MIJNBATTERIJ_HEARTBEAT_URL", "http://kuma.invalid/push/x")
+    monkeypatch.setattr(mb, "send_heartbeat", lambda url, status="up", msg="OK": "")
+    monkeypatch.setattr(
+        mb, "write_health_event",
+        lambda *a, **kw: recorded.append((a, kw)))
+
+    mb.run_loop(FakeQueryApi(), RecordingWriteApi(), FakeSession(), bucket="alphaess",
+                sys_sn="SN", api_key="key", config=config(interval_s=0), max_cycles=1)
+
+    assert recorded == []
+
+
 def test_a_payload_rejection_says_it_will_not_clear_on_its_own(monkeypatch, caplog):
     """A 400 naming an invalid setting is retried every 300 s forever and logs
     identically to a transient blip, so the log gives the reader no reason to
@@ -1293,6 +1335,45 @@ def test_an_empty_heartbeat_url_pings_nothing(monkeypatch):
     monkeypatch.setattr(mb.requests, "get", get)
     mb.send_heartbeat("")
     assert get.urls == []
+
+
+def test_a_successful_push_returns_empty(monkeypatch):
+    monkeypatch.setattr(mb.requests, "get", _RecordingGet())
+    assert mb.send_heartbeat(KUMA_URL) == ""
+
+
+def test_a_transport_failure_returns_the_reason(monkeypatch):
+    """TODO.md #18: SWALLOWED IS NOT THE SAME AS UNREPORTED -- collector.send_heartbeat sets
+    this shape, this module has to match it or stay the one silent process."""
+    get = _RecordingGet(requests.exceptions.ConnectTimeout("timeout=5"))
+    monkeypatch.setattr(mb.requests, "get", get)
+    reason = mb.send_heartbeat(KUMA_URL)
+    assert "ConnectTimeout" in reason
+
+
+def test_a_non_2xx_reply_counts_as_a_failure(monkeypatch):
+    """A revoked or wrong push token answers 404 and the request itself succeeds -- without
+    checking the status code, the one error that disables a monitor forever is the one this
+    function would call fine."""
+    monkeypatch.setattr(mb.requests, "get",
+                        lambda *a, **kw: FakeResponse(404, text="not found"))
+    reason = mb.send_heartbeat(KUMA_URL)
+    assert reason != ""
+    assert "404" in reason
+
+
+def test_the_push_token_is_redacted_from_the_returned_reason(monkeypatch):
+    """This reason ends up in a `collector_health` field, which Grafana renders -- the token
+    is write-only (it can spoof a heartbeat, nothing more), but there is no reason to publish
+    it."""
+    class Boom:
+        def __call__(self, url, timeout=None):
+            raise requests.exceptions.ConnectionError(f"Failed to connect to {url}")
+
+    monkeypatch.setattr(mb.requests, "get", Boom())
+    reason = mb.send_heartbeat(KUMA_URL)
+    assert "E1UNtJJr3h" not in reason
+    assert "<token>" in reason
 
 
 # --------------------------------------------------------------------------

@@ -140,3 +140,34 @@ def test_a_broken_heartbeat_never_fails_the_run(harness, monkeypatch):  # noqa: 
     monkeypatch.setattr(efficiency, "send_heartbeat", boom)
     _main(monkeypatch, "--date", DAY.isoformat())
     assert len(harness["write_api"].points("daily_energy")) == 1
+
+
+def test_a_failed_push_is_recorded_not_just_swallowed(harness, monkeypatch):  # noqa: F811
+    """TODO.md #18: the third and last of the swallowed-heartbeat processes. A push that
+    reaches Kuma and is rejected (a revoked token, say) must land in `collector_health`, the
+    same as the collector's own heartbeat -- tagged `component="efficiency"` so it is not
+    mistaken for one."""
+    recorded = []
+    monkeypatch.setattr(efficiency, "send_heartbeat",
+                        lambda url, status="up", msg="OK": "404: token revoked")
+    monkeypatch.setattr(
+        efficiency, "write_health_event",
+        lambda write_api, bucket, sys_sn, event, fields, **kw:
+            recorded.append((event, fields, kw)))
+
+    _main(monkeypatch, "--date", DAY.isoformat())
+
+    assert recorded == [("heartbeat_failed", {"error": "404: token revoked"},
+                         {"stage": "heartbeat", "component": "efficiency",
+                          "monitor": "efficiency"})]
+
+
+def test_a_successful_push_records_nothing(harness, monkeypatch):  # noqa: F811
+    recorded = []
+    monkeypatch.setattr(
+        efficiency, "write_health_event",
+        lambda *a, **kw: recorded.append((a, kw)))
+
+    _main(monkeypatch, "--date", DAY.isoformat())
+
+    assert recorded == []

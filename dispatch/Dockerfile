@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY registers.py .
 COPY heartbeat.py .
+COPY health.py .
 COPY plan.py .
 COPY translator.py .
 COPY translate.py .

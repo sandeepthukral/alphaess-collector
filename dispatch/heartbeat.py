@@ -13,14 +13,31 @@ dependency to a process that drives hardware.
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import urlopen
 
 log = logging.getLogger("dispatch")
 
+# A Kuma push token lives in the URL path (/api/push/<token>), and a connection error from
+# `urlopen` quotes the URL it failed on. A copy of `collector.collector._PUSH_TOKEN_RE`, not
+# an import -- this image ships pymodbus and influxdb-client and nothing else, the same reason
+# this module owns its own `send_heartbeat` instead of importing `collector.py`'s. The token
+# is write-only (it can spoof a heartbeat, nothing more), but there is no reason to publish it
+# into `collector_health`, which Grafana renders.
+_PUSH_TOKEN_RE = re.compile(r"(/api/push/)[^\s/?\"']+")
 
-def send_heartbeat(url: str, status: str = "up", msg: str = "OK", timeout: float = 5) -> None:
+
+def send_heartbeat(url: str, status: str = "up", msg: str = "OK", timeout: float = 5) -> str:
     """Ping a Kuma 'Push' monitor. Never raises, and does nothing when `url` is empty.
+
+    Returns "" on success, or a short reason the push failed -- the collector and
+    mijnbatterij (`collector/collector.py`, `collector/mijnbatterij.py`) return the
+    same thing for the same reason: SWALLOWED IS NOT THE SAME AS UNREPORTED. The
+    caller here (`scheduler.report`, `translate.run`) turns a non-empty result into
+    a `collector_health` row via `dispatch/health.py`, so a Kuma outage shows up on
+    the same dashboard tile the other two processes use, instead of only in
+    `docker compose logs dispatch`.
 
     The same shape as `collector/collector.py:407`, including the rebuilt query string -- the
     push URL Kuma displays already carries `?status=up&msg=OK&ping=`, and appending to it
@@ -31,10 +48,19 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK", timeout: float
     created during go-live (DISPATCH-GOLIVE.md section 3) and the loop has to run before that.
     """
     if not url:
-        return
+        return ""
     target = urlunsplit(urlsplit(url)._replace(query=urlencode({"status": status, "msg": msg})))
     try:
+        # A NON-2xx REPLY COUNTS AS A FAILURE TOO -- same reasoning as
+        # collector.send_heartbeat. urlopen already raises HTTPError for 4xx/5xx,
+        # so nothing extra is needed here beyond letting that propagate.
         with urlopen(target, timeout=timeout):
             pass
     except Exception as exc:
-        log.warning("heartbeat ping failed: %s", exc)
+        # Redacted BEFORE logging, not only before returning -- Alloy ships this container's
+        # log to Loki and Grafana renders it, so the log is not a more private destination
+        # than the collector_health field the caller writes this into.
+        reason = _PUSH_TOKEN_RE.sub(r"\1<token>", f"{type(exc).__name__}: {exc}")
+        log.warning("heartbeat ping failed: %s", reason)
+        return reason[:200]
+    return ""

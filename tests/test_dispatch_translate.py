@@ -224,13 +224,19 @@ class TestCapacity:
 
 
 class Pings:
-    """Collects heartbeats instead of sending them."""
+    """Collects heartbeats instead of sending them.
+
+    `fail_reason`, when set, is returned for every call -- standing in for a push that
+    reached Kuma and failed, the same shape `send_heartbeat` returns in production.
+    """
 
     def __init__(self):
         self.sent: list[tuple[str, str, str]] = []
+        self.fail_reason: str = ""
 
     def __call__(self, url, status="up", msg="OK", timeout=5):
         self.sent.append((url, status, msg))
+        return self.fail_reason
 
     def by_url(self, url) -> list[tuple[str, str]]:
         return [(s, m) for u, s, m in self.sent if u == url]
@@ -256,6 +262,9 @@ class RecordingSlotPublisher:
 
     def __init__(self, ok=True):
         self.ok, self.docs = ok, []
+        # `_ping` reads these off any slot_publisher to record a failed Kuma push --
+        # see TestFailedPushesAreRecorded.
+        self.write_api, self.bucket, self.sys_sn = object(), "alphaess", "SN123"
 
     def publish(self, doc) -> bool:
         self.docs.append(doc)
@@ -394,6 +403,45 @@ class TestRun:
         assert pings.by_url(SLOTS_URL) == []
 
 
+class TestFailedPushesAreRecorded:
+    """TODO.md #18: a Kuma push that reaches Kuma and gets rejected must not just log and
+    vanish. `run`'s `_ping` closure records a non-empty `send_heartbeat` result via
+    `slot_publisher`'s write_api/bucket/sys_sn -- the same connection this run already opened
+    for `dispatch_slots`, reused rather than duplicated."""
+
+    def test_a_failed_push_is_recorded_against_its_monitor(self, tmp_path, pings, monkeypatch):
+        recorded = []
+        monkeypatch.setattr(
+            T, "write_heartbeat_failed",
+            lambda write_api, bucket, sys_sn, monitor, error:
+                recorded.append((bucket, sys_sn, monitor, error)))
+        pings.fail_reason = "connection refused"
+        pub = RecordingSlotPublisher()
+
+        assert _run(api(NOW, 8), tmp_path / "slots.json", pings, slot_publisher=pub) == 0
+
+        assert ("alphaess", "SN123", "plan-in-influx", "connection refused") in recorded
+        assert ("alphaess", "SN123", "slots-written", "connection refused") in recorded
+
+    def test_no_slot_publisher_records_nothing(self, tmp_path, pings, monkeypatch):
+        """The normal laptop case: no Influx configured, so there is nowhere to record a
+        failure either -- degrades to what `send_heartbeat` already did before TODO.md #18."""
+        recorded = []
+        monkeypatch.setattr(T, "write_heartbeat_failed",
+                            lambda *a, **kw: recorded.append((a, kw)))
+        pings.fail_reason = "connection refused"
+
+        assert _run(api(NOW, 8), tmp_path / "slots.json", pings, slot_publisher=None) == 0
+        assert recorded == []
+
+    def test_a_successful_push_records_nothing(self, tmp_path, pings, monkeypatch):
+        recorded = []
+        monkeypatch.setattr(T, "write_heartbeat_failed",
+                            lambda *a, **kw: recorded.append((a, kw)))
+
+        assert _run(api(NOW, 8), tmp_path / "slots.json", pings,
+                    slot_publisher=RecordingSlotPublisher()) == 0
+        assert recorded == []
 
 
 class TestNewestRun:

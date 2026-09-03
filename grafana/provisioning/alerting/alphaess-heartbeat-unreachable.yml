@@ -1,4 +1,5 @@
-# Alerts when the collector cannot reach its own Uptime Kuma push monitor.
+# Alerts when any of the four processes in this stack cannot reach its Uptime
+# Kuma push monitor: collector, efficiency, mijnbatterij, dispatch.
 #
 # This watches the WATCHDOG, which is a different question from every other rule
 # in this folder. alphaess-staleness.yml asks "is data arriving"; this asks "if
@@ -12,16 +13,23 @@
 # trace was hundreds of identical `Heartbeat ping failed: ... connect timeout=5`
 # lines in the container log. Nothing went red, because nothing knew.
 #
-# `collector.send_heartbeat` now returns the reason a ping failed and the poll
-# loop records it as a `collector_health` point with event="heartbeat_failed";
-# this rule is the half that turns that point into a notification. The matching
-# tile is "Heartbeat unreachable" on the Collector Health dashboard.
+# `send_heartbeat` (one copy per process -- `collector/collector.py`,
+# `collector/mijnbatterij.py`, `collector/efficiency.py` shares the collector's,
+# `dispatch/heartbeat.py`) returns the reason a ping failed rather than only
+# logging it, and each writes a `collector_health` point with
+# event="heartbeat_failed", tag component=<collector|efficiency|mijnbatterij|
+# dispatch> and, for dispatch, tag monitor=<which of the seven>. This rule is
+# the half that turns those points into one notification. Originally the
+# collector's alone (TODO.md #18); generalised 2026-09 once the URLs stopped
+# moving, on the grounds that alerting on this before then would have fired
+# constantly and correctly and taught nobody anything. The matching tile is
+# "Heartbeat unreachable" on the Collector Health dashboard.
 #
 # NOT noDataState: Alerting, unlike alphaess-staleness.yml, and the difference is
-# the point. There, no series means the collector has written nothing at all,
-# which is the worst case. Here, no series means no ping has FAILED -- the
-# healthy, and by a wide margin the usual, state. Alerting on it would fire
-# permanently on every deployment that never set HEARTBEAT_URL.
+# the point. There, no series means nothing has been written at all, which is
+# the worst case. Here, no series means no ping has FAILED -- the healthy, and
+# by a wide margin the usual, state. Alerting on it would fire permanently on
+# every deployment that never set a *_HEARTBEAT_URL.
 apiVersion: 1
 
 groups:
@@ -31,12 +39,17 @@ groups:
     interval: 1m
     rules:
       - uid: alphaess-heartbeat-unreachable
-        title: AlphaESS collector heartbeat unreachable
+        title: AlphaESS heartbeat unreachable
         condition: C
         # Ten minutes of failures before paging. A single failed push is a blip
-        # on a home network and self-heals on the next poll; what matters is the
-        # sustained case, where the monitor has stopped being a monitor. The
-        # collector polls roughly every 30s, so this is a run of them, not one.
+        # on a home network and self-heals on the next attempt; what matters is
+        # the sustained case, where the monitor has stopped being a monitor.
+        # The collector and dispatch push often enough (roughly 30s and 60s)
+        # for "sustained" to mean a real run of them, not one. mijnbatterij
+        # pushes every 5 minutes and efficiency once a night, so for those two
+        # a single failed push can also age through this 10-minute window and
+        # page on its own -- accepted, not fixed here: a one-shot nightly job
+        # has no "next attempt" to self-heal on, so there is no blip to filter.
         for: 10m
         noDataState: OK
         execErrState: Alerting
@@ -44,27 +57,30 @@ groups:
           service: alphaess-collector
         annotations:
           summary: >-
-            The collector cannot deliver its heartbeat to Uptime Kuma
+            A heartbeat push to Uptime Kuma is failing
             ({{ humanize $values.B.Value }} failed pushes in the last 10
-            minutes). Collection itself may be fine -- this is the watchdog.
+            minutes). Collection itself may be fine -- this is the watchdog,
+            not the thing it watches.
           description: >-
-            The dead man's switch is dead: Kuma is not hearing from the
-            collector, so it will either page for silence that is not real or
-            stay green through an outage that is. Read the reason with
-            `docker compose logs --tail=50 collector | grep Heartbeat`, or from
-            the `collector_health` measurement where event="heartbeat_failed".
+            A dead man's switch is dead: Kuma is not hearing from one of
+            collector/efficiency/mijnbatterij/dispatch, so it will either page
+            for silence that is not real or stay green through an outage that
+            is. Find which one and why in the `collector_health` measurement
+            where event="heartbeat_failed" -- group by `component` (and, for
+            dispatch, `monitor`) to see which process and, on dispatch, which
+            of the seven Kuma monitors -- or read it from that container's log
+            with `docker compose logs --tail=50 <service> | grep -i heartbeat`.
             Since 2026-09-03 the URLs name `kuma`, an extra_hosts alias for
             host-gateway, so "the NAS changed IP" is no longer a cause. Check
             in this order: Kuma itself is up and still listening on 3001;
-            `docker compose exec -T collector python -c "import socket;
+            `docker compose exec -T <service> python -c "import socket;
             print(socket.gethostbyname('kuma'))"` prints an address (an error
             means the alias is missing or the daemon predates host-gateway --
             set KUMA_ADDR to a literal IP); the push token in the URL still
-            exists in Kuma. DSM has no getent, which is why this is Python. If you edit .env, note that compose
-            reads env only at container start, so the fix is
-            `docker compose up -d --force-recreate collector`, NOT `restart`,
-            which reuses the old environment -- and mijnbatterij and dispatch
-            reach Kuma the same way and need the same treatment.
+            exists in Kuma. DSM has no getent, which is why this is Python. If
+            you edit .env, note that compose reads env only at container start,
+            so the fix is `docker compose up -d --force-recreate <service>`,
+            NOT `restart`, which reuses the old environment.
         data:
           # A: heartbeat pushes that failed to deliver, last 10 minutes.
           - refId: A

@@ -12,6 +12,8 @@ run in CI whether or not the image is available.
 """
 from __future__ import annotations
 
+import asyncio
+
 import heartbeat as H
 import scheduler
 import slots as S
@@ -61,6 +63,45 @@ class TestSendHeartbeat:
 
         monkeypatch.setattr(H, "urlopen", boom)
         H.send_heartbeat("http://kuma/api/push/abc", "up", "OK")
+
+    def test_a_failed_ping_returns_the_reason(self, monkeypatch):
+        """TODO.md #18: swallowed is not the same as unreported. The collector's and
+        mijnbatterij's `send_heartbeat` both return the reason a push failed so the caller
+        can record it; this one has to match, or dispatch stays the one silent process."""
+        monkeypatch.setattr(H, "urlopen",
+                            lambda url, timeout=5: (_ for _ in ()).throw(
+                                OSError("no route to host")))
+        reason = H.send_heartbeat("http://kuma/api/push/abc", "up", "OK")
+        assert "no route to host" in reason
+
+    def test_a_successful_ping_returns_empty(self, monkeypatch):
+        class Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        monkeypatch.setattr(H, "urlopen", lambda url, timeout=5: Resp())
+        assert H.send_heartbeat("http://kuma/api/push/abc", "up", "OK") == ""
+
+    def test_no_url_returns_empty_not_none(self):
+        """`report()` treats a truthy return as a failure to record -- an unset URL, the
+        documented "not monitored yet" state, must not be mistaken for one."""
+        assert H.send_heartbeat("", "up", "OK") == ""
+
+    def test_the_push_token_is_redacted_from_the_returned_reason(self, monkeypatch):
+        """PR #148 review: an exception from `urlopen` quotes the URL it failed on, and that
+        URL's path carries the Kuma push token. The returned reason lands in `collector_health`
+        (dispatch/health.py), which Grafana renders -- the token must never reach it. Matches
+        collector.send_heartbeat and mijnbatterij.send_heartbeat's own redaction."""
+        def boom(url, timeout=5):
+            raise OSError(f"Failed to connect to kuma:3001: {url}")
+
+        monkeypatch.setattr(H, "urlopen", boom)
+        reason = H.send_heartbeat("http://kuma:3001/api/push/E1UNtJJr3h?status=up", "up", "OK")
+        assert "E1UNtJJr3h" not in reason
+        assert "<token>" in reason
 
 
 class TestEveryDocumentedMonitorIsWired:
@@ -159,3 +200,52 @@ class TestSocFloor:
     def test_every_message_fits_a_kuma_notification(self):
         long_reason = S.Decision("idle", "x" * 500, fresh=False)
         assert all(len(msg) <= 200 for _s, msg in pings(long_reason).values())
+
+
+class TestReportRecordsFailures:
+    """TODO.md #18's dispatch third: a Kuma push that fails must not just log and vanish.
+    `report()` records it as a `collector_health` row via `dispatch/health.py`, reusing the
+    same publisher `tick()` already opened for `dispatch_state` -- so this is checking that
+    the plumbing exists, not re-testing `write_heartbeat_failed` itself (test_dispatch_health.py
+    does that)."""
+
+    class FakePublisher:
+        def __init__(self):
+            self.write_api = object()
+            self.bucket = "alphaess"
+            self.sys_sn = "SN123"
+
+    def test_a_failed_push_is_recorded_against_its_monitor(self, monkeypatch):
+        recorded = []
+        monkeypatch.setattr(
+            scheduler, "write_heartbeat_failed",
+            lambda write_api, bucket, sys_sn, monitor, error:
+                recorded.append((bucket, sys_sn, monitor, error)))
+        monkeypatch.setattr(scheduler, "send_heartbeat",
+                            lambda url, status, msg: "connection refused" if url else "")
+        monkeypatch.setitem(scheduler.MONITOR_URLS, "dispatcher-alive",
+                            "http://kuma/api/push/x")
+
+        asyncio.run(scheduler.report(
+            [("dispatcher-alive", "up", "OK")], self.FakePublisher()))
+
+        assert recorded == [("alphaess", "SN123", "dispatcher-alive", "connection refused")]
+
+    def test_a_successful_push_records_nothing(self, monkeypatch):
+        recorded = []
+        monkeypatch.setattr(
+            scheduler, "write_heartbeat_failed",
+            lambda *a, **kw: recorded.append((a, kw)))
+        monkeypatch.setattr(scheduler, "send_heartbeat", lambda url, status, msg: "")
+
+        asyncio.run(scheduler.report(
+            [("dispatcher-alive", "up", "OK")], self.FakePublisher()))
+
+        assert recorded == []
+
+    def test_no_publisher_does_not_raise(self, monkeypatch):
+        """A laptop dry run or an unconfigured Influx token: publisher is None, matching
+        every other observability write in this module -- degrade what you can see, never
+        the control loop."""
+        monkeypatch.setattr(scheduler, "send_heartbeat", lambda url, status, msg: "down")
+        asyncio.run(scheduler.report([("dispatcher-alive", "up", "OK")], None))

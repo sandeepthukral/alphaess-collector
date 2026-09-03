@@ -93,6 +93,18 @@ _PUSH_TOKEN_RE = re.compile(r"(/api/push/)[^\s/?\"']+")
 log = logging.getLogger("alphaess-collector")
 
 
+def redact_push_token(text: str) -> str:
+    """Blank a Kuma push token out of anything on its way to a log or InfluxDB.
+
+    Public, and imported by `mijnbatterij.py`, because a second copy of this
+    regex is a second place for it to be wrong. `dispatch/heartbeat.py` does keep
+    its own copy: it ships in a different image that has neither this module nor
+    `requests`, and one duplicated line is cheaper than an import that cannot
+    exist.
+    """
+    return _PUSH_TOKEN_RE.sub(r"\1<token>", text)
+
+
 def env(name: str, default: str | None = None) -> str:
     value = os.environ.get(name, default)
     if value is None:
@@ -346,7 +358,8 @@ def error_summary(exc: Exception) -> str:
 
 def write_health_event(write_api, bucket: str, sys_sn: str, event: str,
                        fields: dict, error_class: str | None = None,
-                       stage: str | None = None) -> None:
+                       stage: str | None = None, component: str = "collector",
+                       monitor: str | None = None) -> None:
     """Record a poll failure ("failure"), the end of an outage ("recovered"), or a
     heartbeat push that could not be delivered ("heartbeat_failed").
 
@@ -363,8 +376,22 @@ def write_health_event(write_api, bucket: str, sys_sn: str, event: str,
 
     Best-effort, like the heartbeat: bookkeeping about an outage must never
     turn into a second one.
+
+    `component` says WHICH PROCESS wrote the row, and defaults to the collector
+    because that is who owned this measurement first. `efficiency.py` and
+    `mijnbatterij.py` write "heartbeat_failed" here too, and so does the dispatch
+    image through its own copy of this write (`dispatch/health.py`) -- one
+    measurement, because "can this stack reach its watchdog" is one question and
+    splitting it across four measurements would mean four alert rules, three of
+    which nobody would remember to add. The name `collector_health` is left alone
+    rather than widened: renaming it would strand the history and every panel
+    that reads it. `monitor` names the Kuma monitor the push was aimed at, which
+    is the part that says which URL to go and look at.
     """
-    point = Point(HEALTH_MEASUREMENT).tag("sys_sn", sys_sn).tag("event", event)
+    point = Point(HEALTH_MEASUREMENT).tag("sys_sn", sys_sn).tag("event", event) \
+        .tag("component", component)
+    if monitor:
+        point = point.tag("monitor", monitor)
     if error_class:
         # Bounded set (ReadTimeout, SSLError, HTTPError, RuntimeError, ...),
         # so it is safe as a tag and lets Grafana group by failure mode.
@@ -460,7 +487,7 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
         # not a private destination on this deployment: Alloy ships it to Loki and
         # it renders on the NAS Grafana, which is the same audience the stored
         # field has.
-        reason = _PUSH_TOKEN_RE.sub(r"\1<token>", error_summary(exc))
+        reason = redact_push_token(error_summary(exc))
         log.warning("Heartbeat ping failed: %s", reason)
         return reason
     return ""
@@ -574,7 +601,8 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                 if ping_failed:
                     write_health_event(
                         write_api, influx_bucket, sys_sn, "heartbeat_failed",
-                        {"error": ping_failed}, stage="heartbeat")
+                        {"error": ping_failed}, stage="heartbeat",
+                        monitor="collector")
             else:
                 log.warning("No usable fields in response, skipping write")
             # An outage that ends on its own is otherwise silent: the failures
@@ -630,7 +658,8 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
                 if ping_failed:
                     write_health_event(
                         write_api, influx_bucket, sys_sn, "heartbeat_failed",
-                        {"error": ping_failed}, stage="heartbeat")
+                        {"error": ping_failed}, stage="heartbeat",
+                        monitor="collector")
 
         # Back off on repeated failures to avoid hammering the API, capped so
         # that an outage does not grow a gap big enough to cost a whole day of
