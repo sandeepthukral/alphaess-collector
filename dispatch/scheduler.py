@@ -79,6 +79,14 @@ LIMITS_REFRESH_S = 3600
 # clamping concern (`run()`'s loop, feeding `S.clamp`), these are observability, gated inside
 # `tick()` itself -- see step 8c/8d for why they live there rather than in `run()`.
 HEALTH_REFRESH_S = 3600
+# SoH, the three lifetime energy counters, lifetime PV and the inverter's heatsink -- see
+# `registers.DAILY_BATTERY_BLOCK`. A day rather than an hour because of what these fields ARE:
+# a lifetime counter that moved visibly within an hour would be the news, not the reading, and
+# SoH is a figure the BMS itself recomputes on the order of weeks. The heatsink temperature is
+# the odd one out, being genuinely dynamic, and it rides this tier anyway -- it is a tripwire
+# for a derating inverter, which the hourly power-limit tiles already cover from the other
+# side, not a thermal trend anyone would chart.
+DAILY_HEALTH_REFRESH_S = 86400
 WEEKLY_HEALTH_REFRESH_S = 604800
 
 # How many consecutive HEALTH_REFRESH_S-spaced failures a single weekly block tolerates before
@@ -206,6 +214,42 @@ class Inverter:
             raise OSError(f"fault block read failed: {e}") from e
         if r.isError():
             raise OSError(f"fault block read failed: {r}")
+        return list(r.registers)
+
+    async def read_daily_battery_block(self) -> list[int]:
+        """The 11 SoH/lifetime-energy words, verbatim. See `registers.DAILY_BATTERY_BLOCK`."""
+        addr, count = R.DAILY_BATTERY_BLOCK
+        try:
+            r = await self.c.read_holding_registers(addr,
+                                                    **{"count": count, self.kw: self.slave})
+        except ModbusException as e:  # see Inverter.read
+            raise OSError(f"daily battery block read failed: {e}") from e
+        if r.isError():
+            raise OSError(f"daily battery block read failed: {r}")
+        return list(r.registers)
+
+    async def read_daily_inverter_block(self) -> list[int]:
+        """The inverter heatsink temperature word. See `registers.DAILY_INVERTER_BLOCK`."""
+        addr, count = R.DAILY_INVERTER_BLOCK
+        try:
+            r = await self.c.read_holding_registers(addr,
+                                                    **{"count": count, self.kw: self.slave})
+        except ModbusException as e:  # see Inverter.read
+            raise OSError(f"daily inverter block read failed: {e}") from e
+        if r.isError():
+            raise OSError(f"daily inverter block read failed: {r}")
+        return list(r.registers)
+
+    async def read_daily_pv_block(self) -> list[int]:
+        """The 2 lifetime-PV words, verbatim. See `registers.DAILY_PV_BLOCK`."""
+        addr, count = R.DAILY_PV_BLOCK
+        try:
+            r = await self.c.read_holding_registers(addr,
+                                                    **{"count": count, self.kw: self.slave})
+        except ModbusException as e:  # see Inverter.read
+            raise OSError(f"daily pv block read failed: {e}") from e
+        if r.isError():
+            raise OSError(f"daily pv block read failed: {r}")
         return list(r.registers)
 
     async def read_firmware_block(self) -> list[int]:
@@ -431,12 +475,27 @@ def check_alive() -> int:
     return 1 if stale else 0
 
 
-async def _read_weekly_block(cache: dict, now: dt.datetime, name: str, read_words, decode
-                             ) -> dict | None:
-    """One weekly-tier block's independent gate, read, and backoff. Used three times from
+async def _read_weekly_block(cache: dict, now: dt.datetime, name: str, read_words, decode,
+                             interval: float = WEEKLY_HEALTH_REFRESH_S,
+                             prefix: str = "weekly") -> dict | None:
+    """One slow-tier block's independent gate, read, and backoff. Used three times from
     step 8d, once each for `registers.FIRMWARE_BLOCK`/`INVERTER_FW_BLOCK`/`SYSTEM_CONFIG_BLOCK`
     -- `name` keys this block's own `cache` entries, `read_words` is the bound `Inverter`
     method that fetches its raw words, `decode` is the matching `registers.decode_*_block`.
+
+    SHARED WITH THE DAILY TIER (step 8e) via `interval`/`prefix`, which default to the weekly
+    behaviour this was written for. The daily blocks need precisely what is already here -- an
+    independent gate each, an hourly retry after a failure, and a give-up that stops hammering
+    a register this hardware may not have -- and a second copy of that logic would be a second
+    place for the two bugs the docstring below records to come back. `prefix` keeps the cache
+    keys distinct so a daily and a weekly block of the same `name` could never share a gate.
+
+    `decode` MAY RAISE ValueError TO REJECT A READ IT DOES NOT BELIEVE, which is how the daily
+    tier applies its plausibility guards (`registers.daily_battery_plausible` and friends): an
+    implausible block takes exactly the same path as an unreadable one -- no field published,
+    warned once, retried hourly, given up on after WEEKLY_FAIL_STREAK_LIMIT. That is the right
+    treatment, because the two are the same event from the dashboard's point of view: a value
+    this repo cannot stand behind, and no field at all is the honest report of it.
 
     THREE INDEPENDENT GATES, not one shared one. These are three separate register ranges with
     independent support and independent failure: a firmware block this inverter does not
@@ -457,12 +516,15 @@ async def _read_weekly_block(cache: dict, now: dt.datetime, name: str, read_word
     failing.
     """
     read_at_key, streak_key, error_key = (
-        f"weekly_{name}_read_at", f"weekly_{name}_fail_streak", f"weekly_{name}_error")
+        f"{prefix}_{name}_read_at", f"{prefix}_{name}_fail_streak", f"{prefix}_{name}_error")
     read_at = cache.get(read_at_key)
     streak = cache.get(streak_key, 0)
-    interval = (HEALTH_REFRESH_S if 0 < streak < WEEKLY_FAIL_STREAK_LIMIT
-               else WEEKLY_HEALTH_REFRESH_S)
-    if read_at is not None and (now - read_at).total_seconds() < interval:
+    # The backoff is to HEALTH_REFRESH_S in both tiers, not to a fraction of `interval`: an
+    # hour is short enough to catch a transient and long enough not to be a retry loop, and
+    # that is as true of a daily block as of a weekly one. Past the limit each tier reverts to
+    # its own full interval.
+    retry = (HEALTH_REFRESH_S if 0 < streak < WEEKLY_FAIL_STREAK_LIMIT else interval)
+    if read_at is not None and (now - read_at).total_seconds() < retry:
         return None
 
     error, decoded = "", None
@@ -844,6 +906,46 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
             cache, now, "system_config", inv.read_system_config_block,
             R.decode_system_config_block)
 
+    # 8e. Daily health tier: SoH, the three lifetime energy counters, lifetime PV, and the
+    # inverter's heatsink temperature. Same `read_error` skip and the same per-block gate as
+    # 8d -- see `_read_weekly_block`, which these three share.
+    #
+    # THREE BLOCKS RATHER THAN ONE, because they are three unrelated register ranges with
+    # independent support: 0x011B-0x0125 on the battery, 0x0435 on the inverter, 0x08D0 on the
+    # system. 0x08D0 in particular appears in no document this repo has (see
+    # `registers.DAILY_PV_BLOCK`), so it is the likeliest of the three to turn out unsupported
+    # on some other firmware -- and it must not be able to take SoH down with it.
+    #
+    # EACH DECODE IS PAIRED WITH ITS PLAUSIBILITY GUARD HERE, by raising ValueError, rather
+    # than inside `registers.py`: the decode functions stay total, the way every other function
+    # in that module is, and the policy of "what do we do about a value we do not believe"
+    # stays in the layer that already owns publishing decisions. `_read_weekly_block` catches
+    # ValueError and treats it exactly as an unreadable block, which is the intent.
+    def _guarded(decode, plausible, what):
+        def go(words):
+            decoded = decode(words)
+            if not plausible(decoded):
+                raise ValueError(f"implausible {what}: {decoded}")
+            return decoded
+        return go
+
+    daily_battery, daily_inverter, daily_pv = None, None, None
+    if not read_error:
+        daily_battery = await _read_weekly_block(
+            cache, now, "battery", inv.read_daily_battery_block,
+            _guarded(R.decode_daily_battery_block, R.daily_battery_plausible,
+                     "SoH/lifetime energy"),
+            interval=DAILY_HEALTH_REFRESH_S, prefix="daily")
+        daily_inverter = await _read_weekly_block(
+            cache, now, "inverter", inv.read_daily_inverter_block,
+            _guarded(R.decode_daily_inverter_block, R.inverter_temp_plausible,
+                     "heatsink temperature"),
+            interval=DAILY_HEALTH_REFRESH_S, prefix="daily")
+        daily_pv = await _read_weekly_block(
+            cache, now, "pv", inv.read_daily_pv_block,
+            _guarded(R.decode_daily_pv_block, R.lifetime_pv_plausible, "lifetime PV"),
+            interval=DAILY_HEALTH_REFRESH_S, prefix="daily")
+
     # 9. Publish. A tick that could not read the inverter STILL publishes.
     #
     # It used to publish nothing, which made an unreadable inverter and a dead dispatcher the
@@ -889,6 +991,13 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         "firmware": firmware,
         "inverter_fw": inverter_fw,
         "system_config": system_config,
+        # Read at step 8e, once a day, and `None` on every tick in between -- absent means
+        # "not read this tick", exactly as for the hourly and weekly fields above. These three
+        # are also absent when the block read back a value its plausibility guard rejected,
+        # which is the same posture `voltages`/`temps` take.
+        "daily_battery": daily_battery,
+        "daily_inverter": daily_inverter,
+        "daily_pv": daily_pv,
     }
     if publisher is not None:
         if verified is not None and raw_words is not None:

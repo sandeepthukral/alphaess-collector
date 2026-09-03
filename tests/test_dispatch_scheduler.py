@@ -80,7 +80,28 @@ def measurement_registers(live_soc_pct=80.0, block=None, battery_power_w=0) -> d
     regs[R.REG_BATTERY_POWER] = int(battery_power_w) & 0xFFFF
     regs.update(voltage_registers())
     regs.update(temp_registers())
+    regs.update(daily_registers())
     return regs
+
+
+def daily_registers() -> dict[int, int]:
+    """The daily tier's three blocks, keyed by address, holding the words the live inverter
+    returned on 2026-09-03.
+
+    Here for the same reason `voltage_registers` and `temp_registers` are: `ScriptedClient`
+    zero-fills anything not given, and a zero block is precisely what
+    `registers.daily_battery_plausible` and `lifetime_pv_plausible` exist to reject. Without
+    this, every test in this file would exercise the daily tier's failure path while appearing
+    to exercise nothing at all.
+    """
+    return {
+        R.REG_SOH: 1000,                       # 100.0 %
+        R.REG_LIFETIME_CHARGE: 0, R.REG_LIFETIME_CHARGE + 1: 10481,          # 1048.1 kWh
+        R.REG_LIFETIME_DISCHARGE: 0, R.REG_LIFETIME_DISCHARGE + 1: 10221,    # 1022.1 kWh
+        R.REG_LIFETIME_GRID_CHARGE: 0, R.REG_LIFETIME_GRID_CHARGE + 1: 5811,  # 581.1 kWh
+        R.REG_INVERTER_TEMP: 370,              # 37.0 C
+        R.REG_LIFETIME_PV: 1, R.REG_LIFETIME_PV + 1: 21175,                  # 8671.1 kWh
+    }
 
 
 def voltage_registers(min_v=3.298, max_v=3.312, min_pack=3, max_pack=1,
@@ -1039,6 +1060,137 @@ class TestHealthGates:
         tick_with_cache(tmp_path, monkeypatch, client, cache,
                         now=T0 + dt.timedelta(minutes=1))
         assert "firmware_raw_0115" not in pub.points[1]
+
+
+class TestDailyHealthTier:
+    """Step 8e: SoH, the three lifetime energy counters, lifetime PV, the heatsink.
+
+    The gate mechanics are shared with the weekly tier (`_read_weekly_block`), so what is
+    tested here is what the daily tier adds: a plausibility guard on every block, and three
+    independent gates over three unrelated register ranges.
+    """
+
+    def test_the_confirmed_values_reach_the_point(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        point = cache["publisher"].points[0]
+        assert point["soh_pct"] == 100.0
+        assert point["lifetime_charge_kwh"] == 1048.1
+        assert point["lifetime_discharge_kwh"] == 1022.1
+        assert point["lifetime_grid_charge_kwh"] == 581.1
+        assert point["inverter_temp_c"] == 37.0
+        assert point["lifetime_pv_kwh"] == 8671.1
+
+    def test_absent_when_the_gate_has_not_elapsed(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        cache: dict = {"released": False, "publisher": RecordingPublisher(),
+                      "daily_battery_read_at": T0}
+        tick_with_cache(tmp_path, monkeypatch, client, cache,
+                        now=T0 + dt.timedelta(hours=6))
+        assert "soh_pct" not in cache["publisher"].points[0]
+
+    def test_present_once_the_gate_has_elapsed(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        cache: dict = {"released": False, "publisher": RecordingPublisher(),
+                      "daily_battery_read_at": T0 - dt.timedelta(days=2)}
+        tick_with_cache(tmp_path, monkeypatch, client, cache, now=T0)
+        assert "soh_pct" in cache["publisher"].points[0]
+
+    def test_does_not_republish_on_the_tick_right_after_crossing(self, tmp_path, monkeypatch):
+        client = ScriptedClient(measurement_registers())
+        pub = RecordingPublisher()
+        cache: dict = {"released": False, "publisher": pub,
+                      "daily_battery_read_at": T0 - dt.timedelta(days=2)}
+        tick_with_cache(tmp_path, monkeypatch, client, cache, now=T0)
+        assert "soh_pct" in pub.points[0]
+
+        tick_with_cache(tmp_path, monkeypatch, client, cache,
+                        now=T0 + dt.timedelta(minutes=1))
+        assert "soh_pct" not in pub.points[1]
+
+    def test_an_implausible_block_publishes_nothing_rather_than_a_number(
+            self, tmp_path, monkeypatch, caplog):
+        """The case this tier's guards exist for, and the reason they raise ValueError into the
+        shared gate rather than returning a value: an all-zero SoH/energy block is in range at
+        every scale, and a dashboard reading 0.0 kWh lifetime charge is a wrong number nobody
+        has reason to doubt. No field is the honest report.
+        """
+        regs = measurement_registers()
+        for addr in (R.REG_SOH, R.REG_LIFETIME_CHARGE, R.REG_LIFETIME_CHARGE + 1,
+                     R.REG_LIFETIME_DISCHARGE, R.REG_LIFETIME_DISCHARGE + 1,
+                     R.REG_LIFETIME_GRID_CHARGE, R.REG_LIFETIME_GRID_CHARGE + 1):
+            regs[addr] = 0
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        with caplog.at_level("WARNING"):
+            tick_with_cache(tmp_path, monkeypatch, client, cache)
+        point = cache["publisher"].points[0]
+        assert "soh_pct" not in point
+        assert "lifetime_charge_kwh" not in point
+        assert "implausible" in caplog.text
+        # The heatsink and PV blocks are untouched by that failure -- see the next test.
+        assert point["inverter_temp_c"] == 37.0
+
+    def test_an_implausible_block_retries_hourly_rather_than_waiting_a_day(
+            self, tmp_path, monkeypatch):
+        """A rejected read takes the same backoff as an unreadable one. A transient bad block
+        must not cost a full day before the next attempt, which is the same argument
+        `_read_weekly_block` already makes for the weekly tier."""
+        regs = measurement_registers()
+        regs[R.REG_SOH] = 0
+        client = ScriptedClient(regs)
+        pub = RecordingPublisher()
+        cache: dict = {"released": False, "publisher": pub}
+        tick_with_cache(tmp_path, monkeypatch, client, cache, now=T0)
+        assert cache["daily_battery_fail_streak"] == 1
+        assert "soh_pct" not in pub.points[0]
+
+        # Six hours later the register answers properly: the field appears, well inside the
+        # day the gate would otherwise have imposed.
+        client.registers[R.REG_SOH] = 1000
+        tick_with_cache(tmp_path, monkeypatch, client, cache,
+                        now=T0 + dt.timedelta(hours=6))
+        assert pub.points[1]["soh_pct"] == 100.0
+        assert cache["daily_battery_fail_streak"] == 0
+
+    def test_the_three_blocks_have_independent_gates(self, tmp_path, monkeypatch):
+        """Three unrelated register ranges with independent support. 0x08D0 in particular
+        appears in no document this repo has, so it is the likeliest of the three to be
+        unsupported on other firmware -- and it must not be able to take SoH down with it."""
+        regs = measurement_registers()
+        regs[R.REG_LIFETIME_PV] = 0
+        regs[R.REG_LIFETIME_PV + 1] = 0
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        point = cache["publisher"].points[0]
+        assert "lifetime_pv_kwh" not in point
+        assert point["soh_pct"] == 100.0
+        assert point["inverter_temp_c"] == 37.0
+        assert cache["daily_battery_fail_streak"] == 0
+
+    def test_the_daily_and_weekly_gates_cannot_collide(self, tmp_path, monkeypatch):
+        """`_read_weekly_block` keys its cache entries by tier prefix as well as block name.
+        Both tiers have a block that could reasonably be called the same thing, and a shared
+        key would silently make one tier's read satisfy the other's gate."""
+        client = ScriptedClient(measurement_registers())
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        assert "daily_battery_read_at" in cache
+        assert "weekly_firmware_read_at" in cache
+        assert cache["daily_battery_read_at"] is not None
+
+    def test_skipped_entirely_when_the_tick_already_has_a_read_error(
+            self, tmp_path, monkeypatch):
+        """Same reasoning as 8c and 8d: three more block reads against an inverter that has
+        already failed to answer buys three more ~12 s timeouts and delays the heartbeat."""
+        client = ScriptedClient(measurement_registers(),
+                                fail_addrs=frozenset({R.REG_START}))
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        assert "soh_pct" not in cache["publisher"].points[0]
+        assert "daily_battery_read_at" not in cache
 
 
 class TestMagnitudeShortfall:

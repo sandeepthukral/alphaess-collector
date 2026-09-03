@@ -90,52 +90,51 @@ battery. Deliberately left out of #128, which is the change that created the fie
 on a field with no history to calibrate against would be a threshold picked from nothing.
 Raised in that PR's review.
 
-**13. The health-poller's daily tier (SoH, lifetime energy, heatsink temp, PV energy) has no
-confirmed register layout.** UPDATE 2026-08-28: found AlphaESS's own "Parameter address table"
-(via `ha-alphaess-modbus`'s `all_registers.txt`), which corrects the handover's guessed
-addresses by one register in three places. UPDATE 2026-09-02: a SECOND source disagrees with
-that reading, and it is the more credible of the two. `senalse/ha-alphaess-modbus`'s
-`custom_components/alphaess_modbus/const.py` addresses every 32-bit value at its FIRST word,
-where the 2026-08-28 note read the manufacturer table as addressing it at its SECOND -- which
-is precisely the one-register shift that produced all three "corrections". Per `const.py`:
+**13. DONE 2026-09-03 — the daily tier ships: SoH, lifetime charge/discharge/grid-charge,
+lifetime PV, inverter heatsink.** Kept here rather than deleted because the ADDRESSES are the
+finding, and the next person to read a register document for this inverter needs the outcome.
 
-| field | 2026-08-28 note | `const.py` |
+Two documentary sources disagreed by exactly one register.
+`senalse/ha-alphaess-modbus`'s `const.py` addresses a 32-bit value at its FIRST word; this
+repo's 2026-08-28 reading of AlphaESS's own parameter table put it at the SECOND, which is what
+generated all three of that note's "corrections". `scripts/read-daily-health-registers.py` read
+both alignments side by side off the live inverter and const.py won outright:
+
+| field | rejected (2026-08-28) | CONFIRMED live |
 |---|---|---|
-| lifetime charge | `0x011F`-`0x0120` | `0x0120`-`0x0121` |
-| lifetime discharge | `0x0121`-`0x0122` | `0x0122`-`0x0123` |
-| lifetime grid-charge | `0x0123`-`0x0124` | `0x0124`-`0x0125` |
-| inverter temperature | `0x0434` | `0x0435` |
-| inverter lifetime PV | `0x043D`-`0x043E` | `0x043E`-`0x043F` |
+| lifetime charge | `0x011F` → 0 | `0x0120`-`0x0121` → 1048.1 kWh |
+| lifetime discharge | `0x0121` → 686,882,816 | `0x0122`-`0x0123` → 1022.1 kWh |
+| lifetime grid-charge | `0x0123` → 669,843,456 | `0x0124`-`0x0125` → 581.1 kWh |
+| inverter heatsink | `0x0434` → 0 | `0x0435` → 37.0 C |
+| SoH | `0x011B` (both agreed) | `0x011B` → 100.0 % |
+| lifetime PV | `0x08D1` → 1,387,724,801 | `0x08D0`-`0x08D1` → 8671.1 kWh |
 
-`const.py`'s layout is gapless -- charge/discharge/grid-charge run `0x0120`-`0x0125` straight
-into `0x0126`, which this repo has confirmed live as battery power -- where the 2026-08-28
-reading has to posit an unused word at `0x0125` to fit. It is also self-consistent at the
-inverter (temperature `0x0435`, warning1 `0x0436`), where the other reading would have the
-warning word overlap the temperature. So the handover's original addresses were probably right
-all along and the "correction" was the error. NOT ADOPTED ON THAT BASIS ALONE: "the tidier
-document wins" is how `0x0883` came to be written down as the mode register.
-`scripts/read-daily-health-registers.py` prints both alignments side by side from a live read,
-and only one can produce three plausible, correctly ordered counters -- that is what settles
-it. Run it (dispatch stopped, read-only) before anything here ships.
+The rejected column is not just wrong, it is wrong diagnostically: those two nine-digit numbers
+are one counter's low word spliced onto the next one's high word. So the handover's ORIGINAL
+addresses were right all along and the 2026-08-28 "correction" was itself the error — the same
+failure mode as `0x0883`, and caught the same way, by refusing to ship a documented address
+until the hardware agreed.
 
-`const.py` also supplies the scales the earlier note did not: SoH `0x011B` is `int16` at
-0.1 %/bit, every lifetime energy total is `uint32` at 0.1 kWh/bit, inverter temperature is
-`int16` at 0.1 C/bit. Battery capacity `0x0119` at 0.1 kWh/bit gives 27.9 kWh, matching what
-this repo already has independently from the plan, which is a free check that those scales are
-being read correctly.
+The scale (0.1 kWh/bit, 0.1 %/bit, 0.1 C/bit) is confirmed twice over and independently of the
+addresses: battery capacity `0x0119` read 279 against a battery this repo knows from the planner
+is 27.9 kWh, and lifetime PV read 8671.1 kWh, right for this array where 1 kWh/bit would claim
+86 MWh.
 
-Two things remain unsourced. System lifetime PV energy at `0x08D1`-`0x08D2` appears in neither
-`const.py` (which lists nothing between `0x08D0` and `0x08D4`, System Fault) nor anywhere else
-found; treat it as unconfirmed regardless of what the probe shows. And checking the AlphaESS
-app on 2026-08-28 found it surfaces no SoH%, no lifetime totals and no heatsink temperature at
-all, so the cross-check path this item originally proposed does not exist for these four --
-plausibility (bounds, ordering, monotonicity across two reads) is the whole of the evidence.
+Three things the run could not settle, all cheap to close now the fields publish:
 
-Once the alignment is settled: add a `DAILY_HEALTH_REFRESH_S` gate (~86400s) next to
-`HEALTH_REFRESH_S`, and add the SoH/daily-energy/lifetime-cycle panels to
-`alphaess-battery-health.json` in the SAME change -- it deliberately carries none today,
-because a panel naming a field `dispatch/state.py` never writes is what
-`test_every_field_filter_names_a_field_we_publish` exists to catch.
+- **Monotonicity was never demonstrated.** Nothing moved across the probe's 180 s gap — at
+  1479 W the battery makes 74 Wh, under the 0.1 kWh resolution. The alignment rests on
+  magnitude, ordering and the two scale confirmations. A week of published points closes it.
+- **`0x08D0` is in no document at all.** `const.py` lists nothing between `0x08D0` and `0x08D4`.
+  Magnitude is the whole of the evidence for what it means. Check it against the collector's own
+  lifetime PV total; the tile's own description says so.
+- **`0x08D2` held the same value as `0x08D0`.** Only the first is published, and they are
+  deliberately not required to agree — see `registers.DAILY_PV_BLOCK`.
+
+The inverter's own lifetime PV (`0x043D`-`0x043F`) is NOT published and should not be added:
+the whole `0x0430`-`0x0440` window read zero except the heatsink. Not an alignment question,
+both candidates read 0 — this is an AC-coupled site behind APsystems micro-inverters (see
+`REG_PV_METER`) and the inverter has no strings of its own to count.
 
 **14. The health-poller's weekly firmware/system-config blocks are published as raw hex, not
 decoded fields.** UPDATE 2026-08-28: the same manufacturer table resolves the word-by-word

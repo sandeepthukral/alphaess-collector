@@ -53,6 +53,9 @@ def _decision_fields(
     firmware: dict | None = None,
     inverter_fw: dict | None = None,
     system_config: dict | None = None,
+    daily_battery: dict | None = None,
+    daily_inverter: dict | None = None,
+    daily_pv: dict | None = None,
 ) -> dict[str, int | float | str]:
     """What the DISPATCHER knows about this tick, as opposed to what the inverter said.
 
@@ -151,6 +154,23 @@ def _decision_fields(
         fields.update({k: int(v) for k, v in inverter_fw.items()})
     if system_config is not None:
         fields.update({k: int(v) for k, v in system_config.items()})
+    # `registers.DAILY_BATTERY_BLOCK`/`DAILY_INVERTER_BLOCK`/`DAILY_PV_BLOCK`, daily-gated
+    # (`scheduler.py` step 8e). DECODED INTO NAMED FIELDS, unlike the raw-hex blocks above,
+    # and the difference is evidence rather than effort: every address and both scales here
+    # were confirmed against the live inverter on 2026-09-03, which is the bar `registers.py`
+    # sets before it will name anything.
+    #
+    # Floats, including SoH. A stat panel reduces `""` to numeric fields (see the `verified`
+    # note above), and while SoH only ever arrives on a 0.1 boundary, publishing it as an int
+    # would silently floor 99.5 to 99 -- a degradation figure rounded the wrong way by the
+    # storage layer is the kind of quiet error this whole tier exists to avoid.
+    #
+    # Three separate dicts, kept separate all the way here, because they are three independent
+    # reads: the battery block being unreadable says nothing about the heatsink, and the
+    # dashboard must be able to show one while the other is blank.
+    for daily in (daily_battery, daily_inverter, daily_pv):
+        if daily is not None:
+            fields.update({k: float(v) for k, v in daily.items()})
     return fields
 
 
@@ -206,6 +226,9 @@ def build_fields(
     firmware: dict | None = None,
     inverter_fw: dict | None = None,
     system_config: dict | None = None,
+    daily_battery: dict | None = None,
+    daily_inverter: dict | None = None,
+    daily_pv: dict | None = None,
 ) -> dict:
     """One `dispatch_state` point's fields. Pure -- every value is a function of the inputs.
 
@@ -234,7 +257,8 @@ def build_fields(
         "duration_s": int(state["duration_s"]),
         **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
                           actual_battery_w, voltages, temps, faults, limits_hourly, firmware,
-                          inverter_fw, system_config),
+                          inverter_fw, system_config, daily_battery, daily_inverter,
+                          daily_pv),
     }
 
     # `expires_at` is when the dead man's switch runs out if nothing is written again. It is
@@ -278,6 +302,9 @@ def build_degraded_fields(
     firmware: dict | None = None,
     inverter_fw: dict | None = None,
     system_config: dict | None = None,
+    daily_battery: dict | None = None,
+    daily_inverter: dict | None = None,
+    daily_pv: dict | None = None,
 ) -> dict:
     """One `dispatch_state` point for a tick that decided but could not read the inverter.
 
@@ -313,7 +340,8 @@ def build_degraded_fields(
         "read_error": read_error or "inverter unreadable",
         **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
                           actual_battery_w, voltages, temps, faults, limits_hourly, firmware,
-                          inverter_fw, system_config),
+                          inverter_fw, system_config, daily_battery, daily_inverter,
+                          daily_pv),
     }
     if slot:
         fields["slot_start"] = int(

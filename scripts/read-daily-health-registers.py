@@ -5,6 +5,14 @@
     python3 scripts/read-daily-health-registers.py --ip "$INVERTER_IP"
     sudo docker compose start dispatch
 
+IT HAS ALREADY RUN, on 2026-09-03, and the daily tier shipped on the strength of it:
+`0x011B` SoH, `0x0120`/`0x0122`/`0x0124` lifetime charge/discharge/grid-charge, `0x0435`
+heatsink, `0x08D0` lifetime PV -- every 32-bit value addressed at its FIRST word. See TODO.md
+item 13 for the full result and `dispatch/registers.py`'s DAILY_BATTERY_BLOCK for what it ruled
+out. Kept runnable because the next register question will want exactly this shape of evidence,
+and because re-running it is how the one thing the first run could NOT show -- a counter
+actually counting up -- gets demonstrated over a longer gap.
+
 WHY THIS EXISTS. `dispatch/registers.py` opens by describing the one time an address was
 translated from memory and produced 0x0883 (reactive power) for the mode register. Item 13's
 four fields -- SoH, lifetime charge/discharge/grid-charge energy, inverter heatsink
