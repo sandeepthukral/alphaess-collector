@@ -14,6 +14,7 @@ there is no Kuma there. What is checkable is that the two halves agree in the co
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,9 @@ DEPLOY = (REPO / "DEPLOY.md").read_text(encoding="utf-8")
 
 ALIAS = "kuma"
 EXPECTED_ENTRY = "kuma:${KUMA_ADDR:-host-gateway}"
+# A dotted quad anywhere in a sample URL. Substring checks for "192.168." miss a
+# tailnet 100.x and match innocent decimals; this does neither.
+IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 
 SERVICES = COMPOSE["services"]
 PINGERS = sorted(
@@ -91,4 +95,4 @@ def test_no_heartbeat_url_example_hard_codes_a_lan_address():
     for path in (".env.example", "DEPLOY.md"):
         for lineno, line in enumerate((REPO / path).read_text(encoding="utf-8").splitlines(), 1):
             if "HEARTBEAT_URL" in line and "http" in line:
-                assert "192.168." not in line and "100." not in line, f"{path}:{lineno}: {line}"
+                assert not IPV4.search(line), f"{path}:{lineno}: {line}"

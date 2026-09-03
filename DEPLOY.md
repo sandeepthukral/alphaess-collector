@@ -521,10 +521,19 @@ matters; a service missing the entry silently loses its heartbeat.
 `*_HEARTBEAT_URL` without the alias, so a monitor added later cannot regress to
 an IP without someone deciding to.
 
-If `getent` prints nothing at all, the Docker daemon is too old for
-`host-gateway` (it needs 20.10+): set `KUMA_ADDR` to the NAS's current LAN IP
-in `.env`, recreate, and the alias still buys you one place to change instead of
-ten.
+Two ways this can fail, with different fixes:
+
+- **`getent` prints nothing.** The Docker daemon is too old for `host-gateway`
+  (it needs 20.10+). Set `KUMA_ADDR` to the NAS's current LAN IP in `.env` and
+  recreate; the alias still buys one place to change instead of ten.
+- **`getent` resolves but the connection is refused or hangs.** The alias points
+  at the bridge gateway, a different interface from the LAN address these URLs
+  used before, so a DSM firewall rule that allowed the old path may not allow
+  this one — and Kuma bound to `127.0.0.1` rather than `0.0.0.0` would also
+  answer on neither. Confirm with `sudo netstat -tlnp | grep 3001` on the NAS;
+  if Kuma is bound host-wide and the port still will not open from a container,
+  it is the firewall. Setting `KUMA_ADDR` to the LAN IP restores the old path
+  exactly, at the cost of the property this change was made for.
 
 ## Monitoring the nightly efficiency job
 
