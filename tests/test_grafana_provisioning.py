@@ -868,6 +868,29 @@ def test_the_nightly_jobs_allowance_matches_the_efficiency_alert():
             f"{hours}h, matching the efficiency alert's {alert_seconds}s")
 
 
+def test_the_prices_row_asks_for_coverage_not_an_age():
+    """The prices job is the one whose freshness is not a staleness question.
+
+    Day-ahead publishes early afternoon for the following day, so "how old is the newest
+    price" stays comfortably negative all evening while the planner schedules tomorrow's
+    charge on prices that were never fetched -- the 2026-09-03 failure, where a DSM task
+    fired once before publication and its repeat window was zero minutes wide. The row has
+    to ask what is HELD, against the end of a local day, or it cannot see that at all.
+
+    Pinned because reverting it to an age looks like a simplification: every other row in
+    the query is an age, and this one would read as the odd one out.
+    """
+    for title, query in _nightly_jobs_queries().items():
+        assert 'timezone.location(name: "Europe/Amsterdam")' in query, (
+            f"{title}: the day boundary is local -- UTC would shift the cutoff by an hour "
+            "in summer and move it across midnight")
+        assert "date.hour(t: now()) >= 15" in query, f"{title}: publication grace is gone"
+        assert "then 47.0 else 23.0" in query, f"{title}: day-coverage requirement changed"
+        assert "neededS - float(v: int(v: r._time))" in query, (
+            f"{title}: prices is measured against now again, not against the day it must "
+            "cover")
+
+
 def test_every_job_has_a_fallback_row():
     """A job with no rows at all must still appear, or the verdict is a lie.
 
