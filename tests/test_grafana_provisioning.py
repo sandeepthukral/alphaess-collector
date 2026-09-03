@@ -878,8 +878,11 @@ def test_every_job_has_a_fallback_row():
     """
     for title, query in _nightly_jobs_queries().items():
         for job in ("prices", "pricing", "efficiency", "mijnbatterij", "plan score"):
-            assert "withFallback(t: " in query and f'job: "{job}")' in query, \
+            assert f'{{job: "{job}", _time: now(), _value: 9999.0}}' in query, \
                 f"{title}: {job} has no fallback row"
+        # And the reduction that makes the fallback lose to a real row: without the
+        # per-job min(), every job would read 9999 and the tile would be permanently red.
+        assert 'group(columns: ["job"])\n  |> min()' in query, title
 
 
 def test_the_two_nightly_jobs_panels_share_one_body():
