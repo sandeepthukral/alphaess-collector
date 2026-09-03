@@ -484,10 +484,10 @@ hold. That is the whole point. **Set `KUMA_ADDR` to a literal IP only if Kuma
 moves to a different machine** — it is a plain `:-` default, not a `:?` guard,
 so leaving it unset is fine and means `host-gateway`.
 
-Kuma listens on the NAS's own port 3001, so `kuma:3001` reaches it whether Kuma
-runs from Container Manager, its own compose project, or is joined to
-`alphaess-net`. The pings stay on the host instead of hairpinning out to the LAN
-and back.
+Kuma listens on the NAS's own port 3001 — confirmed 2026-09-03 — so `kuma:3001`
+reaches it whether Kuma runs from Container Manager, its own compose project, or
+is joined to `alphaess-net`. The pings stay on the host instead of hairpinning
+out to the LAN and back.
 
 **Why this replaced a hard-coded IP.** The address changed twice in five days —
 2026-08-29 and 2026-09-02 — and each time every ping went to the old one. That
@@ -510,30 +510,42 @@ Verify the alias resolves inside each container, and that Kuma answers:
 cd /volume1/docker/alphaess-collector
 for s in collector mijnbatterij dispatch; do
   printf '%s: ' "$s"
-  sudo docker compose exec -T "$s" getent hosts kuma || echo "NO kuma ENTRY"
+  sudo docker compose exec -T "$s" python -c "import socket, urllib.request; print(socket.gethostbyname('kuma'), urllib.request.urlopen('http://kuma:3001', timeout=5).status)"
 done
-sudo docker compose exec -T collector python -c "import urllib.request; print(urllib.request.urlopen('http://kuma:3001', timeout=5).status)"
 ```
 
-`getent hosts kuma` printing an address on each of the three is the check that
-matters; a service missing the entry silently loses its heartbeat.
+Three lines each reading an address and `200` is the whole check: the name
+resolves *and* Kuma answers over that path. Anything else is diagnosed below.
+
+Use `python`, not `getent` — DSM's own shell is busybox and has no `getent`, so
+a check written with it cannot be sanity-tested outside the container. All three
+images are `python:3.12-slim`, so the one-liner runs in each. To see the alias
+itself rather than test it: `sudo docker compose exec -T collector cat /etc/hosts`.
+
+A service missing the entry silently loses its heartbeat, so
 `tests/test_heartbeat_hosts.py` fails the build if a service declares a
-`*_HEARTBEAT_URL` without the alias, so a monitor added later cannot regress to
-an IP without someone deciding to.
+`*_HEARTBEAT_URL` without the alias — a monitor added later cannot regress to an
+IP without someone deciding to.
 
 Two ways this can fail, with different fixes:
 
-- **`getent` prints nothing.** The Docker daemon is too old for `host-gateway`
-  (it needs 20.10+). Set `KUMA_ADDR` to the NAS's current LAN IP in `.env` and
-  recreate; the alias still buys one place to change instead of ten.
-- **`getent` resolves but the connection is refused or hangs.** The alias points
-  at the bridge gateway, a different interface from the LAN address these URLs
-  used before, so a DSM firewall rule that allowed the old path may not allow
-  this one — and Kuma bound to `127.0.0.1` rather than `0.0.0.0` would also
-  answer on neither. Confirm with `sudo netstat -tlnp | grep 3001` on the NAS;
-  if Kuma is bound host-wide and the port still will not open from a container,
-  it is the firewall. Setting `KUMA_ADDR` to the LAN IP restores the old path
-  exactly, at the cost of the property this change was made for.
+- **`gethostbyname` raises `gaierror`.** The name did not resolve, so the alias
+  is missing: either the container predates the compose change (recreate it, and
+  note that `restart` will not do), or the Docker daemon is too old for
+  `host-gateway`, which needs 20.10+. Set `KUMA_ADDR` to the NAS's current LAN
+  IP in `.env` and recreate; the alias still buys one place to change instead of
+  ten.
+- **It resolves but the connection is refused or times out.** The alias reaches
+  the NAS over the bridge gateway, a different interface from the LAN address
+  these URLs used until 2026-09-03, so a DSM firewall rule that allowed the old
+  path need not allow this one. Kuma is confirmed listening on 3001, so if
+  nothing opens from a container the firewall is the remaining explanation:
+  Control Panel → Security → Firewall, and the rule has to admit the Docker
+  bridge subnet (`sudo docker network inspect alphaess-net` prints it). This has
+  not been observed here — it is written down because the path changed and
+  nobody has tested that path against the firewall. Setting `KUMA_ADDR` to the
+  LAN IP restores the old route exactly, at the cost of the property this change
+  was made for.
 
 ## Monitoring the nightly efficiency job
 

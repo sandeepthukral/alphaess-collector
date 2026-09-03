@@ -56,10 +56,11 @@ groups:
             Since 2026-09-03 the URLs name `kuma`, an extra_hosts alias for
             host-gateway, so "the NAS changed IP" is no longer a cause. Check
             in this order: Kuma itself is up and still listening on 3001;
-            `docker compose exec -T collector getent hosts kuma` prints an
-            address (nothing means the alias is missing or the daemon predates
-            host-gateway -- set KUMA_ADDR to a literal IP); the push token in
-            the URL still exists in Kuma. If you edit .env, note that compose
+            `docker compose exec -T collector python -c "import socket;
+            print(socket.gethostbyname('kuma'))"` prints an address (an error
+            means the alias is missing or the daemon predates host-gateway --
+            set KUMA_ADDR to a literal IP); the push token in the URL still
+            exists in Kuma. DSM has no getent, which is why this is Python. If you edit .env, note that compose
             reads env only at container start, so the fix is
             `docker compose up -d --force-recreate collector`, NOT `restart`,
             which reuses the old environment -- and mijnbatterij and dispatch
