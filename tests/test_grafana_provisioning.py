@@ -844,6 +844,59 @@ def test_job_age_panel_and_efficiency_alert_share_a_threshold():
     assert steps[-1] == alert_thresholds[0]
 
 
+def _nightly_jobs_queries():
+    _, panels = _panels_by_title("alphaess-dashboard.json")
+    return {t: panels[t]["targets"][0]["query"] for t in ("Nightly jobs", "Which job is late")}
+
+
+def test_the_nightly_jobs_allowance_matches_the_efficiency_alert():
+    """A third copy of the same 30 hours, in a third unit.
+
+    The alert holds it as 108000 seconds, the Job age stat as a threshold in seconds, and
+    the Overview's nightly-jobs query as `- 30.0` hours subtracted from an age. Nothing at
+    runtime couples them, and a drift is invisible in the worst direction: the Overview
+    would read ALL FRESH for the hours the alert was already firing, on the one board whose
+    entire promise is that a dead job shows up on it.
+    """
+    (alert_seconds,) = _alert_thresholds("alphaess-efficiency-staleness.yml")
+    hours = alert_seconds / 3600.0
+    for title, query in _nightly_jobs_queries().items():
+        for job in ("pricing", "efficiency", "mijnbatterij"):
+            assert f'job: "{job}", _time' in query, f"{title}: {job} row is gone"
+        assert query.count(f"- {hours}") == 3, (
+            f"{title}: expected pricing, efficiency and mijnbatterij to allow "
+            f"{hours}h, matching the efficiency alert's {alert_seconds}s")
+
+
+def test_every_job_has_a_fallback_row():
+    """A job with no rows at all must still appear, or the verdict is a lie.
+
+    union() drops an empty table silently, so a job that has never written -- or died
+    before the query's lookback -- would simply not be in the max(), and the tile would
+    read ALL FRESH with a job missing entirely. That is the exact failure the panel was
+    added to catch, so it is pinned rather than left to the comment beside it.
+    """
+    for title, query in _nightly_jobs_queries().items():
+        for job in ("prices", "pricing", "efficiency", "mijnbatterij", "plan score"):
+            assert "withFallback(t: " in query and f'job: "{job}")' in query, \
+                f"{title}: {job} has no fallback row"
+
+
+def test_the_two_nightly_jobs_panels_share_one_body():
+    """The verdict tile and the table run the same 60-line union, deliberately: Grafana has
+    no way to share a query between two panels, and the alternative -- one table doing both
+    jobs -- gives up the single-glance verdict that is the point of the header row.
+
+    What that costs is the risk of editing one and not the other, which would leave the
+    tile green while the table listed a late job. So the shared half is pinned identical
+    and only the final reduction is allowed to differ.
+    """
+    tile, table = (_nightly_jobs_queries()[t] for t in ("Nightly jobs", "Which job is late"))
+    marker = "jobs\n  |>"
+    assert tile.split(marker)[0] == table.split(marker)[0]
+    assert "|> max()" in tile and "|> sort(" in table
+
+
 def test_the_staleness_checks_read_when_the_job_ran_not_which_day_it_wrote():
     """daily_energy rows are stamped at the local midnight of the day they
     describe, so the newest row is 51 hours old on a healthy system right before
