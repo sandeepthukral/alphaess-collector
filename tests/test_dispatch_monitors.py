@@ -90,6 +90,19 @@ class TestSendHeartbeat:
         documented "not monitored yet" state, must not be mistaken for one."""
         assert H.send_heartbeat("", "up", "OK") == ""
 
+    def test_the_push_token_is_redacted_from_the_returned_reason(self, monkeypatch):
+        """PR #148 review: an exception from `urlopen` quotes the URL it failed on, and that
+        URL's path carries the Kuma push token. The returned reason lands in `collector_health`
+        (dispatch/health.py), which Grafana renders -- the token must never reach it. Matches
+        collector.send_heartbeat and mijnbatterij.send_heartbeat's own redaction."""
+        def boom(url, timeout=5):
+            raise OSError(f"Failed to connect to kuma:3001: {url}")
+
+        monkeypatch.setattr(H, "urlopen", boom)
+        reason = H.send_heartbeat("http://kuma:3001/api/push/E1UNtJJr3h?status=up", "up", "OK")
+        assert "E1UNtJJr3h" not in reason
+        assert "<token>" in reason
+
 
 class TestEveryDocumentedMonitorIsWired:
     def test_the_url_table_covers_exactly_the_dispatcher_s_monitors(self):

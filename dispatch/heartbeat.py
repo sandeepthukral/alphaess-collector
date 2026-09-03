@@ -13,10 +13,19 @@ dependency to a process that drives hardware.
 from __future__ import annotations
 
 import logging
+import re
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import urlopen
 
 log = logging.getLogger("dispatch")
+
+# A Kuma push token lives in the URL path (/api/push/<token>), and a connection error from
+# `urlopen` quotes the URL it failed on. A copy of `collector.collector._PUSH_TOKEN_RE`, not
+# an import -- this image ships pymodbus and influxdb-client and nothing else, the same reason
+# this module owns its own `send_heartbeat` instead of importing `collector.py`'s. The token
+# is write-only (it can spoof a heartbeat, nothing more), but there is no reason to publish it
+# into `collector_health`, which Grafana renders.
+_PUSH_TOKEN_RE = re.compile(r"(/api/push/)[^\s/?\"']+")
 
 
 def send_heartbeat(url: str, status: str = "up", msg: str = "OK", timeout: float = 5) -> str:
@@ -48,7 +57,10 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK", timeout: float
         with urlopen(target, timeout=timeout):
             pass
     except Exception as exc:
-        reason = f"{type(exc).__name__}: {exc}"
+        # Redacted BEFORE logging, not only before returning -- Alloy ships this container's
+        # log to Loki and Grafana renders it, so the log is not a more private destination
+        # than the collector_health field the caller writes this into.
+        reason = _PUSH_TOKEN_RE.sub(r"\1<token>", f"{type(exc).__name__}: {exc}")
         log.warning("heartbeat ping failed: %s", reason)
         return reason[:200]
     return ""
