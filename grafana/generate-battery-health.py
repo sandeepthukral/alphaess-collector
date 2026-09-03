@@ -15,14 +15,20 @@ SCOPE IS SMALLER THAN THE ORIGINAL HANDOVER ASKED FOR, on purpose. The health-po
 (#129) only ever shipped what had unambiguous register addressing: cell temperature (already
 existed), the fault/warning block as raw hex plus the two derived popcounts row 1 leads with
 on 2026-09-02, the already-read power limits republished under health-dashboard field
-names, and the weekly firmware/inverter-firmware/system-config blocks as raw hex. Cell voltage (TODO.md item 12) was added once its address discrepancy resolved --
-see `dispatch/registers.py`'s VOLTAGE_BLOCK comment. SoH, remaining time, daily energy and
-lifetime cycles are still unconfirmed register layouts (TODO.md item 13) and
-`dispatch/state.py` never publishes them. A panel querying a field that is never written is
-not "no data yet", it is the exact mistake
+names, and the weekly firmware/inverter-firmware/system-config blocks as raw hex.
+
+THAT SCOPE HAS GROWN TWICE SINCE, both times by the same rule: a panel ships when its backend
+field does, never before. Cell voltage (TODO.md item 12) arrived once its address discrepancy
+was resolved -- see `dispatch/registers.py`'s VOLTAGE_BLOCK comment -- and row 1c's daily tier
+(SoH, the three lifetime energy counters, lifetime PV, the inverter heatsink) arrived on
+2026-09-03 once a live read confirmed its addresses against two documents that disagreed, which
+is what TODO.md item 13 was waiting for. What is still deferred under this rule: remaining time
+and daily energy, which `dispatch/state.py` does not publish.
+
+A panel querying a field that is never written is not "no data yet", it is the exact mistake
 `tests/test_dispatch_dashboard.py::TestFieldContract::test_every_field_filter_names_a_field_we_publish`
-exists to catch -- so those panels are deferred to the same follow-up PR that adds their
-backend fields, rather than shipped now pointed at names nothing writes.
+exists to catch -- so a panel waits for the change that adds its field, rather than shipping
+now pointed at a name nothing writes.
 
 STALENESS WINDOWS ARE CADENCE-MATCHED, not one constant for the whole page. Section 7.3's
 original argument (`generate-dispatch.py`) was written for tick-cadence fields alone: a dead

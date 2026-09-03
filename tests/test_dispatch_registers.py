@@ -6,6 +6,8 @@ the tests here are mostly round-trips and boundaries rather than examples.
 """
 from __future__ import annotations
 
+from typing import ClassVar
+
 import pytest
 
 import registers as R
@@ -450,7 +452,7 @@ class TestDailyTier:
     """
 
     # 0x011B..0x0125 exactly as the inverter returned them.
-    LIVE = [1000, 0, 0, 0, 0, 0, 10481, 0, 10221, 0, 5811]
+    LIVE: ClassVar[list[int]] = [1000, 0, 0, 0, 0, 0, 10481, 0, 10221, 0, 5811]
 
     def test_the_confirmed_read_decodes_to_the_confirmed_values(self):
         assert R.decode_daily_battery_block(self.LIVE) == {
@@ -500,9 +502,27 @@ class TestDailyTier:
         d = R.decode_daily_battery_block(self.LIVE) | {"lifetime_discharge_kwh": 2000.0}
         assert not R.daily_battery_plausible(d)
 
-    def test_grid_charge_may_not_exceed_charge(self):
+    def test_grid_charge_exceeding_charge_is_deliberately_tolerated(self):
+        """It reads as impossible -- grid charging is a subset of all charging -- but the
+        subset argument needs both counters in the same measurement domain, and this repo has
+        no evidence of that. An AC-metered grid total against a DC-side charge total inverts on
+        a grid-charge-heavy site, and a guard that inverts silences SoH and three working
+        counters for good. See `daily_battery_plausible`."""
         d = R.decode_daily_battery_block(self.LIVE) | {"lifetime_grid_charge_kwh": 2000.0}
-        assert not R.daily_battery_plausible(d)
+        assert R.daily_battery_plausible(d)
+
+    def test_a_site_that_never_grid_charges_still_publishes_everything_else(self):
+        """Zero grid-charge is a configuration, not a failed read: any site that only ever
+        stores surplus PV reads zero here indefinitely. Sharing the other counters' zero floor
+        would have let that legitimate zero take SoH and both working totals down with it."""
+        d = R.decode_daily_battery_block(self.LIVE) | {"lifetime_grid_charge_kwh": 0.0}
+        assert R.daily_battery_plausible(d)
+
+    def test_zero_is_still_rejected_for_the_counters_that_cannot_be_zero(self):
+        """A battery that has discharged has charged, and a BMS reporting SoH has one."""
+        for field in ("lifetime_charge_kwh", "lifetime_discharge_kwh", "soh_pct"):
+            d = R.decode_daily_battery_block(self.LIVE) | {field: 0.0}
+            assert not R.daily_battery_plausible(d), field
 
     def test_the_observed_round_trip_is_accepted(self):
         """1022.1/1048.1 is 97.5%, above the 90-96% an AC round trip would show. The guard
@@ -527,22 +547,38 @@ class TestDailyTier:
 
     def test_an_unread_heatsink_is_not_a_freezing_one(self):
         """The all-zero block, with no 1-based pack ID to break the tie the way TEMP_BLOCK has.
-        The lower bound is what does it, and it is the one guard here that gives something up:
-        a genuine 0.0 C reading would be discarded too."""
+        Rejecting EXACTLY 0.0 is what does it, and it costs exactly one reading."""
         assert not R.inverter_temp_plausible(R.decode_daily_inverter_block([0]))
         assert R.inverter_temp_plausible(R.decode_daily_inverter_block([370]))
         assert not R.inverter_temp_plausible({"inverter_temp_c": 6553.5})
 
+    def test_a_freezing_morning_is_published_not_discarded(self):
+        """The decode's docstring and the dashboard tile both promise a sub-zero reading, and
+        an earlier bound of +1.0 C silently broke that promise -- a cold snap would have blanked
+        the tile and backed the block's gate off to a daily retry for the duration."""
+        for raw in (-1, -20, -150):  # -0.1 C, -2.0 C, -15.0 C
+            decoded = R.decode_daily_inverter_block([raw & 0xFFFF])
+            assert decoded["inverter_temp_c"] < 0
+            assert R.inverter_temp_plausible(decoded), decoded
+
     def test_lifetime_pv_decodes_the_confirmed_words(self):
         assert R.decode_daily_pv_block([1, 21175]) == {"lifetime_pv_kwh": 8671.1}
 
-    def test_lifetime_pv_at_the_wrong_scale_is_rejected(self):
-        """8671 kWh is right for this array; 1 kWh/bit would claim 86,711 kWh, which is decades
-        of production. The bound is wide enough to be a decode check rather than a judgement,
-        and this is the shape it exists to catch."""
+    def test_lifetime_pv_rejects_zero_and_the_misalignment_but_not_a_wrong_scale(self):
+        """What the bound actually catches, which is less than it looks.
+
+        Zero (an unsupported register) and the splice magnitude both fail. A SCALE ERROR DOES
+        NOT: 1 kWh/bit reads this array's lifetime as 86,711 kWh -- decades of production, and
+        obviously wrong to a human -- and sails through, because no honest bound on "how much
+        PV could a house have made" excludes it without also excluding a large commercial
+        array. The scale was settled by comparing against a battery capacity this repo knew
+        independently, not by a range check, and this assertion is here to stop anyone
+        believing otherwise.
+        """
         assert R.lifetime_pv_plausible({"lifetime_pv_kwh": 8671.1})
         assert not R.lifetime_pv_plausible({"lifetime_pv_kwh": 0.0})
         assert not R.lifetime_pv_plausible({"lifetime_pv_kwh": 68688281.6})
+        assert R.lifetime_pv_plausible({"lifetime_pv_kwh": 86711.0})  # NOT caught, by design
 
     def test_the_pv_block_reads_only_the_first_of_the_two_identical_values(self):
         """0x08D0 and 0x08D2 both held 86711. Only the first is published, and they are not

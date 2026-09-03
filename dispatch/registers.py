@@ -252,24 +252,42 @@ DAILY_PV_BLOCK = (REG_LIFETIME_PV, 2)
 # same reason. What they have to catch is a scale wrong by a factor of ten and the misaligned
 # read above, which lands at 68,688,281 kWh.
 #
-# ZERO IS REJECTED FOR ALL FOUR ENERGY COUNTERS AND FOR SoH, and that is the load-bearing part.
+# ZERO IS THE ONLY THING THESE BOUNDS RELIABLY CATCH, and it is worth being exact about that.
 # An unsupported register range, a proxy padding a short reply, and the losing alignment above
-# all produce zero words, and zero is otherwise perfectly in range -- it is this tier's version
-# of the all-zero temp block that PACK_ID_RANGE exists to catch, except there are no 1-based
-# IDs here to break the tie. The cost is that a battery on its commissioning day cannot publish
-# a lifetime total, which is a day this site is nearly two thousand cycles past.
+# all produce zero words, and zero is otherwise perfectly in range -- this tier's version of
+# the all-zero temp block that PACK_ID_RANGE exists to catch, except there are no 1-based IDs
+# here to break the tie.
+#
+# WHAT THEY DO NOT CATCH IS A SCALE WRONG BY A FACTOR OF TEN, which is the usual justification
+# for a range check in this module and does not apply here. The confirmed 1048.1 kWh reads as
+# 10,481 at 1 kWh/bit and 104.81 at 0.01, both comfortably inside these bounds -- and a uniform
+# scale error preserves the orderings below too, so nothing in this file would notice. What
+# ruled the scale out was external: 0x0119 against a battery known to be 27.9 kWh. A range
+# check cannot do that job and this comment should not imply it can.
+#
+# The zero floor costs a battery on its commissioning day its lifetime totals, which is a day
+# this site is nearly two thousand cycles past.
 SOH_PLAUSIBLE_PCT = (20.0, 110.0)
 LIFETIME_ENERGY_PLAUSIBLE_KWH = (0.1, 1_000_000.0)
 
+# GRID-CHARGE GETS ITS OWN FLOOR, AND IT INCLUDES ZERO. The other three counters cannot be zero
+# on a running system -- a battery that has discharged has charged, and a BMS reporting SoH is a
+# BMS that has one. Lifetime grid-charge genuinely can be, indefinitely, on any site that only
+# ever stores surplus PV: that is a configuration choice, not a broken read. Sharing the 0.1
+# floor with the others would have let such a site's legitimate zero silence SoH and both
+# working counters along with it, for as long as the owner kept that policy.
+LIFETIME_GRID_CHARGE_PLAUSIBLE_KWH = (0.0, 1_000_000.0)
+
 # Wider than TEMP_PLAUSIBLE_C on the hot side: this is a heatsink, not a cell, and a derating
-# inverter can sit well above anything a pack would survive.
+# inverter can sit well above anything a pack would survive. Wide on the cold side too, because
+# this sensor is on an inverter that is not necessarily indoors and a winter morning is a real
+# reading -- the docstring on `decode_daily_inverter_block` promises exactly that, and an
+# earlier version of this bound started at +1.0 C and quietly broke the promise, blanking the
+# tile for the duration of any cold snap and backing the block's gate off while it did.
 #
-# The lower bound is 1.0 C rather than -30 for the zero-block reason above, and it is the one
-# bound here that gives something up: a genuine 0.0 C heatsink would be discarded as unread.
-# An inverter that is answering Modbus is an inverter that is powered and dissipating, indoors,
-# so that reading is not one this site can produce -- but it is an assumption, unlike the
-# energy counters where zero is contradicted by the site's own history.
-INVERTER_TEMP_PLAUSIBLE_C = (1.0, 100.0)
+# The all-zero block is caught by rejecting EXACTLY 0.0 instead (see `inverter_temp_plausible`),
+# which costs one specific reading rather than a whole season of them.
+INVERTER_TEMP_PLAUSIBLE_C = (-30.0, 100.0)
 
 # --- health poller: weekly tripwire blocks ------------------------------------------------
 # Firmware, serial numbers, and system configuration barely change -- a missed read costs
@@ -582,13 +600,21 @@ def decode_daily_battery_block(words: list[int]) -> dict:
 def daily_battery_plausible(daily: dict) -> bool:
     """False when a decoded daily battery block cannot be describing this battery.
 
-    Bounds, then two ORDERINGS, and the orderings are what make this more than a range check.
-    Both are true by construction rather than by observation -- every kWh that came out of the
-    battery went in first, and grid charging is a subset of all charging -- so neither can be
-    violated by a correct decode of a real reading, at any scale. That is what makes them the
-    check that survives being wrong about the units: the losing alignment in
-    DAILY_BATTERY_BLOCK's comment fails them outright, because it splices adjacent counters
+    Bounds, then ONE ORDERING, and the ordering is what makes this more than a range check.
+    Every kWh that came out of the battery went in first, so discharge <= charge cannot be
+    violated by a correct decode of a real reading at any scale -- which is what makes it the
+    check that survives being wrong about the units. The losing alignment in
+    DAILY_BATTERY_BLOCK's comment fails it outright, because it splices adjacent counters
     together and destroys the relationship between them.
+
+    GRID-CHARGE <= CHARGE IS DELIBERATELY NOT CHECKED, though it reads as just as obvious --
+    grid charging is a subset of all charging. The subset argument only holds if both counters
+    are measured in the same domain, and this repo does not know that they are: an AC-metered
+    grid-charge total against a DC-side charge total would run HIGHER than it, by the conversion
+    losses, on a site that grid-charges most of its energy. This one currently sits at 581.1
+    against 1048.1, so nothing here is evidence either way -- and a guard that inverts on some
+    future site silences SoH and three working counters permanently. The splice case it would
+    have caught is already caught twice over, by the zero floor and by the ordering above.
 
     ROUND-TRIP IS NOT CHECKED, deliberately. The confirmed read gives 1022.1/1048.1 = 97.5%,
     above the 90-96% an AC round trip would show -- consistent with these being DC-side
@@ -597,14 +623,14 @@ def daily_battery_plausible(daily: dict) -> bool:
     working register on the strength of it.
     """
     lo, hi = LIFETIME_ENERGY_PLAUSIBLE_KWH
+    grid_lo, grid_hi = LIFETIME_GRID_CHARGE_PLAUSIBLE_KWH
     soh_lo, soh_hi = SOH_PLAUSIBLE_PCT
     charge = daily["lifetime_charge_kwh"]
     return (soh_lo <= daily["soh_pct"] <= soh_hi
             and lo <= charge <= hi
             and lo <= daily["lifetime_discharge_kwh"] <= hi
-            and lo <= daily["lifetime_grid_charge_kwh"] <= hi
-            and daily["lifetime_discharge_kwh"] <= charge
-            and daily["lifetime_grid_charge_kwh"] <= charge)
+            and grid_lo <= daily["lifetime_grid_charge_kwh"] <= grid_hi
+            and daily["lifetime_discharge_kwh"] <= charge)
 
 
 def decode_daily_inverter_block(words: list[int]) -> dict:
@@ -622,12 +648,15 @@ def decode_daily_inverter_block(words: list[int]) -> dict:
 def inverter_temp_plausible(daily: dict) -> bool:
     """False when a decoded heatsink temperature cannot be describing this inverter.
 
-    One value and no cross-check, so this is the weakest guard in the module -- see
-    INVERTER_TEMP_PLAUSIBLE_C for what the lower bound gives up in exchange for catching an
-    all-zero block.
+    One value and no cross-check, so this is the weakest guard in the module. EXACTLY 0.0 IS
+    REJECTED, rather than a whole band above it: an all-zero block has to be caught somehow and
+    there is no second word here to catch it with, but the temperatures on either side of zero
+    are ordinary winter readings that a band would throw away along with it. The `!=` costs one
+    genuine reading -- a heatsink sitting at precisely 0.0 C, on a scale of 0.1 C -- and keeps
+    the rest of the season.
     """
     lo, hi = INVERTER_TEMP_PLAUSIBLE_C
-    return lo <= daily["inverter_temp_c"] <= hi
+    return lo <= daily["inverter_temp_c"] <= hi and daily["inverter_temp_c"] != 0.0
 
 
 def decode_daily_pv_block(words: list[int]) -> dict:

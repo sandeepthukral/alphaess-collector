@@ -54,7 +54,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "dispatch"))
-import registers as R  # noqa: E402
+import registers as R
 
 # (start, count, label). Chosen to bracket each candidate with words whose role is already
 # known, so a boundary can be read off the output rather than assumed.
@@ -99,9 +99,16 @@ CANDIDATES = [
     ("inverter lifetime PV  [item 13]",       0x043D, 2, "energy"),
     ("inverter lifetime PV  [const.py]",      0x043E, 2, "energy"),
     # No second source at all: const.py lists nothing between 0x08D0 and 0x08D4 (System
-    # Fault). Both alignments printed anyway, since there is nothing to prefer either.
+    # Fault). All three alignments printed, since there is nothing to prefer any of them.
+    #
+    # 0x08D0 IS THE ONE THAT SHIPPED, and it was missing from this list on the 2026-09-03 run:
+    # the confirmed 8671.1 kWh came from reading the raw hex dump above by eye, not from the
+    # candidate table, so a re-run could not reproduce the very result this script is cited
+    # for -- nor show that counter counting up, which is the one open question the first run
+    # left. Both fixed by listing it. 0x08D2 held the identical value; see DAILY_PV_BLOCK.
+    ("system lifetime PV  [SHIPPED]",         0x08D0, 2, "energy"),
     ("system lifetime PV  [item 13]",         0x08D1, 2, "energy"),
-    ("system lifetime PV  [+1]",              0x08D2, 2, "energy"),
+    ("system lifetime PV  [+2, the twin]",    0x08D2, 2, "energy"),
     # Already confirmed by both sources and by this repo. Printed so the run carries its own
     # proof that the scale hypotheses below are being applied to sane numbers: 0.1 kWh/bit is
     # const.py's factor for every energy total here, and 0x0119 at that scale must come out
@@ -178,8 +185,10 @@ def main():
               file=sys.stderr)
         sys.exit(2)
 
-    from pymodbus.client import ModbusTcpClient
     import inspect
+
+    from pymodbus.client import ModbusTcpClient
+
     kw = "device_id" if "device_id" in inspect.signature(
         ModbusTcpClient.read_holding_registers).parameters else "slave"
 
