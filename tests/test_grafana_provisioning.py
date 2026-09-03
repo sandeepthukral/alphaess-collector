@@ -1093,3 +1093,49 @@ def test_the_log_error_alert_treats_no_data_as_healthy():
     # And the debounce, which is what keeps a single transient ERROR from paging: the
     # collector logs one on a failed poll and recovers on the next.
     assert rule["for"] == "5m"
+
+
+NUMERIC = re.compile(r"-?\d+(\.\d+)?$")
+
+
+def _string_valued_stat_panels():
+    """Stat panels whose value mappings key on strings, so the field is a string."""
+    for path in DASHBOARDS:
+        dash = json.loads(path.read_text(encoding="utf-8"))
+        for panel in dash.get("panels", []):
+            if panel.get("type") != "stat":
+                continue
+            keys = [
+                key
+                for mapping in panel["fieldConfig"]["defaults"].get("mappings", [])
+                if mapping.get("type") == "value"
+                for key in mapping.get("options", {})
+            ]
+            if any(not NUMERIC.match(key) for key in keys):
+                yield path.name, panel
+
+
+def test_string_valued_stat_panels_reduce_over_every_field():
+    """A verdict tile must not leave `reduceOptions.fields` empty.
+
+    Empty means "numeric fields only". These panels emit one string column, so the
+    reducer finds nothing to reduce and the tile renders the null mapping -- NO DATA, or
+    whatever `noValue` says -- while the query underneath is returning a perfectly good
+    row. The board then reports a dead subsystem that is alive, which is the failure that
+    costs the most trust: every other tile on it becomes suspect.
+
+    Every verdict tile in this repo is built the same way (a `map()` chain ending in a
+    single `_value` string) so the requirement is universal, and the symptom points at
+    the query rather than the panel, which is why it gets a test instead of a comment.
+    """
+    wrong = [
+        f"{name}: {panel['title']}"
+        for name, panel in _string_valued_stat_panels()
+        if panel["options"]["reduceOptions"].get("fields") != "/.*/"
+    ]
+    assert wrong == [], f"string-valued stat panels not reducing over all fields: {wrong}"
+
+
+def test_there_are_string_valued_stat_panels_to_check():
+    """The heuristic above finds nothing if the mapping shape ever changes."""
+    assert len(list(_string_valued_stat_panels())) >= 8

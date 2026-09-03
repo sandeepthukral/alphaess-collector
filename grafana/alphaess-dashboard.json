@@ -238,7 +238,7 @@
           "calcs": [
             "lastNotNull"
           ],
-          "fields": "",
+          "fields": "/.*/",
           "values": false
         },
         "showPercentChange": false,
@@ -2619,5 +2619,5 @@
   "timezone": "browser",
   "title": "Overview",
   "uid": "alphaess-main",
-  "version": 21
+  "version": 22
 }
