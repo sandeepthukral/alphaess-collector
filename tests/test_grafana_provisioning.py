@@ -215,17 +215,40 @@ def test_price_line_reads_the_plan_ahead_of_now():
 COPIED_PANELS = {
     "alphaess-battery-plan.json": ("alphaess-dashboard.json", [
         "Planned SoC vs actual SoC",
+        "Plan age",
+        "Planned benefit over horizon",
     ]),
     "alphaess-dispatch.json": ("alphaess-dashboard.json", [
         "Dispatcher",
         "Decision",
         "Doing",
         "Command expires in",
+        "Why",
         "What the dispatcher will do next",
     ]),
-    "alphaess-dashboard.json": ("alphaess-battery-health.json", [
-        "Battery cell temperature (min/max)",
+    "alphaess-battery-health.json": ("alphaess-dashboard.json", [
+        "Active faults",
+        "Active warnings",
+        "State of health",
     ]),
+    "alphaess-battery-savings.json": ("alphaess-dashboard.json", [
+        "Total saving to date",
+    ]),
+}
+
+# Panels the main dashboard shows a version of that is NOT a copy: same idea, different
+# window. They are deliberately retitled with the window in the title, because the copy
+# rule above is what makes a shared title mean "these two run the same query", and a panel
+# that quietly answered a different question under the same name would break that promise
+# for every other entry.
+#
+# The reason they cannot be copies: this dashboard's range runs 36 hours into the FUTURE
+# for the plan panels, so a count over `v.timeRange` -- which is what Collector Health asks
+# -- is not a number about anything here.
+RESCOPED_PANELS = {
+    "Failed polls (24h)": ("alphaess-collector-health.json", "Failed polls"),
+    "Heartbeat pushes failing (24h)": ("alphaess-collector-health.json",
+                                       "Heartbeat unreachable"),
 }
 
 # Every (destination, title) pair, flat -- the horizon rule below applies only to the pairs
@@ -251,8 +274,12 @@ def _overrides(panel):
 
 
 def _panels_by_title(name):
+    """Rows are excluded: a row is a heading, never a thing with a query, and every test
+    here looks up panels that have one. Naming a row after the tile that summarises the
+    section is the obvious thing to do -- "Battery" above the battery detail -- and it
+    should not have to be avoided to keep this lookup honest."""
     dash = json.loads((REPO / "grafana" / name).read_text(encoding="utf-8"))
-    return dash, {p.get("title"): p for p in dash["panels"]}
+    return dash, {p.get("title"): p for p in dash["panels"] if p.get("type") != "row"}
 
 
 @pytest.mark.parametrize("source", sorted(COPIED_PANELS))
@@ -291,6 +318,30 @@ def test_copied_panels_match_their_source(source):
         assert _overrides(main[title]) == _overrides(origin[title]), f"{title} ({source})"
 
 
+@pytest.mark.parametrize("title", sorted(RESCOPED_PANELS))
+def test_rescoped_panels_count_the_same_series_over_a_fixed_window(title):
+    """A re-scoped panel may change its WINDOW and nothing else.
+
+    The two things it must not change are the series it counts -- both of these select on
+    string literals, where a typo matches nothing, counts zero and reads as perfect health
+    -- and its independence from the picker. Between them that is the whole panel: a fixed
+    window over the right series, or a tile that is confidently green for the wrong reason.
+    """
+    source_name, source_title = RESCOPED_PANELS[title]
+    _, main = _panels_by_title("alphaess-dashboard.json")
+    _, source = _panels_by_title(source_name)
+
+    assert title in main, f"{title} is missing from alphaess-dashboard.json"
+    query = main[title]["targets"][0]["query"]
+    origin = source[source_title]["targets"][0]["query"]
+
+    assert "v.timeRange" not in query, (
+        f"{title} reads the time picker, which on this dashboard runs 36h into the future")
+    assert "range(start: -24h)" in query, title
+    for literal in re.findall(r'(?:_measurement|\.event|_field) == "[^"]+"', origin):
+        assert literal in query, f"{title} no longer selects {literal!r}, but {source_title} does"
+
+
 def test_the_copy_list_is_not_empty():
     """Guards the guard: an emptied list, or a source/target dashboard renamed, would make
     the test above iterate nothing and pass."""
@@ -317,12 +368,9 @@ def test_copied_panels_span_the_plan_horizon():
     timeFrom override on it would leave a panel whose entire subject is the future
     rendering a blank strip -- the same failure as 2026-08-08, on a different panel.
 
-    Scoped to copies landing on alphaess-dashboard.json only. The battery-health copy of
-    "Battery cell temperature (min/max)" is carved out: that dashboard has no relationship
-    to the plan's horizon at all (it runs a plain 30-day lookback), and the copied panel
-    pins its own `timeFrom: "7d"` regardless of either parent's range -- the same override
-    test_the_temperature_history_keeps_its_own_window already requires of the original.
-    test_the_battery_health_copy_keeps_the_same_window below is that carve-out's own guard.
+    Scoped to copies landing on alphaess-dashboard.json only, which is every entry in the
+    list today; the scoping stays because a copy onto any other board answers to that
+    board's range, not the plan's.
     """
     plan_dash, _ = _panels_by_title("alphaess-battery-plan.json")
     main_dash, main = _panels_by_title("alphaess-dashboard.json")
@@ -344,13 +392,55 @@ def test_live_panels_keep_their_own_window():
     an override they would draw six hours of data against a day and a half of blank -- the
     live view spending most of its width on the future it knows nothing about.
 
-    Only the three that read v.timeRange need it; the four stat panels range over a fixed
-    -1h or -90d by design and are unaffected by the picker.
+    One panel left where there were three. "Energy Flow: Sources -> Uses" and "Solar vs
+    Load vs SoC" were dropped when the main dashboard became a status board: both are still
+    on the Energy dashboard, which is what the picker exists for, and both were duplicated
+    there in full. "Power" stayed because a status board that cannot say what the house is
+    doing right now sends you to a second dashboard to answer the easiest question on it.
+
+    Every other panel here ranges over a fixed window by design -- -5m, -3h, -24h, -90d --
+    and is unaffected by the picker, which is the rule for anything that reads as a verdict.
     """
     _, main = _panels_by_title("alphaess-dashboard.json")
 
-    for title in ("Energy Flow: Sources -> Uses", "Solar vs Load vs SoC", "Power"):
+    for title in ("Power",):
         assert main[title].get("timeFrom") == "24h", title
+
+    # The two that left must not come back by a Grafana UI export, which would restore them
+    # without the override and draw them across the plan's empty future.
+    for title in ("Energy Flow: Sources -> Uses", "Solar vs Load vs SoC"):
+        assert title not in main, (
+            f"{title} is back on the main dashboard; it belongs on Energy / Energy Flow")
+
+
+# Dashboards the title-keyed tests above look panels up on. Uniqueness matters on exactly
+# these: _panels_by_title builds a dict, so a second panel with the same title SHADOWS the
+# first and the test then checks the wrong panel -- or passes because a row happened to
+# land on the name. Caught while adding the status rows, where a row titled "Battery" sat
+# above a stat titled "Battery" and the row won. That pair is deliberate now and allowed:
+# _panels_by_title skips rows, so the collision it was shadowing cannot happen. Rows are
+# checked against each other, because two sections with one name is its own confusion.
+#
+# Not applied to every dashboard: alphaess-collector-health.json deliberately carries a
+# stat and a table both called "Outages", nothing looks either up by title, and renaming
+# one to satisfy a test nobody needed would be the tail wagging the dog.
+TITLE_KEYED = [
+    "alphaess-dashboard.json",
+    "alphaess-battery-plan.json",
+    "alphaess-battery-health.json",
+    "alphaess-battery-savings.json",
+    "alphaess-dispatch.json",
+]
+
+
+@pytest.mark.parametrize("name", TITLE_KEYED)
+def test_panel_titles_are_unique_where_tests_key_on_them(name):
+    dash = json.loads((REPO / "grafana" / name).read_text(encoding="utf-8"))
+    for kind in ("panel", "row"):
+        titles = [p.get("title") for p in dash["panels"]
+                  if (p.get("type") == "row") == (kind == "row")]
+        duplicates = sorted({t for t in titles if titles.count(t) > 1})
+        assert duplicates == [], f"{name}: duplicate {kind} titles {duplicates}"
 
 
 @pytest.mark.parametrize("path", DASHBOARDS, ids=lambda p: p.name)
@@ -419,27 +509,15 @@ def test_the_two_app_tables_share_a_row():
 
 
 def test_the_temperature_history_keeps_its_own_window():
-    """A fourth case of `test_live_panels_keep_their_own_window`'s rule, on the same board.
+    """Battery Health runs a plain `now-30d` to `now` lookback, so without an override the
+    temperature history would spend most of its width on three weeks the thermal story does
+    not need. `timeFrom` pins it to seven days regardless of the picker -- seven rather than
+    the live panels' 24h because a battery's thermal story is a week long, not a day.
 
-    The main dashboard carries the plan's `now-6h` to `now+36h` range (the test above pins
-    that), so a temperature history drawn against it spends most of its width on a future no
-    measurement can fill -- the 2026-08-08 failure in a different panel. `timeFrom` pins this
-    one to seven days regardless of the picker; seven rather than the trio's 24h because a
-    battery's thermal story is a week long, not a day.
-
-    Kept separate from the trio's test rather than folded into its title list, because that
-    test asserts one shared value and this panel deliberately differs from it.
-    """
-    _, main = _panels_by_title("alphaess-dashboard.json")
-    assert main["Battery cell temperature (min/max)"].get("timeFrom") == "7d"
-
-
-def test_the_battery_health_copy_keeps_the_same_window():
-    """The battery-health dashboard's own copy of the same panel must carry the same
-    `timeFrom` override as its source, for the same reason as the test above -- Battery
-    Health runs a plain `now-30d` to `now` lookback (no plan horizon involved at all), so
-    without the override this copy would spend most of its width on three weeks the
-    temperature story doesn't need.
+    Battery Health is now the only board carrying this panel. The main dashboard had a copy
+    until the Battery section became one row of tiles: a week-long history is a question you
+    go somewhere to ask, not a thing a status board answers, and the tiles above it already
+    say whether the pack is hot or cold right now.
     """
     _, health = _panels_by_title("alphaess-battery-health.json")
     panel = health["Battery cell temperature (min/max)"]
@@ -705,11 +783,17 @@ def test_heartbeat_tile_and_alert_read_the_same_series():
             "field": set(re.findall(r'_field == "([^"]+)"', flux)),
         }
 
-    dashboard = json.loads(
-        (REPO / "grafana" / "alphaess-collector-health.json").read_text(encoding="utf-8"))
-    panel = next(p for p in dashboard["panels"] if p["title"] == "Heartbeat unreachable")
-    assert len(panel["targets"]) == 1, panel["targets"]
-    tile = selectors(panel["targets"][0]["query"])
+    # Both tiles: Collector Health's, and the main dashboard's own 24h copy of the
+    # question. Two places to make the same silent typo, so both are pinned.
+    tiles = []
+    for name, title in (("alphaess-collector-health.json", "Heartbeat unreachable"),
+                        ("alphaess-dashboard.json", "Heartbeat pushes failing (24h)")):
+        dashboard = json.loads((REPO / "grafana" / name).read_text(encoding="utf-8"))
+        panel = next(p for p in dashboard["panels"] if p["title"] == title)
+        assert len(panel["targets"]) == 1, panel["targets"]
+        tiles.append(selectors(panel["targets"][0]["query"]))
+    assert tiles[0] == tiles[1], "the two heartbeat tiles count different points"
+    tile = tiles[0]
 
     doc = yaml.safe_load(
         (PROVISIONING / "alerting" / "alphaess-heartbeat-unreachable.yml")
@@ -758,6 +842,85 @@ def test_job_age_panel_and_efficiency_alert_share_a_threshold():
     steps = [s["value"] for s in panel["fieldConfig"]["defaults"]["thresholds"]["steps"]
              if s["value"] is not None]
     assert steps[-1] == alert_thresholds[0]
+
+
+def _nightly_jobs_queries():
+    _, panels = _panels_by_title("alphaess-dashboard.json")
+    return {t: panels[t]["targets"][0]["query"] for t in ("Nightly jobs", "Which job is late")}
+
+
+def test_the_nightly_jobs_allowance_matches_the_efficiency_alert():
+    """A third copy of the same 30 hours, in a third unit.
+
+    The alert holds it as 108000 seconds, the Job age stat as a threshold in seconds, and
+    the Overview's nightly-jobs query as `- 30.0` hours subtracted from an age. Nothing at
+    runtime couples them, and a drift is invisible in the worst direction: the Overview
+    would read ALL FRESH for the hours the alert was already firing, on the one board whose
+    entire promise is that a dead job shows up on it.
+    """
+    (alert_seconds,) = _alert_thresholds("alphaess-efficiency-staleness.yml")
+    hours = alert_seconds / 3600.0
+    for title, query in _nightly_jobs_queries().items():
+        for job in ("pricing", "efficiency", "mijnbatterij"):
+            assert f'job: "{job}", _time' in query, f"{title}: {job} row is gone"
+        assert query.count(f"- {hours}") == 3, (
+            f"{title}: expected pricing, efficiency and mijnbatterij to allow "
+            f"{hours}h, matching the efficiency alert's {alert_seconds}s")
+
+
+def test_the_prices_row_asks_for_coverage_not_an_age():
+    """The prices job is the one whose freshness is not a staleness question.
+
+    Day-ahead publishes early afternoon for the following day, so "how old is the newest
+    price" stays comfortably negative all evening while the planner schedules tomorrow's
+    charge on prices that were never fetched -- the 2026-09-03 failure, where a DSM task
+    fired once before publication and its repeat window was zero minutes wide. The row has
+    to ask what is HELD, against the end of a local day, or it cannot see that at all.
+
+    Pinned because reverting it to an age looks like a simplification: every other row in
+    the query is an age, and this one would read as the odd one out.
+    """
+    for title, query in _nightly_jobs_queries().items():
+        assert 'timezone.location(name: "Europe/Amsterdam")' in query, (
+            f"{title}: the day boundary is local -- UTC would shift the cutoff by an hour "
+            "in summer and move it across midnight")
+        assert "date.hour(t: now()) >= 15" in query, f"{title}: publication grace is gone"
+        assert "then 47.0 else 23.0" in query, f"{title}: day-coverage requirement changed"
+        assert "neededS - float(v: int(v: r._time))" in query, (
+            f"{title}: prices is measured against now again, not against the day it must "
+            "cover")
+
+
+def test_every_job_has_a_fallback_row():
+    """A job with no rows at all must still appear, or the verdict is a lie.
+
+    union() drops an empty table silently, so a job that has never written -- or died
+    before the query's lookback -- would simply not be in the max(), and the tile would
+    read ALL FRESH with a job missing entirely. That is the exact failure the panel was
+    added to catch, so it is pinned rather than left to the comment beside it.
+    """
+    for title, query in _nightly_jobs_queries().items():
+        for job in ("prices", "pricing", "efficiency", "mijnbatterij", "plan score"):
+            assert f'{{job: "{job}", _time: now(), _value: 9999.0}}' in query, \
+                f"{title}: {job} has no fallback row"
+        # And the reduction that makes the fallback lose to a real row: without the
+        # per-job min(), every job would read 9999 and the tile would be permanently red.
+        assert 'group(columns: ["job"])\n  |> min()' in query, title
+
+
+def test_the_two_nightly_jobs_panels_share_one_body():
+    """The verdict tile and the table run the same 60-line union, deliberately: Grafana has
+    no way to share a query between two panels, and the alternative -- one table doing both
+    jobs -- gives up the single-glance verdict that is the point of the header row.
+
+    What that costs is the risk of editing one and not the other, which would leave the
+    tile green while the table listed a late job. So the shared half is pinned identical
+    and only the final reduction is allowed to differ.
+    """
+    tile, table = (_nightly_jobs_queries()[t] for t in ("Nightly jobs", "Which job is late"))
+    marker = "jobs\n  |>"
+    assert tile.split(marker)[0] == table.split(marker)[0]
+    assert "|> max()" in tile and "|> sort(" in table
 
 
 def test_the_staleness_checks_read_when_the_job_ran_not_which_day_it_wrote():
@@ -1000,3 +1163,49 @@ def test_the_log_error_alert_treats_no_data_as_healthy():
     # And the debounce, which is what keeps a single transient ERROR from paging: the
     # collector logs one on a failed poll and recovers on the next.
     assert rule["for"] == "5m"
+
+
+NUMERIC = re.compile(r"-?\d+(\.\d+)?$")
+
+
+def _string_valued_stat_panels():
+    """Stat panels whose value mappings key on strings, so the field is a string."""
+    for path in DASHBOARDS:
+        dash = json.loads(path.read_text(encoding="utf-8"))
+        for panel in dash.get("panels", []):
+            if panel.get("type") != "stat":
+                continue
+            keys = [
+                key
+                for mapping in panel["fieldConfig"]["defaults"].get("mappings", [])
+                if mapping.get("type") == "value"
+                for key in mapping.get("options", {})
+            ]
+            if any(not NUMERIC.match(key) for key in keys):
+                yield path.name, panel
+
+
+def test_string_valued_stat_panels_reduce_over_every_field():
+    """A verdict tile must not leave `reduceOptions.fields` empty.
+
+    Empty means "numeric fields only". These panels emit one string column, so the
+    reducer finds nothing to reduce and the tile renders the null mapping -- NO DATA, or
+    whatever `noValue` says -- while the query underneath is returning a perfectly good
+    row. The board then reports a dead subsystem that is alive, which is the failure that
+    costs the most trust: every other tile on it becomes suspect.
+
+    Every verdict tile in this repo is built the same way (a `map()` chain ending in a
+    single `_value` string) so the requirement is universal, and the symptom points at
+    the query rather than the panel, which is why it gets a test instead of a comment.
+    """
+    wrong = [
+        f"{name}: {panel['title']}"
+        for name, panel in _string_valued_stat_panels()
+        if panel["options"]["reduceOptions"].get("fields") != "/.*/"
+    ]
+    assert wrong == [], f"string-valued stat panels not reducing over all fields: {wrong}"
+
+
+def test_there_are_string_valued_stat_panels_to_check():
+    """The heuristic above finds nothing if the mapping shape ever changes."""
+    assert len(list(_string_valued_stat_panels())) >= 8

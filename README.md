@@ -95,11 +95,13 @@ through the **Energy Losses** dashboard
 
 4. Open Grafana at http://localhost:3000 (login with
    `GRAFANA_ADMIN_USER`/`GRAFANA_ADMIN_PASSWORD`). The InfluxDB datasource and
-   three dashboards — **Overview** (what the system is doing right now: SoC,
-   battery power, collector status, a source→use Sankey and the power
-   timeseries), **Energy** (the same in totals: per-day stats, bar charts and
-   the daily/hourly tables) and **Energy Flow** (a source→use Sankey,
-   defaults to Today) — are provisioned automatically, no manual setup. The
+   three dashboards — **Overview** (the status board: is the battery healthy,
+   is the dispatcher dispatching, is data arriving, did the nightly jobs run —
+   each as one verdict tile over a row of detail, plus the live power
+   timeseries), **Energy** (the same system in totals: per-day stats, bar
+   charts, a source→use Sankey and the daily/hourly tables) and **Energy
+   Flow** (a source→use Sankey, defaults to Today) — are provisioned
+   automatically, no manual setup. The
    bundled Grafana also installs the `volkovlabs-echarts-panel` plugin the
    Sankey panels need.
 
