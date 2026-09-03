@@ -49,7 +49,7 @@ import requests
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 
-from collector import API_BASE, auth_headers, send_heartbeat
+from collector import API_BASE, auth_headers, send_heartbeat, write_health_event
 from prices import NL_TZ
 from pricing import (
     MIN_COVERAGE,
@@ -654,6 +654,12 @@ class RunSummary:
         self.failed: list[tuple[dt.date, str]] = []
         self.empty: list[dt.date] = []
         self.last_result: dict | None = None
+        # Carried out of run_influx so main() can record a failed heartbeat push
+        # against the same bucket/sys_sn the run itself wrote to, without
+        # threading a write_api through the argparse plumbing.
+        self.write_api = None
+        self.bucket: str = ""
+        self.sys_sn: str = ""
 
     @property
     def attempted(self) -> int:
@@ -736,6 +742,7 @@ def run_influx(days: list[dt.date], dry_run: bool, force: bool) -> RunSummary:
     query_api = client.query_api()
     write_api = client.write_api(write_options=SYNCHRONOUS)
     summary = RunSummary()
+    summary.write_api, summary.bucket, summary.sys_sn = write_api, bucket, sys_sn
     consecutive_throttles = 0
     try:
         for day in days:
@@ -912,9 +919,15 @@ def main() -> None:
         # else about the push -- a malformed URL, a mangled message -- can
         # discard a run whose rows are already safely written.
         try:
-            send_heartbeat(HEARTBEAT_URL, status=beat[0], msg=beat[1])
+            ping_failed = send_heartbeat(HEARTBEAT_URL, status=beat[0], msg=beat[1])
         except Exception as exc:
             log.warning("Heartbeat push failed: %s", exc)
+            return
+        if ping_failed and summary.write_api is not None:
+            write_health_event(
+                summary.write_api, summary.bucket, summary.sys_sn, "heartbeat_failed",
+                {"error": ping_failed}, stage="heartbeat",
+                component="efficiency", monitor="efficiency")
 
 
 if __name__ == "__main__":

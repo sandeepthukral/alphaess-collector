@@ -37,6 +37,7 @@ from pathlib import Path
 import registers as R
 import slots as S
 import state as state_mod
+from health import write_heartbeat_failed
 from heartbeat import send_heartbeat
 
 try:
@@ -465,16 +466,29 @@ def monitor_pings(decision: S.Decision, cache: dict, live_soc: float | None,
     return [(name, status, msg[:200]) for name, status, msg in pings]
 
 
-async def report(pings: list[tuple[str, str, str]]) -> None:
+async def report(pings: list[tuple[str, str, str]], publisher=None) -> None:
     """Send the pings without blocking the control loop.
 
     `send_heartbeat` is `urllib`, which is synchronous, and five of them at a 5 s timeout is up
     to 25 s -- inside a 60 s loop that also has to talk to an inverter. Off the event loop and
     concurrently, so a Kuma outage costs the loop nothing at all.
+
+    A failed push is recorded as a `collector_health` row via the same publisher `tick()`
+    already has for `dispatch_state`, reusing its write_api/bucket/sys_sn rather than opening a
+    second connection -- so TODO 18's "detection covers ONLY the collector's own heartbeat" is
+    no longer true for these five. `publisher` is None on a laptop dry run or when Influx is
+    not configured, matching every other observability write in this module: degrade what you
+    can see, never the control loop.
     """
-    await asyncio.gather(*(
+    results = await asyncio.gather(*(
         asyncio.to_thread(send_heartbeat, MONITOR_URLS.get(name, ""), status, msg)
         for name, status, msg in pings))
+    if publisher is None:
+        return
+    for (name, _status, _msg), reason in zip(pings, results):
+        if reason:
+            write_heartbeat_failed(publisher.write_api, publisher.bucket, publisher.sys_sn,
+                                   monitor=name, error=reason)
 
 
 def check_alive() -> int:
@@ -1073,7 +1087,7 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # 10. Report to Kuma. Last, so every ping describes a completed tick rather than one in
     # progress -- and after the heartbeat file, which is the check that must never depend on
     # the network.
-    await report(monitor_pings(decision, cache, live_soc, inv.dry_run))
+    await report(monitor_pings(decision, cache, live_soc, inv.dry_run), publisher)
 
     log.info("%s | %s | soc=%s | temp=%s | verified=%s | %s", decision.kind, decision.reason,
              f"{live_soc:.1f}%" if live_soc is not None else "?",

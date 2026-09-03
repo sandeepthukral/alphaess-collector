@@ -87,9 +87,11 @@ def harness(monkeypatch, loop_env):
     monkeypatch.setattr(collector, "send_heartbeat", fake_send_heartbeat)
 
     def fake_health_event(write_api, bucket, sys_sn, event, fields,
-                          error_class=None, stage=None):
+                          error_class=None, stage=None, component="collector",
+                          monitor=None):
         state["health_events"].append(
-            {"event": event, "error_class": error_class, "stage": stage, **fields})
+            {"event": event, "error_class": error_class, "stage": stage,
+             "component": component, "monitor": monitor, **fields})
 
     monkeypatch.setattr(collector, "write_health_event", fake_health_event)
 

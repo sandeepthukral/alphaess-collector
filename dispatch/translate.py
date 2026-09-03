@@ -39,6 +39,7 @@ import sys
 from pathlib import Path
 
 import slot_publisher as slot_pub
+from health import write_heartbeat_failed
 from heartbeat import send_heartbeat
 from plan import (
     PlanFormatError,
@@ -203,7 +204,19 @@ def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.da
     The two monitors are pinged at different points on purpose, and only one of them is ever
     the first to go down: a read failure reports #2 and leaves #3 silent, because "the plan
     could not be read" is not evidence about the translator. #3 only speaks once #2 is up.
+
+    A push that fails to reach Kuma is recorded to `collector_health` too, via
+    `slot_publisher`'s write_api/bucket/sys_sn -- the same connection this run already opened
+    for `dispatch_slots`, reused rather than duplicated. `slot_publisher` is None exactly when
+    Influx is not configured, which is also when there is nowhere to record the failure, so
+    `_ping` degrades to what `send_heartbeat` already did before this change.
     """
+    def _ping(monitor: str, url: str, status: str, msg: str) -> None:
+        reason = send_heartbeat(url, status, msg)
+        if reason and slot_publisher is not None:
+            write_heartbeat_failed(slot_publisher.write_api, slot_publisher.bucket,
+                                   slot_publisher.sys_sn, monitor=monitor, error=reason)
+
     try:
         intervals = read_plan(query_api, bucket, now)
     except PlanFormatError as e:
@@ -211,7 +224,7 @@ def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.da
         # section 2b. An alert reading "no ping received" would not distinguish a renamed
         # field from a dead NAS.
         log.error("plan unreadable: %s", e)
-        send_heartbeat(plan_url, "down", str(e)[:200])
+        _ping("plan-in-influx", plan_url, "down", str(e)[:200])
         return 1
     except Exception as e:
         # Deliberately broad. `from_influx` speaks `PlanFormatError`, but the client under it
@@ -222,9 +235,9 @@ def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.da
         # broke -- which is the whole reason this module pings at all. The type name goes in
         # the message because it is often the only part of an HTTP failure worth reading.
         log.exception("plan read failed")
-        send_heartbeat(plan_url, "down", f"{type(e).__name__}: {e}"[:200])
+        _ping("plan-in-influx", plan_url, "down", f"{type(e).__name__}: {e}"[:200])
         return 1
-    send_heartbeat(plan_url, "up", f"plan_run {newest_run(intervals)}")
+    _ping("plan-in-influx", plan_url, "up", f"plan_run {newest_run(intervals)}")
 
     try:
         doc, warnings = build_document(intervals, capacity_wh, now)
@@ -235,7 +248,7 @@ def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.da
         # to look for a fault that is not there, while #3 -- the monitor whose entire meaning
         # is "the plan was readable but the translation failed" -- sat green through it.
         log.exception("translation failed")
-        send_heartbeat(slots_url, "down", f"{type(e).__name__}: {e}"[:200])
+        _ping("slots-written", slots_url, "down", f"{type(e).__name__}: {e}"[:200])
         return 1
 
     line = summarise(doc, warnings)
@@ -253,7 +266,7 @@ def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.da
         atomic_write(slots_path, doc)
     except OSError as e:
         log.error("could not write %s: %s", slots_path, e)
-        send_heartbeat(slots_url, "down", f"slots write failed: {e}"[:200])
+        _ping("slots-written", slots_url, "down", f"slots write failed: {e}"[:200])
         return 1
 
     log.info("wrote %s: %s", slots_path, line)
@@ -266,7 +279,7 @@ def run(query_api, bucket: str, slots_path: Path, capacity_wh: float, now: dt.da
     if slot_publisher is not None:
         slot_publisher.publish(doc)
 
-    send_heartbeat(slots_url, "up", line[:200])
+    _ping("slots-written", slots_url, "up", line[:200])
     return 0
 
 

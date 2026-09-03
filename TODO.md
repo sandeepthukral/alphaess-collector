@@ -22,24 +22,29 @@ and renumbering would break every reference to it in a commit message or a PR.
 `plan.run_sort_key` exists precisely because these tags are not sortable as strings: runs
 before 2026-07-30 carry `+02:00` where later ones carry `Z`. Use it.
 
-**18. Heartbeat failures are silent everywhere except the collector.** The other two
-thirds of this item have shipped. `collector.send_heartbeat` returns the reason a ping
-failed instead of only logging it, the poll loop records that as a `collector_health` point
-with `event="heartbeat_failed"`, the Collector Health dashboard has a "Heartbeat unreachable"
-tile, and `grafana/provisioning/alerting/alphaess-heartbeat-unreachable.yml` pages after ten
-minutes of failures -- so "the watchdog is unreachable" is a visible state rather than
-something you find by reading `docker logs`. A non-2xx reply counts as a failure too, which
-catches the revoked-token case that previously looked entirely healthy from this side.
-And as of 2026-09-03 the URLs no longer carry a LAN address at all: they name `kuma`, an
-`extra_hosts` alias resolving to `host-gateway`, so the NAS can change IP without taking
-the heartbeats with it (DEPLOY.md, "Reaching Kuma from a container").
+**18. Heartbeat failures are silent everywhere except the collector.** DONE, 2026-09-03.
+`send_heartbeat` returns the reason a ping failed instead of only logging it -- in
+`collector.py` (which `efficiency.py` reuses), in `mijnbatterij.py`'s own copy, and now
+in `dispatch/heartbeat.py`. Every caller records a non-empty reason as a `collector_health`
+point, `event="heartbeat_failed"`, `component=<collector|efficiency|mijnbatterij|dispatch>`
+(new tag) and, for dispatch, `monitor=<which of the seven>` (new: `dispatch/health.py`,
+reusing the write_api the tick already opens for `dispatch_state`/`dispatch_slots` rather
+than a second connection). The Collector Health dashboard's "Heartbeat unreachable" tile and
+`grafana/provisioning/alerting/alphaess-heartbeat-unreachable.yml` already read this
+measurement with no `component` filter, so the existing alert covers all four processes
+without a rule change -- only its wording needed updating, since it used to say "the
+collector" specifically. A non-2xx reply counts as a failure too (collector and mijnbatterij;
+`urlopen` already raises on 4xx/5xx for dispatch), which catches the revoked-token case that
+previously looked entirely healthy from this side. And as of 2026-09-03 the URLs no longer
+carry a LAN address at all: they name `kuma`, an `extra_hosts` alias resolving to
+`host-gateway`, so the NAS can change IP without taking the heartbeats with it (DEPLOY.md,
+"Reaching Kuma from a container").
 
-What remains is that the detection covers ONLY the collector's own heartbeat. `efficiency.py`,
-`mijnbatterij.py` and the seven dispatch monitors still swallow their push failures --
-logged, never counted, never alerted on. The collector's treatment generalises: return the
-reason, write a `heartbeat_failed` point, let the existing alert rule cover the new rows.
-Worth doing now that the URLs have stopped moving, because until they did, this would have
-alerted constantly and correctly and taught nobody anything.
+One accepted asymmetry, not a gap: the alert's 10-minute `for` assumes a process that retries
+often enough for one failed push to be a blip. `mijnbatterij` (5 min) and especially
+`efficiency` (once a night) can page off a single failed push aging through that window,
+because a one-shot nightly job has no next attempt to self-heal on. Left as is -- see the
+rule's own comment.
 
 Separately, and outside this repo: the Kuma monitors address the NAS by IP in their own URL
 fields. Those entries live in the Kuma UI, so nothing here can change them and nothing here

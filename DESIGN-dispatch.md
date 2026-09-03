@@ -591,6 +591,16 @@ Uptime Kuma, following this repo's existing pattern: `send_heartbeat(url, status
 `kuma:3001` -- a `/etc/hosts` alias from `docker-compose.yml`, not DNS, so the URLs do not
 carry a LAN address that moves. DEPLOY.md, "Reaching Kuma from a container".
 
+The push itself can silently fail -- a DNS blip, a stale IP, a revoked token -- and Kuma
+cannot tell that failure apart from the process simply being dead; both read as "no ping
+received". `dispatch/heartbeat.py`'s `send_heartbeat` returns the reason rather than only
+logging it, and `dispatch/health.py:write_heartbeat_failed` records a non-empty one as a
+`collector_health` point (`event="heartbeat_failed"`, `component="dispatch"`,
+`monitor=<name>`) via the same write_api the tick already opened for `dispatch_state`. The
+collector's and mijnbatterij's own pushes are recorded the same way, and one alert rule --
+`grafana/provisioning/alerting/alphaess-heartbeat-unreachable.yml` -- covers all four
+processes (TODO.md #18).
+
 Three principles:
 
 1. **Every monitor must catch something no other monitor catches.** Otherwise one outage
