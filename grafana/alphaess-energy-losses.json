@@ -84,7 +84,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Total over the picked range of (load implied by power_readings) minus (load AlphaESS actually metered). This is the number the 30-second dataset structurally cannot produce on its own: load_power_w there is the exact identity pv + grid + battery, so its energy balance closes by construction and no loss can appear in it.\n\nIt is a difference of two load figures, not a directly attributed physical loss -- it also contains anything AlphaESS meters on a different CT than the residual sees. Around 1-2.7 kWh a day on this system.",
+      "description": "Total over the picked range of (load implied by power_readings) minus (load AlphaESS actually metered). This is the number the 30-second dataset structurally cannot produce on its own: load_power_w there is the exact identity pv + grid + battery, so its energy balance closes by construction and no loss can appear in it.\n\nIt is a difference of two load figures, not a directly attributed physical loss -- it also contains anything AlphaESS meters on a different CT than the residual sees. Around 1-2.7 kWh a day on this system.\n\nSums only the days actually stored. Check 'Days missing' before reading this as a total for the whole picked range.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -152,7 +152,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Charge minus discharge, minus the energy still in the battery at the end (delta SoC x capacity). The SoC correction is what makes this valid over any range instead of only over a window whose start and end SoC match.\n\nWritten only when BATTERY_CAPACITY_KWH is configured. Single days can come out negative -- SoC is a BMS estimate, not a coulomb count, and it is nonlinear near the top and bottom of the range. That averages out over a week; do not read one day.",
+      "description": "Charge minus discharge, minus the energy still in the battery at the end (delta SoC x capacity). The SoC correction is what makes this valid over any range instead of only over a window whose start and end SoC match.\n\nWritten only when BATTERY_CAPACITY_KWH is configured. Single days can come out negative -- SoC is a BMS estimate, not a coulomb count, and it is nonlinear near the top and bottom of the range. That averages out over a week; do not read one day.\n\nSums only the days actually stored -- see 'Days missing'.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -220,7 +220,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "The two added. They do not double-count: the battery term is measured at the battery (eCharge/eDischarge reproduce this repo's own integration of battery_power_w to within 1.4% over 19 days), and the conversion term is measured entirely outside it, as the gap between two independent load figures.",
+      "description": "The two added. They do not double-count: the battery term is measured at the battery (eCharge/eDischarge reproduce this repo's own integration of battery_power_w to within 1.4% over 19 days), and the conversion term is measured entirely outside it, as the gap between two independent load figures.\n\nSums only the days actually stored -- see 'Days missing'.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -318,7 +318,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 4,
+        "h": 2,
         "w": 6,
         "x": 18,
         "y": 0
@@ -360,7 +360,79 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Battery discharge divided by battery charge over the range, from AlphaESS's own daily counters. Independent of everything else here, which makes it the sanity check on the whole pipeline: measured directly from power_readings over a 20-day SoC-matched window it is 96.15%, so a number far from that means the pipeline is wrong, not the battery.\n\nUncorrected for delta SoC, so a short range that ends fuller than it started reads low. Use a week or more.",
+      "description": "Days in the picked range with no daily_energy row, i.e. days the totals above do not include. A day whose data failed the gate in efficiency.py is not stored at all, and a sum over what is there renders exactly like a complete one -- so a 14-day range can quietly be reporting eleven.\n\nWhich days are missing is visible as the gaps in 'Loss per day' and as absent rows in 'Day by day'; why is in the collector logs. Today never has a row (efficiency.py runs on whole days) and is not counted here.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 0,
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 3
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 6,
+        "x": 18,
+        "y": 2
+      },
+      "id": 13,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "${DS_ALPHAESS}"
+          },
+          "query": "import \"array\"\nimport \"math\"\n\ncovered = from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"conversion_loss_kwh\")\n  |> group()\n  |> count()\n  |> findColumn(fn: (key) => true, column: \"_value\")\n\nstored = if length(arr: covered) == 0 then 0.0 else float(v: covered[0])\nexpected = math.floor(x: float(v: int(v: v.timeRangeStop) - int(v: v.timeRangeStart))\n                         / 86400000000000.0)\n\narray.from(rows: [{\n  _time: now(),\n  _value: if expected - stored < 0.0 then 0.0 else expected - stored\n}])\n  |> yield(name: \"days missing\")\n",
+          "refId": "A"
+        }
+      ],
+      "title": "Days missing",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "influxdb",
+        "uid": "${DS_ALPHAESS}"
+      },
+      "description": "Battery discharge over the range divided by what was available to give back: charge minus the energy the battery ended up down by (delta SoC x capacity). From AlphaESS's own daily counters, so it is independent of the conversion figure and is the sanity check on the whole pipeline: measured directly from power_readings over a 20-day SoC-matched window it is 96.15%, so a number far from that means the pipeline is wrong, not the battery.\n\nThe SoC term is the same correction the battery-loss tile carries. Without it this is an efficiency only over a window that starts and ends at the same SoC: a range ending well below where it started returns more than it took in and reads above 100%, which looks like broken data and is not. Falls back to the raw discharge/charge ratio when BATTERY_CAPACITY_KWH is unset and there is no delta_soc_kwh to correct with.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -382,6 +454,10 @@
               {
                 "color": "green",
                 "value": 95
+              },
+              {
+                "color": "red",
+                "value": 100
               }
             ]
           },
@@ -420,7 +496,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "import \"array\"\n\nsums = from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"discharge_kwh_api\" or r._field == \"charge_kwh_api\")\n  |> group(columns: [\"_field\"])\n  |> sum()\n\nn = (sums |> filter(fn: (r) => r._field == \"discharge_kwh_api\")\n          |> findColumn(fn: (key) => true, column: \"_value\"))[0]\nd = (sums |> filter(fn: (r) => r._field == \"charge_kwh_api\")\n          |> findColumn(fn: (key) => true, column: \"_value\"))[0]\n\narray.from(rows: [{\n  _time: now(),\n  _value: if d == 0.0 then 0.0 else n / d * 100.0\n}])\n  |> yield(name: \"round-trip\")\n",
+          "query": "import \"array\"\n\nsums = from(bucket: \"alphaess\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"daily_energy\"\n        and r.model_version == \"${model_version}\")\n  |> filter(fn: (r) => r._field == \"discharge_kwh_api\" or r._field == \"charge_kwh_api\"\n        or r._field == \"delta_soc_kwh\")\n  |> group(columns: [\"_field\"])\n  |> sum()\n\npick = (field) => {\n  found = sums\n    |> filter(fn: (r) => r._field == field)\n    |> findColumn(fn: (key) => true, column: \"_value\")\n  return if length(arr: found) == 0 then 0.0 else found[0]\n}\n\ndischarge = pick(field: \"discharge_kwh_api\")\ncharge = pick(field: \"charge_kwh_api\")\ndsoc = pick(field: \"delta_soc_kwh\")\navailable = charge - dsoc\n\narray.from(rows: [{\n  _time: now(),\n  _value: if available == 0.0 then 0.0 else discharge / available * 100.0\n}])\n  |> yield(name: \"round-trip\")\n",
           "refId": "A"
         }
       ],
@@ -496,7 +572,7 @@
         "type": "influxdb",
         "uid": "${DS_ALPHAESS}"
       },
-      "description": "Net energy the battery gained or lost over the picked range. The battery-loss figure is charge - discharge - this, so showing it makes the correction visible instead of implied: when it is large, the loss number is leaning on BATTERY_CAPACITY_KWH being right. Verify that with `efficiency.py --system-facts`.",
+      "description": "Net energy the battery gained or lost over the picked range. The battery-loss figure is charge - discharge - this, and round-trip efficiency is discharge / (charge - this), so showing it makes the correction visible instead of implied: when it is large, both of those numbers are leaning on BATTERY_CAPACITY_KWH being right. Verify that with `efficiency.py --system-facts`.\n\nSummed from per-day intra-day deltas, so it only telescopes to the range's true start-to-end change while the days are contiguous. With 'Days missing' above zero it is missing the steps across the gaps.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -1201,6 +1277,6 @@
   "timezone": "browser",
   "title": "Energy Losses",
   "uid": "alphaess-energy-losses",
-  "version": 2,
+  "version": 3,
   "weekStart": ""
 }

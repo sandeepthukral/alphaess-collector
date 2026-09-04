@@ -943,6 +943,48 @@ def test_the_staleness_checks_read_when_the_job_ran_not_which_day_it_wrote():
     assert 'computed_at_unix' in panel["targets"][0]["query"]
 
 
+def test_round_trip_efficiency_carries_the_same_soc_correction_as_the_loss():
+    """efficiency.py stores battery_loss_kwh as charge - discharge - dSoC, and the
+    round-trip tile beside it has to divide by the same corrected quantity.
+
+    Uncorrected, discharge/charge is an efficiency only over a window that starts and ends
+    at the same SoC. Over any other window it reads the drift: a fortnight ending 14 kWh
+    down printed 101.31% next to a battery-loss tile that had already subtracted that same
+    14 kWh -- two tiles disagreeing about whether the SoC term exists, on the panel whose
+    stated job is to be the sanity check on the pipeline. Above 100% it does not read as a
+    range artefact, it reads as broken data, and there is no way to tell from the board
+    which it is.
+
+    Pins the correction, and pins that >100% is coloured as the fault it now would be.
+    """
+    _, panels = _panels_by_title("alphaess-energy-losses.json")
+    query = panels["Round-trip efficiency"]["targets"][0]["query"]
+    assert "delta_soc_kwh" in query, "round-trip is back to the uncorrected ratio"
+    assert "charge - dsoc" in query, "the denominator no longer nets off delta SoC"
+
+    steps = panels["Round-trip efficiency"]["fieldConfig"]["defaults"]["thresholds"]["steps"]
+    assert steps[-1] == {"color": "red", "value": 100}, (
+        "corrected, an efficiency above 100% is a data fault and must not read green")
+
+
+def test_the_totals_say_when_the_range_is_missing_days():
+    """A day that fails the gate in efficiency.py is not written at all, and every sum on
+    this board renders identically whether the range holds fourteen rows or eleven.
+
+    So the board needs to count the hole itself -- from the picker, not from the stored
+    rows, since the thing being caught is that nothing was stored.
+    """
+    _, panels = _panels_by_title("alphaess-energy-losses.json")
+    query = panels["Days missing"]["targets"][0]["query"]
+    assert "v.timeRangeStop" in query and "v.timeRangeStart" in query, (
+        "expected days must come from the picker, not from a count of what was stored")
+    assert "count()" in query
+
+    steps = panels["Days missing"]["fieldConfig"]["defaults"]["thresholds"]["steps"]
+    assert steps[0]["color"] == "green" and steps[1] == {"color": "orange", "value": 1}, (
+        "a single missing day has to leave the green state -- that is the whole point")
+
+
 def test_the_dispatch_action_table_uses_the_translator_s_own_floors():
     """The action table re-implements dispatch/translator.py:classify in Flux.
 
