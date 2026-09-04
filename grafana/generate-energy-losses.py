@@ -131,6 +131,84 @@ array.from(rows: [{
 ''' % (numerator, denominator, numerator, denominator, scale, name)
 
 
+# Round-trip efficiency, corrected for the energy left in the battery.
+#
+# discharge/charge alone is only an efficiency over a window that starts and
+# ends at the same SoC. Over any other window it reads the drift instead: a
+# range ending 14 kWh emptier than it started returns more than it took in and
+# the tile prints 101%, which looks like a broken pipeline and is not one.
+#
+# The denominator is what was actually available to give back -- everything put
+# in, plus whatever was already in there and came out during the range:
+#
+#     efficiency = discharge / (charge - dSoC)
+#
+# the same correction battery_loss_kwh already carries (efficiency.py:544
+# stores charge - discharge - dSoC), so the two tiles can no longer disagree
+# about whether the SoC term exists.
+#
+# delta_soc_kwh is written only when BATTERY_CAPACITY_KWH is set, so its sum
+# can legitimately be an empty table. Indexing findColumn's array at [0] there
+# fails the whole panel, hence `pick`, which reads 0.0 -- i.e. falls back to the
+# uncorrected ratio rather than to a blank box.
+ROUND_TRIP = '''import "array"
+
+sums = ''' + DAILY + '''
+  |> filter(fn: (r) => r._field == "discharge_kwh_api" or r._field == "charge_kwh_api"
+        or r._field == "delta_soc_kwh")
+  |> group(columns: ["_field"])
+  |> sum()
+
+pick = (field) => {
+  found = sums
+    |> filter(fn: (r) => r._field == field)
+    |> findColumn(fn: (key) => true, column: "_value")
+  return if length(arr: found) == 0 then 0.0 else found[0]
+}
+
+discharge = pick(field: "discharge_kwh_api")
+charge = pick(field: "charge_kwh_api")
+dsoc = pick(field: "delta_soc_kwh")
+available = charge - dsoc
+
+array.from(rows: [{
+  _time: now(),
+  _value: if available == 0.0 then 0.0 else discharge / available * 100.0
+}])
+  |> yield(name: "round-trip")
+'''
+
+# Days in the picked range with no stored row, i.e. days every total above is
+# silently missing. A day that fails the gate in efficiency.py is not written
+# at all, and a sum over the rows that do exist renders identically to a
+# complete one -- "31.80 kWh over the last 14 days" reads as fourteen days
+# whether it is fourteen or eleven.
+#
+# Expected days come from the picker rather than from a count of anything
+# stored, because the failure being caught is precisely that nothing was
+# stored. Floored: the default range runs to `now`, so it covers 14 whole days
+# plus however much of today has elapsed, and today has no row yet by design.
+DAYS_MISSING = '''import "array"
+import "math"
+
+covered = ''' + DAILY + '''
+  |> filter(fn: (r) => r._field == "conversion_loss_kwh")
+  |> group()
+  |> count()
+  |> findColumn(fn: (key) => true, column: "_value")
+
+stored = if length(arr: covered) == 0 then 0.0 else float(v: covered[0])
+expected = math.floor(x: float(v: int(v: v.timeRangeStop) - int(v: v.timeRangeStart))
+                         / 86400000000000.0)
+
+array.from(rows: [{
+  _time: now(),
+  _value: if expected - stored < 0.0 then 0.0 else expected - stored
+}])
+  |> yield(name: "days missing")
+'''
+
+
 def daily(field, name):
     """One bar per local day. timeSrc "_start" because aggregateWindow
     otherwise stamps a window with its END, drawing Thursday's loss on Friday."""
@@ -143,7 +221,7 @@ def daily(field, name):
 
 
 def stat(id_, title, desc, query, unit, decimals, x, y, steps, w=6,
-         color_mode="value"):
+         color_mode="value", h=4):
     return {
         "datasource": DS,
         "description": desc,
@@ -157,7 +235,7 @@ def stat(id_, title, desc, query, unit, decimals, x, y, steps, w=6,
             },
             "overrides": [],
         },
-        "gridPos": {"h": 4, "w": w, "x": x, "y": y},
+        "gridPos": {"h": h, "w": w, "x": x, "y": y},
         "id": id_,
         "options": {
             "colorMode": color_mode,
@@ -244,9 +322,12 @@ BARS = {"id": "custom.drawStyle", "value": "bars"}
 # not a bonus, it is a data problem).
 NEUTRAL = [{"color": "text", "value": None}]
 LOSS_STEPS = [{"color": "orange", "value": None}, {"color": "text", "value": 0}]
+# Red again above 100: once the delta-SoC correction is applied, a battery
+# giving back more than was available to give is a data fault, not a good week.
 EFF_STEPS = [{"color": "red", "value": None},
              {"color": "orange", "value": 90},
-             {"color": "green", "value": 95}]
+             {"color": "green", "value": 95},
+             {"color": "red", "value": 100}]
 
 panels = []
 
@@ -259,7 +340,9 @@ panels.append(stat(
     "its energy balance closes by construction and no loss can appear in it.\n\n"
     "It is a difference of two load figures, not a directly attributed physical loss -- it "
     "also contains anything AlphaESS meters on a different CT than the residual sees. "
-    "Around 1-2.7 kWh a day on this system.",
+    "Around 1-2.7 kWh a day on this system.\n\n"
+    "Sums only the days actually stored. Check 'Days missing' before reading this as a "
+    "total for the whole picked range.",
     sumOf("conversion_loss_kwh", "conversion"), "kwatth", 2, 0, 0, LOSS_STEPS))
 
 panels.append(stat(
@@ -269,7 +352,8 @@ panels.append(stat(
     "over a window whose start and end SoC match.\n\n"
     "Written only when BATTERY_CAPACITY_KWH is configured. Single days can come out "
     "negative -- SoC is a BMS estimate, not a coulomb count, and it is nonlinear near the "
-    "top and bottom of the range. That averages out over a week; do not read one day.",
+    "top and bottom of the range. That averages out over a week; do not read one day.\n\n"
+    "Sums only the days actually stored -- see 'Days missing'.",
     sumOf("battery_loss_kwh", "battery"), "kwatth", 2, 6, 0, LOSS_STEPS))
 
 panels.append(stat(
@@ -277,7 +361,8 @@ panels.append(stat(
     "The two added. They do not double-count: the battery term is measured at the battery "
     "(eCharge/eDischarge reproduce this repo's own integration of battery_power_w to within "
     "1.4% over 19 days), and the conversion term is measured entirely outside it, as the "
-    "gap between two independent load figures.",
+    "gap between two independent load figures.\n\n"
+    "Sums only the days actually stored -- see 'Days missing'.",
     sumOf("total_loss_kwh", "total"), "kwatth", 2, 12, 0, LOSS_STEPS))
 
 panels.append(stat(
@@ -290,19 +375,43 @@ panels.append(stat(
     JOB_AGE, "s", 0, 18, 0,
     [{"color": "green", "value": None},
      {"color": "orange", "value": JOB_AGE_AMBER_S},
-     {"color": "red", "value": JOB_AGE_RED_S}]))
+     {"color": "red", "value": JOB_AGE_RED_S}],
+    h=2))
+
+# Shares the fourth column with Job age, half-height each: the two answer the
+# same question from opposite ends. Job age catches a job that stopped running;
+# this catches one that ran and stored nothing, which leaves every total on the
+# board looking healthy and quietly short.
+panels.append(stat(
+    13, "Days missing",
+    "Days in the picked range with no daily_energy row, i.e. days the totals above do not "
+    "include. A day whose data failed the gate in efficiency.py is not stored at all, and "
+    "a sum over what is there renders exactly like a complete one -- so a 14-day range can "
+    "quietly be reporting eleven.\n\n"
+    "Which days are missing is visible as the gaps in 'Loss per day' and as absent rows in "
+    "'Day by day'; why is in the collector logs. Today never has a row (efficiency.py runs "
+    "on whole days) and is not counted here.",
+    DAYS_MISSING, "none", 0, 18, 2,
+    [{"color": "green", "value": None},
+     {"color": "orange", "value": 1},
+     {"color": "red", "value": 3}],
+    h=2))
 
 # --- Row 2: the ratios, and the correction the battery figure rests on ------------------
 panels.append(stat(
     5, "Round-trip efficiency",
-    "Battery discharge divided by battery charge over the range, from AlphaESS's own daily "
-    "counters. Independent of everything else here, which makes it the sanity check on the "
-    "whole pipeline: measured directly from power_readings over a 20-day SoC-matched "
-    "window it is 96.15%, so a number far from that means the pipeline is wrong, not the "
-    "battery.\n\n"
-    "Uncorrected for delta SoC, so a short range that ends fuller than it started reads "
-    "low. Use a week or more.",
-    ratioOf("discharge_kwh_api", "charge_kwh_api", "round-trip"), "percent", 2,
+    "Battery discharge over the range divided by what was available to give back: charge "
+    "minus the energy the battery ended up down by (delta SoC x capacity). From AlphaESS's "
+    "own daily counters, so it is independent of the conversion figure and is the sanity "
+    "check on the whole pipeline: measured directly from power_readings over a 20-day "
+    "SoC-matched window it is 96.15%, so a number far from that means the pipeline is "
+    "wrong, not the battery.\n\n"
+    "The SoC term is the same correction the battery-loss tile carries. Without it this is "
+    "an efficiency only over a window that starts and ends at the same SoC: a range ending "
+    "well below where it started returns more than it took in and reads above 100%, which "
+    "looks like broken data and is not. Falls back to the raw discharge/charge ratio when "
+    "BATTERY_CAPACITY_KWH is unset and there is no delta_soc_kwh to correct with.",
+    ROUND_TRIP, "percent", 2,
     0, 4, EFF_STEPS))
 
 panels.append(stat(
@@ -315,9 +424,13 @@ panels.append(stat(
 panels.append(stat(
     7, "Delta SoC over range",
     "Net energy the battery gained or lost over the picked range. The battery-loss figure "
-    "is charge - discharge - this, so showing it makes the correction visible instead of "
-    "implied: when it is large, the loss number is leaning on BATTERY_CAPACITY_KWH being "
-    "right. Verify that with `efficiency.py --system-facts`.",
+    "is charge - discharge - this, and round-trip efficiency is discharge / (charge - "
+    "this), so showing it makes the correction visible instead of implied: when it is "
+    "large, both of those numbers are leaning on BATTERY_CAPACITY_KWH being right. Verify "
+    "that with `efficiency.py --system-facts`.\n\n"
+    "Summed from per-day intra-day deltas, so it only telescopes to the range's true "
+    "start-to-end change while the days are contiguous. With 'Days missing' above zero it "
+    "is missing the steps across the gaps.",
     sumOf("delta_soc_kwh", "delta SoC"), "kwatth", 2, 12, 4, NEUTRAL))
 
 panels.append(stat(
@@ -517,7 +630,10 @@ dashboard = {
     # line. The symptom is a fix that appears not to have worked.
     # 2: title drops the "AlphaESS" prefix, as every dashboard here did. The uid is
     #    unchanged, so /d/alphaess-energy-losses and every link to it still resolve.
-    "version": 2,
+    # 3: round-trip efficiency divides by charge - dSoC instead of charge, so a range that
+    #    ends emptier than it started stops reading above 100%; new "Days missing" stat
+    #    under a half-height Job age, so totals over a gapped range say so.
+    "version": 3,
     "weekStart": "",
 }
 
