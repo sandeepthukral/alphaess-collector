@@ -292,6 +292,54 @@ giving up, which is longer than Docker's default 10 s grace. A stop that took th
 full 30 s and still did not release means the inverter was not answering at all, and
 the next question is whether anything else is holding its single Modbus connection.
 
+## Control panel
+
+A small web UI, `controlpanel` + `nginx`, wrapping the console operations above (start/stop
+dispatch, backfills, the reliability scripts, the dispatch-live toggle) so they don't each
+need SSH and the right incantation from memory. It is not new dispatch logic — every action
+it exposes runs one of the exact commands already documented in this file.
+
+**This is now the second thing exposed to the LAN, besides Grafana.** It sits behind nginx
+basic auth; there is no session/login code of its own to maintain.
+
+1. Generate the basic-auth file (bcrypt, not the weaker default):
+   ```sh
+   cd /volume1/docker/alphaess-collector
+   sudo docker run --rm httpd:alpine htpasswd -Bbn <user> <password> > controlpanel/.htpasswd
+   ```
+2. Mint `INFLUX_TOKEN_CONTROLPANEL` the same way as the other tokens above (`-d "controlpanel:
+   rw alphaess"`), and set it in `.env`.
+3. Set `HOST_REPO_PATH` in `.env` to this checkout's absolute path **on the host**, e.g.
+   `/volume1/docker/alphaess-collector` — not a path inside any container. `controlpanel`
+   drives `docker compose` from inside its own container over the mounted Docker socket, and
+   compose resolves relative paths in `docker-compose.yml` against this before sending them to
+   the daemon, which can only mount what exists on the host. Confirm it with `pwd` in the
+   checkout, not by guessing.
+4. Copy `deploy/controlpanel.env.example` to `deploy/controlpanel.env` (gitignored) and fill
+   in the real values for the "dispatch's own variables" section — copy them straight from the
+   real `.env`. **Do not** put `ALPHAESS_APP_SECRET`, `MIJNBATTERIJ_API_KEY`, or any other
+   service's InfluxDB token in this file: it exists specifically so `controlpanel` never has
+   to read them. See the comment at the top of that file for why it exists and what breaks if
+   a key is missing — `tests/test_controlpanel_env_completeness.py` catches a missing key, not
+   a wrong value, so double-check the dispatch-scoped values by eye against `.env`.
+5. `sudo docker compose up -d controlpanel nginx`, then browse to
+   `http://<nas>:${CONTROLPANEL_PORT:-8090}/`.
+
+**Verify the live toggle by hand on the real NAS before trusting it** — this is the one
+mechanism in this feature that can't be fully proven out in local dev, because it depends on
+Docker-outside-of-Docker path resolution against the real host filesystem. From the `/live`
+page, toggle to live and back to dry run once against a stack you are watching, and confirm
+with `docker inspect dispatch | grep DISPATCH_LIVE` that the container's actual environment
+changed both times — not just that the page said so.
+
+Every toggle attempt, accepted or rejected, is written to the `controlpanel_audit`
+measurement (`action=dispatch_live`, fields `from_state`/`to_state`/`accepted`/`reason`) —
+chartable in Grafana, and the first place to look if a toggle happened that nobody meant.
+
+Deferred to a later iteration, not designed here: a live log tail, a genuine scheduler-level
+hold/pause flag (that one needs new dispatch code, unlike everything else on this page), and
+a backup-trigger/status view.
+
 ## Battery-savings pricing jobs
 
 The **Battery Savings** dashboard reads a `daily_cost` measurement that is _not_
@@ -1524,6 +1572,7 @@ Every service gets a token scoped to what it actually does:
 | `INFLUX_TOKEN_GRAFANA` | read on every bucket it charts | Read-only. Anyone who reaches the Grafana UI can issue arbitrary Flux through the datasource proxy, so this is the one most worth keeping narrow. |
 | `INFLUX_TOKEN_DISPATCH` | read `planning`, read + write `alphaess` | Reads the plan the translator consumes and writes the `dispatch_state` readback behind the dashboard's dispatch panels. The only process in the stack that reads another project's bucket, which is why it is not the collector's token. **Needed before any compose subcommand works**, including ones that have nothing to do with dispatch — see below. |
 | `INFLUX_TOKEN_MIJNBATTERIJ` | read + write `alphaess` | Reads `power_readings`, `market_price`, `daily_cost` and `daily_energy` to build the mijnbatterij.nl payload; writes only its own `mijnbatterij_submit` and `mijnbatterij_rank` status series. Separate from the collector's because it is the one token in the stack that is also the credential for an outbound public submission — revoking it stops the publishing without touching collection. **The one token without a `:?` guard**, because that service is opt-in: see below. |
+| `INFLUX_TOKEN_CONTROLPANEL` | read + write `alphaess` | Runs the control panel's dashboard status queries and writes the `controlpanel_audit` measurement for every dispatch-live toggle attempt. Its own token rather than the dispatcher's or Grafana's, so it can be revoked without touching either. See ["Control panel"](#control-panel). |
 
 None of them has a fallback — except `INFLUX_TOKEN_MIJNBATTERIJ`, below.
 Compose fails to start and names the missing variable. A service that quietly
@@ -1585,6 +1634,10 @@ sudo docker compose exec -T influxdb influx auth create \
 sudo docker compose exec -T influxdb influx auth create \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "uptime-kuma: r alphaess" \
   --read-bucket "$ALPHAESS_ID"
+
+sudo docker compose exec -T influxdb influx auth create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "controlpanel: rw alphaess" \
+  --read-bucket "$ALPHAESS_ID" --write-bucket "$ALPHAESS_ID"
 ```
 
 Copy each printed token into the matching `.env` variable, then `sudo docker

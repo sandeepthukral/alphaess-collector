@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Reliability{% endblock %}
+{% block content %}
+<h1>Reliability</h1>
+
+<h2>Is it deciding? (right now)</h2>
+<form method="post" action="/api/reliability/tick">
+  <button type="submit">Run scripts/is-it-deciding.py</button>
+</form>
+{% if tick %}
+  <pre class="{{ '' if tick.ok else 'bad' }}">{{ tick.stdout }}{{ tick.stderr }}</pre>
+{% endif %}
+
+<h2>Review dry run (whole day)</h2>
+<form method="post" action="/api/reliability/review-dry-run">
+  <button type="submit">Run scripts/review-dry-run.py</button>
+</form>
+{% if review %}
+  {% if review.ok %}
+    <p class="ok">generated -- <a href="/reliability/review-dry-run.html" target="_blank">open report</a></p>
+  {% else %}
+    <pre class="bad">{{ review.stdout }}{{ review.stderr }}</pre>
+  {% endif %}
+{% endif %}
+{% endblock %}

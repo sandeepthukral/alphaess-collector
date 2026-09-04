@@ -1,0 +1,13 @@
+body { font-family: system-ui, sans-serif; margin: 0; background: #f7f7f7; color: #222; }
+nav { background: #222; padding: 0.75rem 1rem; }
+nav a { color: #eee; margin-right: 1.5rem; text-decoration: none; font-weight: 600; }
+nav a.live-link { color: #ffb0b0; }
+main { max-width: 60rem; margin: 1.5rem auto; padding: 0 1rem; }
+pre { background: #fff; border: 1px solid #ddd; padding: 0.75rem; overflow-x: auto; }
+.ok { color: #157a15; }
+.bad { color: #b00020; }
+.banner { padding: 1rem; margin-bottom: 1rem; border-radius: 4px; font-weight: 700; font-size: 1.1rem; }
+.banner.ok { background: #e4f5e4; }
+.banner.bad { background: #fbe4e4; }
+form { margin-bottom: 1rem; }
+label { display: block; margin-bottom: 0.5rem; }

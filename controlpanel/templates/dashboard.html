@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block content %}
+<h1>Dispatch</h1>
+{% if not status.exists %}
+  <p class="bad">dispatch container not found: {{ status.error }}</p>
+{% else %}
+  <p>
+    State: <strong>{{ "running" if status.running else "stopped" }}</strong>
+    &middot;
+    Mode: <strong class="{{ 'bad' if status.live else 'ok' }}">
+      {{ "LIVE" if status.live else "dry-run" }}
+    </strong>
+    (started {{ status.started_at or "-" }})
+  </p>
+  <form method="post" action="/api/dispatch/start" style="display:inline">
+    <button type="submit" {{ "disabled" if status.running else "" }}>Start</button>
+  </form>
+  <form method="post" action="/api/dispatch/stop" style="display:inline">
+    <button type="submit" {{ "disabled" if not status.running else "" }}>Stop</button>
+  </form>
+{% endif %}
+
+<h2>Last tick</h2>
+{% if tick.ok %}
+  <pre>{{ tick.stdout }}</pre>
+{% else %}
+  <pre class="bad">{{ tick.stderr or tick.stdout }}</pre>
+{% endif %}
+
+<h2>Latest mijnbatterij submission</h2>
+{% if submission %}
+  <p>
+    {{ submission.time }} &middot;
+    outcome: <strong class="{{ 'ok' if submission.outcome == 'ok' else 'bad' }}">
+      {{ submission.outcome }}
+    </strong>
+    {% if submission.status_code is defined %}(status {{ submission.status_code | int }}){% endif %}
+  </p>
+{% else %}
+  <p>no submission in the last 26h</p>
+{% endif %}
+{% endblock %}

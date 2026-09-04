@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Live toggle{% endblock %}
+{% block content %}
+<h1>Dispatch live toggle</h1>
+
+<div class="banner {{ 'bad' if status.live else 'ok' }}">
+  {% if not status.exists %}
+    dispatch container not found: {{ status.error }}
+  {% elif status.live %}
+    DISPATCH IS LIVE -- writing to the inverter.
+  {% else %}
+    Dispatch is in DRY RUN -- deciding, not writing.
+  {% endif %}
+</div>
+
+{% if error %}<p class="bad">{{ error }}</p>{% endif %}
+
+{% if status.exists and not status.live %}
+<h2>Go live</h2>
+<p>Confirm the AlphaESS app's own price control is OFF before doing this -- two controllers
+   asserting the same registers is the one failure the fail-safe cannot cover.</p>
+<form method="post" action="/api/live">
+  <input type="hidden" name="target" value="live">
+  <label>Type <code>MAKE DISPATCH LIVE</code> to confirm:
+    <input type="text" name="confirmation" required autocomplete="off">
+  </label>
+  <button type="submit">Go live</button>
+</form>
+{% endif %}
+
+{% if status.exists and status.live %}
+<h2>Return to dry run</h2>
+<form method="post" action="/api/live">
+  <input type="hidden" name="target" value="dry-run">
+  <label>Type <code>MAKE DISPATCH DRY-RUN</code> to confirm:
+    <input type="text" name="confirmation" required autocomplete="off">
+  </label>
+  <button type="submit">Return to dry run</button>
+</form>
+{% endif %}
+
+<p><small>Every attempt here, accepted or rejected, is logged to the
+  <code>controlpanel_audit</code> measurement. The dispatcher's own 300s dead-man's switch
+  still applies regardless of anything on this page.</small></p>
+{% endblock %}
