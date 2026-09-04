@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Backfill{% endblock %}
+{% block content %}
+<h1>Backfill</h1>
+{% if error %}<p class="bad">{{ error }}</p>{% endif %}
+{% if result %}
+  <h2>Result ({{ "ok" if result.ok else "failed, exit " ~ result.returncode }})</h2>
+  <pre>{{ result.stdout }}{{ result.stderr }}</pre>
+{% endif %}
+
+<h2>Prices</h2>
+<form method="post" action="/api/backfill/prices">
+  <label>Start <input type="date" name="start" required></label>
+  <label>End <input type="date" name="end" required></label>
+  <button type="submit">Run</button>
+</form>
+
+<h2>Pricing</h2>
+<form method="post" action="/api/backfill/pricing">
+  <label>Start <input type="date" name="start" required></label>
+  <label>End <input type="date" name="end" required></label>
+  <button type="submit">Run</button>
+</form>
+
+<h2>Efficiency</h2>
+<form method="post" action="/api/backfill/efficiency">
+  <label>Start <input type="date" name="start" required></label>
+  <label>End <input type="date" name="end" required></label>
+  <button type="submit">Run</button>
+</form>
+
+<h2>mijnbatterij.nl -- monthly backfill</h2>
+<form method="post" action="/api/backfill/mijnbatterij-monthly">
+  <label>Months (comma-separated, YYYY-MM)
+    <input type="text" name="months" placeholder="2026-06,2026-07" required>
+  </label>
+  <button type="submit">Run</button>
+</form>
+
+<h2>mijnbatterij.nl -- resubmit now</h2>
+<form method="post" action="/api/backfill/mijnbatterij-resubmit">
+  <button type="submit">Submit current snapshot</button>
+</form>
+{% endblock %}
