@@ -7,15 +7,56 @@ itself is never published directly. See DEPLOY.md, "Control panel".
 from __future__ import annotations
 
 import os
+import secrets
 
 import audit
 import backfill_actions
 import docker_actions
 import reliability_view
-from flask import Flask, redirect, render_template, request, send_from_directory, url_for
+from flask import (
+    Flask,
+    abort,
+    redirect,
+    render_template,
+    request,
+    send_from_directory,
+    session,
+    url_for,
+)
 from influxdb_client import InfluxDBClient
 
 app = Flask(__name__)
+# Generated once per container start, before gunicorn forks its workers, so every worker in
+# this container shares it and can read each other's session cookies. Not persisted across
+# restarts -- that's fine, a CSRF token only has to outlive the page it was rendered on, and
+# nginx's basic auth (not this cookie) is what actually gates access.
+app.secret_key = secrets.token_bytes(32)
+
+
+def _csrf_token() -> str:
+    token = session.get("csrf_token")
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
+@app.context_processor
+def _inject_csrf_token():
+    return {"csrf_token": _csrf_token()}
+
+
+@app.before_request
+def _check_csrf():
+    # nginx basic auth is what actually gates access to this app; this only stops a
+    # cross-site page from riding a logged-in browser's session to POST here, since the
+    # confirmation phrases on /api/live are hardcoded constants an attacker can already guess.
+    if request.method == "POST":
+        submitted = request.form.get("csrf_token", "")
+        expected = session.get("csrf_token", "")
+        if not expected or not secrets.compare_digest(submitted, expected):
+            abort(400, description="Missing or invalid CSRF token -- reload the page and retry.")
+
 
 INFLUX_URL = os.environ["INFLUX_URL"]
 INFLUX_ORG = os.environ.get("INFLUX_ORG", "home")
@@ -54,13 +95,25 @@ def dashboard():
 
 @app.route("/api/dispatch/start", methods=["POST"])
 def api_dispatch_start():
-    docker_actions.start_dispatch()
+    result = docker_actions.start_dispatch()
+    if not result.ok:
+        status = docker_actions.dispatch_status()
+        tick = reliability_view.is_it_deciding()
+        submission = _latest_mijnbatterij_submission()
+        return render_template("dashboard.html", status=status, tick=tick,
+                                submission=submission, error=result.stderr), 500
     return redirect(url_for("dashboard"))
 
 
 @app.route("/api/dispatch/stop", methods=["POST"])
 def api_dispatch_stop():
-    docker_actions.stop_dispatch()
+    result = docker_actions.stop_dispatch()
+    if not result.ok:
+        status = docker_actions.dispatch_status()
+        tick = reliability_view.is_it_deciding()
+        submission = _latest_mijnbatterij_submission()
+        return render_template("dashboard.html", status=status, tick=tick,
+                                submission=submission, error=result.stderr), 500
     return redirect(url_for("dashboard"))
 
 
@@ -139,8 +192,16 @@ def api_live():
             "live.html", status=status,
             error=f'Type exactly "{expected}" to confirm.'), 400
 
-    docker_actions.set_dispatch_live(target_live)
-    audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state, accepted=True)
+    result = docker_actions.set_dispatch_live(target_live)
+    audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
+                                    accepted=result.ok,
+                                    reason="" if result.ok else f"compose failed: {result.stderr}")
+    if not result.ok:
+        status = docker_actions.dispatch_status()
+        return render_template(
+            "live.html", status=status,
+            error=f"Compose recreate failed, dispatch state may be unchanged: {result.stderr}"
+        ), 500
     return redirect(url_for("live"))
 
 

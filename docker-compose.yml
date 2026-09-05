@@ -54,6 +54,10 @@ services:
 
   collector:
     build: ./collector
+    # Fixed name, not compose's default `<project>-collector-1`: controlpanel's
+    # backfill_actions.py runs `docker exec collector ...` from inside a DooD container that
+    # has no notion of this project's name, only the literal name below.
+    container_name: collector
     restart: unless-stopped
     logging: *default-logging
     environment:
@@ -204,6 +208,9 @@ services:
   # installation is created by hand in the browser -- there is no signup API.
   mijnbatterij:
     build: ./collector
+    # Fixed name -- same reasoning as `collector` above: controlpanel/backfill_actions.py
+    # execs into this container by literal name.
+    container_name: mijnbatterij
     restart: unless-stopped
     logging: *default-logging
     command: ["python", "-u", "mijnbatterij.py"]
@@ -315,6 +322,10 @@ services:
   # the collector, which cost 922 s of samples on 2026-08-10.
   dispatch:
     build: ./dispatch
+    # Fixed name -- controlpanel/docker_actions.py and DEPLOY.md's own verification commands
+    # (`docker inspect dispatch`, the live-toggle `watch` one-liner) all address this container
+    # by the literal name below, not compose's default `<project>-dispatch-1`.
+    container_name: dispatch
     restart: unless-stopped
     logging: *default-logging
     # THE KILL SWITCH NEEDS LONGER THAN DOCKER'S DEFAULT 10 s.

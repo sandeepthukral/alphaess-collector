@@ -116,5 +116,10 @@ def set_dispatch_live(live: bool) -> ActionResult:
         "--env-file", CONTROLPANEL_ENV_FILE,
         "--project-directory", HOST_REPO_PATH,
         "-p", COMPOSE_PROJECT_NAME,
-        "up", "-d", "--force-recreate", DISPATCH_CONTAINER,
+        # --no-deps: dispatch declares `depends_on: influxdb`, and without this flag
+        # `--force-recreate` also recreates influxdb -- bouncing every other service that
+        # depends on it (collector, grafana, awtrix-pusher, mijnbatterij) just to toggle a
+        # dispatch env var, and doing so against controlpanel.env's placeholder InfluxDB
+        # credentials rather than the real ones in .env.
+        "up", "-d", "--force-recreate", "--no-deps", DISPATCH_CONTAINER,
     ], timeout=120)

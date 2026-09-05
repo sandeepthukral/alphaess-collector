@@ -5,6 +5,7 @@
 
 <h2>Is it deciding? (right now)</h2>
 <form method="post" action="/api/reliability/tick">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <button type="submit">Run scripts/is-it-deciding.py</button>
 </form>
 {% if tick %}
@@ -13,6 +14,7 @@
 
 <h2>Review dry run (whole day)</h2>
 <form method="post" action="/api/reliability/review-dry-run">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <button type="submit">Run scripts/review-dry-run.py</button>
 </form>
 {% if review %}

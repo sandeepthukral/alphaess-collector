@@ -20,6 +20,7 @@
 <p>Confirm the AlphaESS app's own price control is OFF before doing this -- two controllers
    asserting the same registers is the one failure the fail-safe cannot cover.</p>
 <form method="post" action="/api/live">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="target" value="live">
   <label>Type <code>MAKE DISPATCH LIVE</code> to confirm:
     <input type="text" name="confirmation" required autocomplete="off">
@@ -31,6 +32,7 @@
 {% if status.exists and status.live %}
 <h2>Return to dry run</h2>
 <form method="post" action="/api/live">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="target" value="dry-run">
   <label>Type <code>MAKE DISPATCH DRY-RUN</code> to confirm:
     <input type="text" name="confirmation" required autocomplete="off">

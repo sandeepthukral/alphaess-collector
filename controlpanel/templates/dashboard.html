@@ -2,6 +2,9 @@
 {% block title %}Dashboard{% endblock %}
 {% block content %}
 <h1>Dispatch</h1>
+{% if error %}
+  <p class="bad">{{ error }}</p>
+{% endif %}
 {% if not status.exists %}
   <p class="bad">dispatch container not found: {{ status.error }}</p>
 {% else %}
@@ -14,9 +17,11 @@
     (started {{ status.started_at or "-" }})
   </p>
   <form method="post" action="/api/dispatch/start" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <button type="submit" {{ "disabled" if status.running else "" }}>Start</button>
   </form>
   <form method="post" action="/api/dispatch/stop" style="display:inline">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <button type="submit" {{ "disabled" if not status.running else "" }}>Stop</button>
   </form>
 {% endif %}

@@ -411,6 +411,18 @@ identical either way.
     AlphaESS app's own price control already off**, per the warning on the `/live` page
     itself — two controllers asserting the same registers is the one failure the dead man's
     switch cannot cover.
+
+    **The override file persists after this — remember it exists.** Each toggle rewrites
+    `deploy/dispatch-live.override.yml` and leaves it there; it is only ever read via the
+    explicit `-f` the panel itself passes, deliberately never the auto-loaded
+    `docker-compose.override.yml` name, so it cannot change what a bare `sudo docker compose
+    up -d` does. But that cuts both ways: a bare `up -d dispatch` run by hand after using the
+    panel recreates dispatch from `.env`'s own `DISPATCH_LIVE` alone, silently undoing
+    whatever the panel last set. If you used the panel to go dry-run for maintenance and later
+    run a plain `up -d` (or `up -d dispatch`) with `.env` still saying `DISPATCH_LIVE=1`, the
+    battery goes back live with no confirmation prompt. Check `/live` (or `docker inspect
+    dispatch | grep DISPATCH_LIVE`) after any manual `up -d` if the panel has ever been used to
+    change this container's live state.
 13. **The audit trail landed:**
     ```sh
     sudo docker compose exec -T influxdb influx query \
