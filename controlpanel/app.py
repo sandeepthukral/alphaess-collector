@@ -95,11 +95,15 @@ def _latest_mijnbatterij_submission() -> dict | None:
     # Influx is not on the critical path for start/stop -- those act on the dispatch
     # container directly, over the Docker socket, with no Influx involved. Losing this
     # widget must never take the whole dashboard (and its start/stop buttons) down with it,
-    # which is exactly when an operator needs them most.
+    # which is exactly when an operator needs them most. But a query failure (dead
+    # InfluxDB, a revoked token, a broken Flux query after an edit) has to come back as a
+    # DISTINCT state from "no submission" -- collapsing them into the same `None` had this
+    # rendering as the positive claim "no submission in the last 26h", which sends whoever
+    # is debugging a real Influx outage looking at the wrong service entirely.
     try:
         tables = _query_api.query(flux)
-    except Exception:
-        return None
+    except Exception as e:
+        return {"query_error": str(e)}
     for table in tables:
         for record in table.records:
             return {
@@ -241,7 +245,20 @@ def api_live():
                                         accepted=True, reason="already in the requested state")
         return redirect(url_for("live"))
 
-    result = docker_actions.set_dispatch_live(target_live)
+    # set_dispatch_live() writes the override file (makedirs/open/yaml.safe_dump) BEFORE it
+    # ever runs `docker compose` -- a missing or read-only `deploy/` would raise there, and
+    # an uncaught exception at this point would 500 with no audit point and no stdout line,
+    # which is exactly the silent-toggle-attempt gap audit.py exists to close. A confirmed
+    # go-live attempt has to show up in the trail even when it fails before touching Docker.
+    try:
+        result = docker_actions.set_dispatch_live(target_live)
+    except Exception as e:
+        audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
+                                        accepted=False, reason=f"exception before compose: {e}")
+        return render_template(
+            "live.html", status=status,
+            error=f"Could not attempt the toggle: {e}"), 500
+
     # Never trust `result.ok` alone for the audit: a client-side timeout here (see
     # docker_actions.set_dispatch_live) kills our `docker compose` CLI, not the recreate the
     # daemon is carrying out -- that can go on to succeed after we already reported failure.

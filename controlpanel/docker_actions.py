@@ -68,18 +68,31 @@ def dispatch_status() -> dict:
     if not proc.ok:
         return {"exists": False, "running": False, "live": None, "error": proc.stderr}
 
-    info = json.loads(proc.stdout)[0]
-    env_lines = info["Config"]["Env"]
-    live_raw = next((ln.split("=", 1)[1] for ln in env_lines
-                      if ln.startswith("DISPATCH_LIVE=")), "0")
-    live = live_raw.strip().lower() in ("1", "true", "yes", "on")
-    return {
-        "exists": True,
-        "running": info["State"]["Running"],
-        "started_at": info["State"].get("StartedAt"),
-        "live": live,
-        "live_raw": live_raw,
-    }
+    # `dispatch_status()` backs the dashboard's Start/Stop buttons and the live-toggle
+    # banner -- both need to render even if `docker inspect`'s own output can't be parsed
+    # (an unexpected daemon/CLI version skew, truncated output). Without this, a bad parse
+    # here 500s the whole page instead of just leaving the mode/state unknown, which is
+    # exactly the state operators most need those buttons to survive.
+    try:
+        info = json.loads(proc.stdout)[0]
+        env_lines = info["Config"]["Env"]
+        live_raw = next((ln.split("=", 1)[1] for ln in env_lines
+                          if ln.startswith("DISPATCH_LIVE=")), "0")
+        live = live_raw.strip().lower() in ("1", "true", "yes", "on")
+        return {
+            "exists": True,
+            "running": info["State"]["Running"],
+            "started_at": info["State"].get("StartedAt"),
+            "live": live,
+            "live_raw": live_raw,
+        }
+    except (ValueError, KeyError, IndexError, TypeError) as e:
+        # `exists: False` here, even though `docker inspect` itself succeeded -- the
+        # dashboard and live-toggle templates already treat that as "state unknown, don't
+        # claim dry-run/stopped" (see live.html's amber banner), which is exactly right when
+        # this container's actual state genuinely can't be determined from what came back.
+        return {"exists": False, "running": False, "live": None,
+                "error": f"could not parse `docker inspect` output: {e}"}
 
 
 def start_dispatch() -> ActionResult:

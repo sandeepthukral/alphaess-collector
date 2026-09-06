@@ -29,7 +29,9 @@
 <p><a href="/reliability">Check whether it's deciding right now &rarr;</a></p>
 
 <h2>Latest mijnbatterij submission</h2>
-{% if submission %}
+{% if submission and submission.query_error is defined %}
+  <p class="bad">could not query InfluxDB: {{ submission.query_error }}</p>
+{% elif submission %}
   <p>
     {{ submission.time }} &middot;
     outcome: <strong class="{{ 'ok' if submission.outcome == 'ok' else 'bad' }}">

@@ -328,8 +328,15 @@ identical either way.
    ```
    The ones this feature adds: `INFLUX_TOKEN_CONTROLPANEL`, `HOST_REPO_PATH`,
    `COMPOSE_PROJECT_NAME`, `CONTROLPANEL_PORT`. Add each to the real `.env` — see steps 3-5
-   below for what to put in the first two; `COMPOSE_PROJECT_NAME` and `CONTROLPANEL_PORT` can
-   take their `.env.example` defaults unless something on the NAS already uses port 8090.
+   below for what to put in the first three. `CONTROLPANEL_PORT` is the only one of the four
+   safe to leave at its `.env.example` default, unless something on the NAS already uses
+   port 8090. **`COMPOSE_PROJECT_NAME` is NOT safe to default** — do not skip step 3 below.
+   This key isn't new to controlpanel's own compose calls, it changes what every `docker
+   compose` command on this host resolves container and volume names to. Guessing wrong
+   (or taking the `.env.example` default when it doesn't match) makes the very next `docker
+   compose up -d` build an entire second stack under the wrong project name — a brand new,
+   empty `alphaess-influxdb-data` volume included — alongside the real one, rather than
+   operating on it.
 3. **Confirm the compose project name** compose already uses, rather than guessing:
    ```sh
    sudo docker compose ls
@@ -375,11 +382,15 @@ identical either way.
    InfluxDB token in this file; it exists specifically so `controlpanel` never has to read
    them. `tests/test_controlpanel_env_completeness.py` catches a *missing* key, not a *wrong*
    value, so double-check the dispatch-scoped values by eye against `.env`.
-8. **Build and start the two new services** — named explicitly, so this cannot touch anything
-   else in the stack:
+8. **Build and start the two new services** — named explicitly so this only ever creates
+   `controlpanel` and `nginx` themselves, and `--no-deps` so it doesn't also touch
+   `influxdb` (`controlpanel` declares `depends_on: influxdb`, same reasoning as `--no-deps`
+   on the live-toggle's own compose call in `docker_actions.py` — without it this could
+   recreate `influxdb` too, bouncing `collector`, `dispatch`, `grafana` and `awtrix-pusher`
+   along with it):
    ```sh
    sudo docker compose build controlpanel
-   sudo docker compose up -d controlpanel nginx
+   sudo docker compose up -d --no-deps controlpanel nginx
    ```
 9. **Recreate `dispatch`, `collector` and `mijnbatterij`** so their container names actually
    match the fixed ones controlpanel addresses by literal name (`docker_actions.py`,

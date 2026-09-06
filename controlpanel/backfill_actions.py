@@ -12,8 +12,12 @@ import re
 import subprocess
 from dataclasses import dataclass
 
-DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
+# \Z, not `$` -- `$` matches immediately before a trailing newline too, so a value ending
+# "\n" (e.g. a form field submitted with one) would pass this "strict" boundary check and
+# reach argv with the newline still attached. Not an injection risk either way (argv, no
+# shell), just a validator that doesn't actually enforce the shape it claims to.
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\Z")
+MONTH_RE = re.compile(r"^\d{4}-\d{2}\Z")
 
 
 class InvalidArgument(ValueError):
@@ -89,4 +93,9 @@ def mijnbatterij_monthly(months: list[str]) -> ActionResult:
 
 
 def mijnbatterij_resubmit_now() -> ActionResult:
-    return _docker_exec("mijnbatterij", ["python", "mijnbatterij.py", "--once"], timeout=60)
+    # 180s, not 60s: `--once` queries InfluxDB and then makes up to
+    # MIJNBATTERIJ_MAX_RETRIES HTTP calls to mijnbatterij.nl at
+    # MIJNBATTERIJ_TIMEOUT_SECONDS (15s) each -- a 60s ceiling could SIGTERM it mid-retry
+    # after the platform already accepted the submission, and the panel would report
+    # "timed out" for a resubmit that in fact went through, inviting a duplicate click.
+    return _docker_exec("mijnbatterij", ["python", "mijnbatterij.py", "--once"], timeout=180)
