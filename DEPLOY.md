@@ -301,10 +301,12 @@ it exposes runs one of the exact commands already documented in this file.
 
 **This is now the second thing exposed to the LAN, besides Grafana.** It sits behind nginx
 basic auth; there is no session/login code of its own to maintain. Two brand-new services
-(`controlpanel`, `nginx`) and one brand-new volume (`alphaess-controlpanel-data`) — nothing
-about `dispatch`, `collector` or `mijnbatterij`'s own service blocks changes, so none of the
-three caveats in ["Updating"](#updating) applies and the existing stack keeps running
-untouched while you bring this up.
+(`controlpanel`, `nginx`) and one brand-new volume (`alphaess-controlpanel-data`) — but this
+change ALSO pins `container_name:` on `dispatch`, `collector` and `mijnbatterij` themselves
+(step 8 below explains why), which is a config change to those three services too. None of
+the three caveats in ["Updating"](#updating) applies (no `networks:`/`volumes:` change here,
+and none of the three ships provisioning files), but they do each need an explicit recreate
+once, which is its own step below — they will not just keep running untouched.
 
 ### First-time setup, after the PR merges
 
@@ -350,7 +352,11 @@ identical either way.
    "controlpanel: rw alphaess"`; see ["Scoped tokens"](#scoped-tokens) for the full
    `influx auth create` recipe), and set it in `.env`.
 6. **Generate the basic-auth file** (bcrypt, not the weaker default — plain `htpasswd -c` can
-   pick a weaker scheme depending on the build):
+   pick a weaker scheme depending on the build). **Do this before any bare `sudo docker
+   compose up -d` runs on this checkout again** — `nginx`'s compose service bind-mounts this
+   path, and if it doesn't exist yet Docker creates it as an empty *directory* instead, which
+   then makes nginx fail to start with a confusing mount error until you `rmdir` it and redo
+   this step:
    ```sh
    sudo docker run --rm httpd:alpine htpasswd -Bbn <user> <password> > controlpanel/.htpasswd
    ```
@@ -375,17 +381,45 @@ identical either way.
    sudo docker compose build controlpanel
    sudo docker compose up -d controlpanel nginx
    ```
+9. **Recreate `dispatch`, `collector` and `mijnbatterij`** so their container names actually
+   match the fixed ones controlpanel addresses by literal name (`docker_actions.py`,
+   `backfill_actions.py`) — without this, everything on the dashboard and `/backfill` fails
+   with "No such container", because compose's default names
+   (`alphaess-collector-dispatch-1`, etc.) are still what's actually running:
+   ```sh
+   sudo docker compose up -d --no-deps dispatch mijnbatterij
+   ```
+   `--no-deps` so this doesn't also touch `influxdb`. `dispatch` and `mijnbatterij` are cheap
+   to recreate — dispatch just re-reads `.env`'s `DISPATCH_LIVE` (dry run stays dry run) and
+   mijnbatterij is a stateless poller. **`collector` is not cheap**: recreating it stops
+   collection for as long as the new container takes to start, which cost 922 s of samples on
+   2026-08-10 (see the `dispatch` service's own comment in `docker-compose.yml`). Recreate it
+   separately, deliberately, when a short gap is acceptable — not folded into the command
+   above:
+   ```sh
+   sudo docker compose up -d --no-deps collector
+   ```
+   Confirm all three actually got the new name, not just a config-hash no-op:
+   ```sh
+   sudo docker compose ps dispatch collector mijnbatterij
+   docker inspect dispatch collector mijnbatterij --format '{{.Name}}'
+   ```
+   The last command should print `/dispatch`, `/collector`, `/mijnbatterij` — anything else
+   means the recreate did not take and controlpanel will still fail to find them. If you
+   later pull a plain `git pull && docker compose up -d --build` for an unrelated change and
+   these three were never recreated this way, they still won't have the fixed names — this
+   step has to happen once, deliberately, not as a side effect of a routine update.
 
 ### Verify before trusting it
 
-9. **Containers are actually up:**
+10. **Containers are actually up:**
    ```sh
    sudo docker compose ps controlpanel nginx
    sudo docker compose logs --tail 50 controlpanel nginx
    ```
    Both should show `Up`, and controlpanel's log should show gunicorn's boot lines with no
    traceback.
-10. **The dashboard is reachable and honest:**
+11. **The dashboard is reachable and honest:**
     ```sh
     curl -u <user>:<password> -o /dev/null -w '%{http_code}\n' http://localhost:${CONTROLPANEL_PORT:-8090}/
     ```
@@ -394,10 +428,10 @@ identical either way.
     the dashboard match what `sudo docker compose ps dispatch` and `docker inspect dispatch |
     grep DISPATCH_LIVE` say directly — the dashboard reads the same `docker inspect`, so a
     mismatch here means something is wrong with the container, not the page.
-11. **Reliability scripts run from inside the container**, not just on your laptop: click
+12. **Reliability scripts run from inside the container**, not just on your laptop: click
     "Run scripts/is-it-deciding.py" on `/reliability` and confirm it prints the same thing
     `scripts/is-it-deciding.py --token-env INFLUX_TOKEN_GRAFANA` does from your Mac.
-12. **The live toggle mechanism — the one part of this feature that can't be fully proven out
+13. **The live toggle mechanism — the one part of this feature that can't be fully proven out
     in local dev**, because it depends on Docker-outside-of-Docker path resolution against the
     real host filesystem. From `/live`, toggle to live and immediately back to dry run once,
     watching the whole time:
@@ -423,13 +457,13 @@ identical either way.
     battery goes back live with no confirmation prompt. Check `/live` (or `docker inspect
     dispatch | grep DISPATCH_LIVE`) after any manual `up -d` if the panel has ever been used to
     change this container's live state.
-13. **The audit trail landed:**
+14. **The audit trail landed:**
     ```sh
     sudo docker compose exec -T influxdb influx query \
       -t "$INFLUX_TOKEN_CONTROLPANEL" -o "$INFLUX_ORG" \
       'from(bucket:"alphaess") |> range(start: -1h) |> filter(fn: (r) => r._measurement == "controlpanel_audit")'
     ```
-    Should show one row per toggle attempt from step 12, each with `accepted=true`.
+    Should show one row per toggle attempt from step 13, each with `accepted=true`.
 
 ### If something's wrong
 

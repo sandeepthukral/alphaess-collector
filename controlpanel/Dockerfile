@@ -37,7 +37,15 @@ COPY static/ static/
 # gunicorn, not `flask run` / app.run(): the dev server is single-threaded, so one
 # multi-minute backfill (docker_actions.py / backfill_actions.py time out at up to 1800s)
 # would hang every other page -- including the dashboard's own status poll -- for as long
-# as it ran. --timeout matches the longest allowed backfill so gunicorn does not recycle
-# the worker mid-command.
+# as it ran. --timeout gives the longest allowed backfill (1800s) headroom before gunicorn
+# recycles the worker, rather than racing it -- a worker killed mid-`docker exec` would
+# surface as a bare 502 instead of backfill_actions.py's own timeout message.
+#
+# --preload: app.py generates app.secret_key at import time. Without --preload gunicorn
+# forks each worker BEFORE importing the app, so the two workers would import it
+# separately and end up with two different secret keys -- a session cookie (and the CSRF
+# token it carries) signed by worker A would fail to validate on a request nginx happens
+# to route to worker B. --preload imports once in the master, before forking, so both
+# workers share the same key.
 CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", \
-     "--timeout", "1800", "app:app"]
+     "--timeout", "2100", "--preload", "app:app"]

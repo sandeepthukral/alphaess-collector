@@ -54,7 +54,12 @@ def _check_csrf():
     if request.method == "POST":
         submitted = request.form.get("csrf_token", "")
         expected = session.get("csrf_token", "")
-        if not expected or not secrets.compare_digest(submitted, expected):
+        # compare_digest on `str` requires both sides to be ASCII-only or it raises
+        # TypeError -- a submitted value with a stray non-ASCII byte would 500 instead of
+        # the intended 400. Comparing as bytes accepts anything.
+        if not expected or not secrets.compare_digest(
+            submitted.encode("utf-8"), expected.encode("utf-8")
+        ):
             abort(400, description="Missing or invalid CSRF token -- reload the page and retry.")
 
 
@@ -68,21 +73,42 @@ _query_api = _influx.query_api()
 
 
 def _latest_mijnbatterij_submission() -> dict | None:
+    # `outcome` is a TAG on mijnbatterij_submit (collector/mijnbatterij.py), so `submitted`
+    # and `status_code` each land in a SEPARATE table per distinct outcome value seen in the
+    # window (e.g. one table for "ok", another for a stale "error" from hours earlier).
+    # `last()` alone picks the latest row WITHIN each of those tables, and the loop below
+    # then just overwrites the result dict in whatever order Influx returns the tables --
+    # an old "error" table iterated after a newer "ok" one would win. `pivot` first merges
+    # the two fields of the same point into one row (keyed on time), `group()` collapses
+    # every outcome's table into one, and `sort`+`limit` then picks the single globally
+    # latest row across all of them.
     flux = f'''
     from(bucket: "{INFLUX_BUCKET}")
       |> range(start: -26h)
       |> filter(fn: (r) => r._measurement == "mijnbatterij_submit")
       |> filter(fn: (r) => r._field == "submitted" or r._field == "status_code")
-      |> last()
+      |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+      |> group()
+      |> sort(columns: ["_time"], desc: true)
+      |> limit(n: 1)
     '''
-    tables = _query_api.query(flux)
-    result: dict = {}
+    # Influx is not on the critical path for start/stop -- those act on the dispatch
+    # container directly, over the Docker socket, with no Influx involved. Losing this
+    # widget must never take the whole dashboard (and its start/stop buttons) down with it,
+    # which is exactly when an operator needs them most.
+    try:
+        tables = _query_api.query(flux)
+    except Exception:
+        return None
     for table in tables:
         for record in table.records:
-            result["time"] = record.get_time()
-            result["outcome"] = record.values.get("outcome")
-            result[record.get_field()] = record.get_value()
-    return result or None
+            return {
+                "time": record.get_time(),
+                "outcome": record.values.get("outcome"),
+                "submitted": record.values.get("submitted"),
+                "status_code": record.values.get("status_code"),
+            }
+    return None
 
 
 @app.route("/")
