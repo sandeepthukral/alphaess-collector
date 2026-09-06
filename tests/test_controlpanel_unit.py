@@ -15,6 +15,7 @@ every test that exercises a route patches `docker_actions`/`audit`/the submissio
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,6 +26,10 @@ REPO = Path(__file__).resolve().parent.parent
 os.environ.setdefault("INFLUX_URL", "http://localhost:8086")
 os.environ.setdefault("INFLUX_TOKEN_CONTROLPANEL", "test-token")
 os.environ.setdefault("HOST_REPO_PATH", str(REPO))
+# app.py's mutating routes flock a file under /data (the real container's writable volume)
+# to serialize actions across gunicorn's worker processes -- not writable/present here.
+os.environ.setdefault("CONTROLPANEL_LOCK_FILE",
+                       str(Path(tempfile.gettempdir()) / "controlpanel-test.lock"))
 
 import app as controlpanel_app  # noqa: E402
 import backfill_actions  # noqa: E402
@@ -172,3 +177,108 @@ def test_live_toggle_audits_true_outcome_not_compose_exit_code(client):
         })
     assert resp.status_code == 302
     assert log_toggle.call_args.kwargs["accepted"] is True
+
+
+def test_live_toggle_polls_past_a_slow_daemon_side_recreate(client):
+    """The very first status read after a timed-out compose call can still show the OLD
+    state if the daemon just hasn't finished yet -- _poll_dispatch_status_until must keep
+    reading instead of deciding failure on that first stale read."""
+    token = _get_csrf_token(client)
+    stale = {"exists": True, "live": False, "running": True, "started_at": None}
+    still_stale = {"exists": True, "live": False, "running": True, "started_at": None}
+    achieved = {"exists": True, "live": True, "running": True, "started_at": None}
+    with patch.object(docker_actions, "dispatch_status",
+                       side_effect=[stale, still_stale, achieved]), \
+         patch.object(docker_actions, "set_dispatch_live",
+                       return_value=docker_actions.ActionResult(
+                           ok=False, stdout="", stderr="timed out after 180s", returncode=-1)), \
+         patch.object(controlpanel_app.time, "sleep") as sleep, \
+         patch.object(controlpanel_app.audit, "log_dispatch_live_toggle") as log_toggle:
+        resp = client.post("/api/live", data={
+            "csrf_token": token, "target": "live", "confirmation": "MAKE DISPATCH LIVE",
+        })
+    assert sleep.call_count == 1  # one retry needed before "achieved" showed up
+    assert resp.status_code == 302
+    assert log_toggle.call_args.kwargs["accepted"] is True
+
+
+def test_live_toggle_rejects_when_dispatch_is_stopped(client):
+    """--force-recreate starts the container regardless of prior state -- toggling while
+    stopped would silently start dispatch back up, which an operator who stopped it
+    deliberately (e.g. mid-incident) would not expect from a page about live/dry-run mode."""
+    token = _get_csrf_token(client)
+    status = {"exists": True, "live": False, "running": False, "started_at": None}
+    with patch.object(docker_actions, "dispatch_status", return_value=status), \
+         patch.object(docker_actions, "set_dispatch_live") as set_live, \
+         patch.object(controlpanel_app.audit, "log_dispatch_live_toggle") as log_toggle:
+        resp = client.post("/api/live", data={
+            "csrf_token": token, "target": "live", "confirmation": "MAKE DISPATCH LIVE",
+        })
+    set_live.assert_not_called()
+    assert resp.status_code == 409
+    assert log_toggle.call_args.kwargs["accepted"] is False
+
+
+def test_concurrent_mutating_actions_are_rejected_while_one_is_in_progress(client):
+    """flock is the only thing that can catch this: two requests (from two gunicorn worker
+    PROCESSES, or just two browser tabs) both passing every earlier check and both reaching
+    docker_actions.set_dispatch_live() at once. Simulated here by holding the same lock file
+    open and exclusively locked before the request comes in."""
+    import fcntl
+    token = _get_csrf_token(client)
+    status = {"exists": True, "live": False, "running": True, "started_at": None}
+    with open(controlpanel_app._LOCK_FILE, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with patch.object(docker_actions, "dispatch_status", return_value=status), \
+             patch.object(docker_actions, "set_dispatch_live") as set_live:
+            resp = client.post("/api/live", data={
+                "csrf_token": token, "target": "live", "confirmation": "MAKE DISPATCH LIVE",
+            })
+        fcntl.flock(held, fcntl.LOCK_UN)
+    set_live.assert_not_called()
+    assert resp.status_code == 409
+
+
+# ---- docker_actions: refuse a go-live toggle against an unedited env file ----------------
+
+def test_set_dispatch_live_refuses_when_env_still_has_placeholder_values(tmp_path):
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=your_system_serial_number\n"
+        "INFLUX_TOKEN_DISPATCH=read_planning_read_write_alphaess\n"
+    )
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)):
+        result = docker_actions.set_dispatch_live(True)
+    assert not result.ok
+    assert "DEPLOY.md" in result.stderr
+
+
+def test_set_dispatch_live_allows_dry_run_even_with_placeholder_values(tmp_path):
+    """The guard only applies to going LIVE -- dry-run stays safe regardless of whether
+    deploy/controlpanel.env was ever filled in."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text("ALPHAESS_SYS_SN=your_system_serial_number\n")
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "OVERRIDE_FILE", str(tmp_path / "override.yml")), \
+         patch.object(docker_actions, "_run") as run:
+        run.return_value = docker_actions.ActionResult(ok=True, stdout="", stderr="",
+                                                         returncode=0)
+        result = docker_actions.set_dispatch_live(False)
+    assert result.ok
+    run.assert_called_once()
+
+
+def test_set_dispatch_live_proceeds_once_placeholders_are_replaced(tmp_path):
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+    )
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "OVERRIDE_FILE", str(tmp_path / "override.yml")), \
+         patch.object(docker_actions, "_run") as run:
+        run.return_value = docker_actions.ActionResult(ok=True, stdout="", stderr="",
+                                                         returncode=0)
+        result = docker_actions.set_dispatch_live(True)
+    assert result.ok
+    run.assert_called_once()

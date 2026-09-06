@@ -6,8 +6,12 @@ itself is never published directly. See DEPLOY.md, "Control panel".
 """
 from __future__ import annotations
 
+import contextlib
+import datetime as dt
+import fcntl
 import os
 import secrets
+import time
 
 import audit
 import backfill_actions
@@ -63,6 +67,43 @@ def _check_csrf():
             abort(400, description="Missing or invalid CSRF token -- reload the page and retry.")
 
 
+class ActionInProgress(Exception):
+    """Raised by `_exclusive_action()` when another mutating action already holds the lock."""
+
+
+# All of start/stop/live-toggle/backfill/resubmit, serialized across BOTH gunicorn worker
+# PROCESSES and every thread in each (--workers 2 --threads 4, controlpanel/Dockerfile). A
+# `threading.Lock` only ever covers threads within one process -- with 2 worker processes a
+# double-click, or two people using the panel at once, can land on two different processes
+# that share no Python memory at all, so a Python-level lock would miss it entirely. `flock`
+# on a file in the container's own writable /data volume is what actually synchronizes
+# across processes on the same host. This matters most for the live toggle: two requests
+# each independently reading `current_live != target_live` as true and both proceeding
+# would race to write deploy/dispatch-live.override.yml and both run
+# `compose ... --force-recreate dispatch`, with the final DISPATCH_LIVE value decided by
+# whichever `docker compose` process happens to finish last -- not by either operator.
+# Non-blocking (LOCK_NB): a request that finds the lock held fails fast with a clear error
+# instead of silently queueing behind a backfill that can run for up to 30 minutes.
+# Overridable so tests don't need to write to the container's real /data volume.
+_LOCK_FILE = os.environ.get("CONTROLPANEL_LOCK_FILE", "/data/controlpanel.lock")
+
+
+@contextlib.contextmanager
+def _exclusive_action():
+    os.makedirs(os.path.dirname(_LOCK_FILE), exist_ok=True)
+    with open(_LOCK_FILE, "w") as lock_fp:
+        try:
+            fcntl.flock(lock_fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ActionInProgress(
+                "Another action is already running -- wait for it to finish and retry."
+            ) from None
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_fp, fcntl.LOCK_UN)
+
+
 INFLUX_URL = os.environ["INFLUX_URL"]
 INFLUX_ORG = os.environ.get("INFLUX_ORG", "home")
 INFLUX_BUCKET = os.environ.get("INFLUX_BUCKET", "alphaess")
@@ -76,18 +117,22 @@ def _latest_mijnbatterij_submission() -> dict | None:
     # `outcome` is a TAG on mijnbatterij_submit (collector/mijnbatterij.py), so `submitted`
     # and `status_code` each land in a SEPARATE table per distinct outcome value seen in the
     # window (e.g. one table for "ok", another for a stale "error" from hours earlier).
-    # `last()` alone picks the latest row WITHIN each of those tables, and the loop below
-    # then just overwrites the result dict in whatever order Influx returns the tables --
-    # an old "error" table iterated after a newer "ok" one would win. `pivot` first merges
-    # the two fields of the same point into one row (keyed on time), `group()` collapses
-    # every outcome's table into one, and `sort`+`limit` then picks the single globally
-    # latest row across all of them.
-    flux = f'''
+    # Worse: mijnbatterij.py only writes `status_code` on the "ok" path -- the error path
+    # (mijnbatterij.py's `except` branch) writes `submitted` alone. A `pivot()` across both
+    # fields therefore produces tables with DIFFERENT COLUMN SETS whenever both outcomes
+    # appear in the window, and a following `group()` -- which requires every table it
+    # merges to share a schema -- errors out on exactly that mix, which is precisely when
+    # this widget matters most (the submitter is failing).
+    #
+    # Two simpler queries instead of one clever one: `submitted` is written on EVERY
+    # attempt, so it alone is enough to find the single latest attempt's time and outcome,
+    # with a query over a single field -- one schema, no collision possible. `status_code`
+    # is then looked up only in the exact same instant, which is empty (not an error, just
+    # no rows) on the error path.
+    latest_flux = f'''
     from(bucket: "{INFLUX_BUCKET}")
       |> range(start: -26h)
-      |> filter(fn: (r) => r._measurement == "mijnbatterij_submit")
-      |> filter(fn: (r) => r._field == "submitted" or r._field == "status_code")
-      |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+      |> filter(fn: (r) => r._measurement == "mijnbatterij_submit" and r._field == "submitted")
       |> group()
       |> sort(columns: ["_time"], desc: true)
       |> limit(n: 1)
@@ -101,18 +146,43 @@ def _latest_mijnbatterij_submission() -> dict | None:
     # rendering as the positive claim "no submission in the last 26h", which sends whoever
     # is debugging a real Influx outage looking at the wrong service entirely.
     try:
-        tables = _query_api.query(flux)
+        tables = _query_api.query(latest_flux)
     except Exception as e:
         return {"query_error": str(e)}
+    latest = None
     for table in tables:
         for record in table.records:
-            return {
-                "time": record.get_time(),
-                "outcome": record.values.get("outcome"),
-                "submitted": record.values.get("submitted"),
-                "status_code": record.values.get("status_code"),
-            }
-    return None
+            latest = record
+            break
+        if latest:
+            break
+    if latest is None:
+        return None
+
+    submitted_at = latest.get_time()
+    status_code = None
+    status_flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: {submitted_at.isoformat()},
+               stop: {(submitted_at + dt.timedelta(microseconds=1)).isoformat()})
+      |> filter(fn: (r) => r._measurement == "mijnbatterij_submit" and r._field == "status_code")
+      |> limit(n: 1)
+    '''
+    try:
+        for table in _query_api.query(status_flux):
+            for record in table.records:
+                status_code = record.get_value()
+                break
+    except Exception:
+        pass  # `submitted`/`outcome` are already known good; a broken second query here
+              # must not blank out a result we already have.
+
+    return {
+        "time": submitted_at,
+        "outcome": latest.values.get("outcome"),
+        "submitted": latest.get_value(),
+        "status_code": status_code,
+    }
 
 
 @app.route("/")
@@ -128,25 +198,34 @@ def dashboard():
     return render_template("dashboard.html", status=status, submission=submission)
 
 
+def _dashboard_error(error: str, code: int = 500):
+    status = docker_actions.dispatch_status()
+    submission = _latest_mijnbatterij_submission()
+    return render_template("dashboard.html", status=status, submission=submission,
+                            error=error), code
+
+
 @app.route("/api/dispatch/start", methods=["POST"])
 def api_dispatch_start():
-    result = docker_actions.start_dispatch()
+    try:
+        with _exclusive_action():
+            result = docker_actions.start_dispatch()
+    except ActionInProgress as e:
+        return _dashboard_error(str(e), 409)
     if not result.ok:
-        status = docker_actions.dispatch_status()
-        submission = _latest_mijnbatterij_submission()
-        return render_template("dashboard.html", status=status,
-                                submission=submission, error=result.stderr), 500
+        return _dashboard_error(result.stderr)
     return redirect(url_for("dashboard"))
 
 
 @app.route("/api/dispatch/stop", methods=["POST"])
 def api_dispatch_stop():
-    result = docker_actions.stop_dispatch()
+    try:
+        with _exclusive_action():
+            result = docker_actions.stop_dispatch()
+    except ActionInProgress as e:
+        return _dashboard_error(str(e), 409)
     if not result.ok:
-        status = docker_actions.dispatch_status()
-        submission = _latest_mijnbatterij_submission()
-        return render_template("dashboard.html", status=status,
-                                submission=submission, error=result.stderr), 500
+        return _dashboard_error(result.stderr)
     return redirect(url_for("dashboard"))
 
 
@@ -158,22 +237,28 @@ def backfill():
 @app.route("/api/backfill/<action>", methods=["POST"])
 def api_backfill(action: str):
     try:
-        if action == "prices":
-            result = backfill_actions.backfill_prices(request.form["start"], request.form["end"])
-        elif action == "pricing":
-            result = backfill_actions.backfill_pricing(request.form["start"], request.form["end"])
-        elif action == "efficiency":
-            result = backfill_actions.backfill_efficiency(request.form["start"], request.form["end"])
-        elif action == "mijnbatterij-monthly":
-            months = [m.strip() for m in request.form["months"].split(",") if m.strip()]
-            result = backfill_actions.mijnbatterij_monthly(months)
-        elif action == "mijnbatterij-resubmit":
-            result = backfill_actions.mijnbatterij_resubmit_now()
-        else:
-            return render_template("backfill.html", result=None,
-                                    error=f"unknown action {action!r}"), 404
+        with _exclusive_action():
+            if action == "prices":
+                result = backfill_actions.backfill_prices(request.form["start"],
+                                                            request.form["end"])
+            elif action == "pricing":
+                result = backfill_actions.backfill_pricing(request.form["start"],
+                                                             request.form["end"])
+            elif action == "efficiency":
+                result = backfill_actions.backfill_efficiency(request.form["start"],
+                                                                request.form["end"])
+            elif action == "mijnbatterij-monthly":
+                months = [m.strip() for m in request.form["months"].split(",") if m.strip()]
+                result = backfill_actions.mijnbatterij_monthly(months)
+            elif action == "mijnbatterij-resubmit":
+                result = backfill_actions.mijnbatterij_resubmit_now()
+            else:
+                return render_template("backfill.html", result=None,
+                                        error=f"unknown action {action!r}"), 404
     except backfill_actions.InvalidArgument as e:
         return render_template("backfill.html", result=None, error=str(e)), 400
+    except ActionInProgress as e:
+        return render_template("backfill.html", result=None, error=str(e)), 409
     return render_template("backfill.html", result=result)
 
 
@@ -209,6 +294,28 @@ def _confirmation_phrase(target_live: bool) -> str:
     return "MAKE DISPATCH LIVE" if target_live else "MAKE DISPATCH DRY-RUN"
 
 
+def _poll_dispatch_status_until(target_live: bool, attempts: int = 6,
+                                 interval_s: float = 5.0) -> dict:
+    """Re-reads dispatch_status() up to `attempts` times, ~`interval_s` apart, stopping as
+    soon as the container reports the target state.
+
+    set_dispatch_live()'s own `docker compose` call can time out client-side (180s) while
+    the daemon carries on and finishes the recreate moments later -- a single immediate
+    status read right after a timeout would catch dispatch mid-recreate, read `exists:
+    False` (or the pre-toggle state) as the ground truth, and audit `accepted=false`
+    permanently, even though the battery ends up being driven exactly as requested seconds
+    afterward. This buys ~30s of patience for that daemon-side tail before deciding the
+    toggle actually failed.
+    """
+    status = docker_actions.dispatch_status()
+    for _ in range(attempts - 1):
+        if status.get("live") == target_live:
+            return status
+        time.sleep(interval_s)
+        status = docker_actions.dispatch_status()
+    return status
+
+
 @app.route("/api/live", methods=["POST"])
 def api_live():
     target_live = request.form.get("target") == "live"
@@ -229,6 +336,21 @@ def api_live():
             "live.html", status=status,
             error="dispatch container not found -- nothing to toggle."), 409
 
+    if not status.get("running"):
+        # `--force-recreate` starts the container regardless of whether it was running --
+        # an operator who stopped dispatch deliberately (mid-incident, say) and then opens
+        # /live sees a DRY RUN banner (dispatch_status() only reports the mode baked into
+        # the stopped container's env, not that it's stopped) and could easily confirm a
+        # toggle believing dispatch stays stopped. It doesn't: the recreate brings it back
+        # up, live if that's what was requested. Refuse outright and make them start it
+        # from the dashboard first, where the stopped state is visible.
+        audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
+                                        accepted=False, reason="dispatch is stopped")
+        return render_template(
+            "live.html", status=status,
+            error=("dispatch is stopped -- toggling live/dry-run would also start it back "
+                   "up. Start it from the dashboard first if that's what you want.")), 409
+
     expected = _confirmation_phrase(target_live)
     if confirmation != expected:
         audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
@@ -245,30 +367,33 @@ def api_live():
                                         accepted=True, reason="already in the requested state")
         return redirect(url_for("live"))
 
-    # set_dispatch_live() writes the override file (makedirs/open/yaml.safe_dump) BEFORE it
-    # ever runs `docker compose` -- a missing or read-only `deploy/` would raise there, and
-    # an uncaught exception at this point would 500 with no audit point and no stdout line,
-    # which is exactly the silent-toggle-attempt gap audit.py exists to close. A confirmed
-    # go-live attempt has to show up in the trail even when it fails before touching Docker.
     try:
-        result = docker_actions.set_dispatch_live(target_live)
-    except Exception as e:
-        audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
-                                        accepted=False, reason=f"exception before compose: {e}")
-        return render_template(
-            "live.html", status=status,
-            error=f"Could not attempt the toggle: {e}"), 500
+        with _exclusive_action():
+            # set_dispatch_live() writes the override file (makedirs/open/yaml.safe_dump)
+            # BEFORE it ever runs `docker compose` -- a missing or read-only `deploy/`
+            # would raise there, and an uncaught exception at this point would 500 with no
+            # audit point and no stdout line, which is exactly the silent-toggle-attempt
+            # gap audit.py exists to close. A confirmed go-live attempt has to show up in
+            # the trail even when it fails before touching Docker.
+            try:
+                result = docker_actions.set_dispatch_live(target_live)
+            except Exception as e:
+                audit.log_dispatch_live_toggle(
+                    from_state=from_state, to_state=to_state, accepted=False,
+                    reason=f"exception before compose: {e}")
+                return render_template(
+                    "live.html", status=status,
+                    error=f"Could not attempt the toggle: {e}"), 500
 
-    # Never trust `result.ok` alone for the audit: a client-side timeout here (see
-    # docker_actions.set_dispatch_live) kills our `docker compose` CLI, not the recreate the
-    # daemon is carrying out -- that can go on to succeed after we already reported failure.
-    # Reading the container back after the call is the only way to know what actually
-    # happened, and is exactly what dashboard()/live() themselves trust.
-    status_after = docker_actions.dispatch_status()
-    achieved = status_after.get("live") == target_live
-    audit.log_dispatch_live_toggle(
-        from_state=from_state, to_state=to_state, accepted=achieved,
-        reason="" if achieved else f"compose result ok={result.ok}: {result.stderr}")
+            # Never trust `result.ok` alone for the audit -- see _poll_dispatch_status_until.
+            status_after = _poll_dispatch_status_until(target_live)
+            achieved = status_after.get("live") == target_live
+            audit.log_dispatch_live_toggle(
+                from_state=from_state, to_state=to_state, accepted=achieved,
+                reason="" if achieved else f"compose result ok={result.ok}: {result.stderr}")
+    except ActionInProgress as e:
+        return render_template("live.html", status=status, error=str(e)), 409
+
     if not achieved:
         return render_template(
             "live.html", status=status_after,

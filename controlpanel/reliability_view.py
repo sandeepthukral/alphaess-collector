@@ -32,23 +32,40 @@ class ActionResult:
     returncode: int
 
 
+INFLUX_BUCKET = os.environ.get("INFLUX_BUCKET", "alphaess")
+
+
+def _decode(value: bytes | str | None) -> str:
+    # `subprocess.TimeoutExpired.stdout` is `bytes` even when `subprocess.run` was called
+    # with `text=True` -- a documented CPython quirk, `text=`/`universal_newlines=` only
+    # affects the successful-completion path, not what gets attached to the exception. Left
+    # undecoded, ActionResult.stdout ends up as a literal "b'...'" string, and
+    # backfill.html/reliability.html render that instead of the readable partial output of
+    # whatever was running -- exactly the moment an operator most needs to read it.
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
 def _run(argv: list[str], timeout: int) -> ActionResult:
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         return ActionResult(ok=proc.returncode == 0, stdout=proc.stdout,
                              stderr=proc.stderr, returncode=proc.returncode)
     except subprocess.TimeoutExpired as e:
-        return ActionResult(ok=False, stdout=e.stdout or "", stderr=f"timed out after {timeout}s",
-                             returncode=-1)
+        return ActionResult(ok=False, stdout=_decode(e.stdout),
+                             stderr=f"timed out after {timeout}s", returncode=-1)
 
 
 def is_it_deciding() -> ActionResult:
     return _run(["python", f"{SCRIPTS_DIR}/is-it-deciding.py",
+                 "--bucket", INFLUX_BUCKET,
                  "--token-env", "INFLUX_TOKEN_CONTROLPANEL"], timeout=30)
 
 
 def review_dry_run() -> ActionResult:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     return _run(["python", f"{SCRIPTS_DIR}/review-dry-run.py",
+                 "--bucket", INFLUX_BUCKET,
                  "--token-env", "INFLUX_TOKEN_CONTROLPANEL",
                  "--out", REVIEW_OUT], timeout=120)

@@ -8,6 +8,7 @@ default instead of the operator's real value) the next time someone uses it.
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -16,6 +17,9 @@ import yaml
 REPO = Path(__file__).resolve().parents[1]
 COMPOSE = yaml.safe_load((REPO / "docker-compose.yml").read_text(encoding="utf-8"))
 ENV_EXAMPLE_TEXT = (REPO / "deploy" / "controlpanel.env.example").read_text(encoding="utf-8")
+
+os.environ.setdefault("HOST_REPO_PATH", str(REPO))
+import docker_actions  # noqa: E402
 
 VAR_REF = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*)')
 REQUIRED_REF = re.compile(r'\$\{([A-Za-z_][A-Za-z0-9_]*):\?')
@@ -82,6 +86,23 @@ def test_the_example_never_carries_a_secret_from_another_service():
     for name in forbidden:
         assert name not in example_keys, (
             f"{name} has no business as a key in controlpanel's env file")
+
+
+def test_unconfigured_markers_match_what_the_example_actually_ships():
+    """docker_actions._UNCONFIGURED_MARKERS is a hardcoded copy of two values from this file,
+    used to refuse a go-live toggle when deploy/controlpanel.env still holds them unedited
+    (see set_dispatch_live()). A hardcoded copy drifts silently the day someone changes the
+    example's placeholder text without updating the other file -- this pins them together."""
+    example_keys_to_values = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in ENV_EXAMPLE_TEXT.splitlines()
+        if line.strip() and not line.startswith("#") and "=" in line
+    }
+    for key, expected_value in docker_actions._UNCONFIGURED_MARKERS.items():
+        assert example_keys_to_values.get(key) == expected_value, (
+            f"deploy/controlpanel.env.example's shipped value for {key} no longer matches "
+            f"docker_actions._UNCONFIGURED_MARKERS -- the go-live guard would silently stop "
+            f"detecting an unedited copy of this file")
 
 
 def test_the_override_file_is_gitignored_and_never_the_auto_loaded_name():

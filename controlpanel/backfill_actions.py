@@ -32,14 +32,25 @@ class ActionResult:
     returncode: int
 
 
+def _decode(value: bytes | str | None) -> str:
+    # `subprocess.TimeoutExpired.stdout` is `bytes` even with `subprocess.run(text=True)` --
+    # `text=`/`universal_newlines=` only governs the successful-completion path, not what
+    # lands on the exception. Left undecoded this renders as a literal "b'...'" string in
+    # backfill.html instead of the partial output of a backfill that ran for up to 30
+    # minutes -- exactly when an operator most needs to read it.
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
 def _run(argv: list[str], timeout: int) -> ActionResult:
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         return ActionResult(ok=proc.returncode == 0, stdout=proc.stdout,
                              stderr=proc.stderr, returncode=proc.returncode)
     except subprocess.TimeoutExpired as e:
-        return ActionResult(ok=False, stdout=e.stdout or "", stderr=f"timed out after {timeout}s",
-                             returncode=-1)
+        return ActionResult(ok=False, stdout=_decode(e.stdout),
+                             stderr=f"timed out after {timeout}s", returncode=-1)
 
 
 def _validate_date(value: str, label: str) -> str:

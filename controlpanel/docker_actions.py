@@ -42,6 +42,37 @@ DISPATCH_CONTAINER = "dispatch"
 COLLECTOR_CONTAINER = "collector"
 MIJNBATTERIJ_CONTAINER = "mijnbatterij"
 
+# The literal values deploy/controlpanel.env.example ships for two "REAL values" keys that
+# can never legitimately match the example verbatim on a real install -- a per-install
+# InfluxDB token and a real device serial number. tests/test_controlpanel_env_completeness.py
+# only checks that a key is PRESENT in deploy/controlpanel.env, never that its value was
+# actually edited away from the example; DEPLOY.md step 7 tells the operator to copy real
+# values in by hand, but nothing stopped `cp deploy/controlpanel.env.example
+# deploy/controlpanel.env` alone from passing every existing check. A match on either of
+# these means step 7 never happened, and --force-recreate would then bring dispatch up
+# LIVE against the wrong inverter identity/token -- checked in set_dispatch_live() below,
+# only when going live, since dry-run stays safe regardless.
+_UNCONFIGURED_MARKERS = {
+    "ALPHAESS_SYS_SN": "your_system_serial_number",
+    "INFLUX_TOKEN_DISPATCH": "read_planning_read_write_alphaess",
+}
+
+
+def _controlpanel_env_unconfigured_reason() -> str | None:
+    try:
+        with open(CONTROLPANEL_ENV_FILE, encoding="utf-8") as f:
+            values = dict(
+                line.split("=", 1) for line in f.read().splitlines()
+                if line and not line.startswith("#") and "=" in line
+            )
+    except OSError as e:
+        return f"could not read {CONTROLPANEL_ENV_FILE}: {e}"
+    for key, placeholder in _UNCONFIGURED_MARKERS.items():
+        if values.get(key) == placeholder:
+            return (f"{key} in deploy/controlpanel.env still holds the example's shipped "
+                     f"placeholder value -- see DEPLOY.md, \"Control panel\" step 7")
+    return None
+
 
 @dataclass
 class ActionResult:
@@ -51,14 +82,24 @@ class ActionResult:
     returncode: int
 
 
+def _decode(value: bytes | str | None) -> str:
+    # `subprocess.TimeoutExpired.stdout` is `bytes` even with `subprocess.run(text=True)` --
+    # `text=`/`universal_newlines=` only governs the successful-completion path, not what
+    # lands on the exception. Left undecoded this renders as a literal "b'...'" string
+    # instead of the actual partial output.
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value or ""
+
+
 def _run(argv: list[str], timeout: int = 60) -> ActionResult:
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         return ActionResult(ok=proc.returncode == 0, stdout=proc.stdout,
                              stderr=proc.stderr, returncode=proc.returncode)
     except subprocess.TimeoutExpired as e:
-        return ActionResult(ok=False, stdout=e.stdout or "", stderr=f"timed out after {timeout}s",
-                             returncode=-1)
+        return ActionResult(ok=False, stdout=_decode(e.stdout),
+                             stderr=f"timed out after {timeout}s", returncode=-1)
 
 
 def dispatch_status() -> dict:
@@ -109,6 +150,11 @@ def set_dispatch_live(live: bool) -> ActionResult:
     """The one action that uses `docker compose` rather than bare `docker`, per
     docs/DEPLOY.md, "The DISPATCH_LIVE mechanism". Writes the override file, then recreates
     only the dispatch service against it."""
+    if live:
+        reason = _controlpanel_env_unconfigured_reason()
+        if reason:
+            return ActionResult(ok=False, stdout="", stderr=reason, returncode=-1)
+
     override = {
         "services": {
             "dispatch": {
