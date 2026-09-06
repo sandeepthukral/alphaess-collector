@@ -113,10 +113,15 @@ def _latest_mijnbatterij_submission() -> dict | None:
 
 @app.route("/")
 def dashboard():
+    # No `is_it_deciding()` here on purpose -- it is a subprocess with its own 30s timeout
+    # that shells out and queries InfluxDB, and calling it on every dashboard load (and
+    # again below on every failed start/stop) made the busiest page in the app, including
+    # its own Start/Stop buttons, as slow and as Influx-dependent as the worst case of a
+    # script most operators only need to run occasionally. It has its own page, /reliability,
+    # with a button to run it on demand.
     status = docker_actions.dispatch_status()
-    tick = reliability_view.is_it_deciding()
     submission = _latest_mijnbatterij_submission()
-    return render_template("dashboard.html", status=status, tick=tick, submission=submission)
+    return render_template("dashboard.html", status=status, submission=submission)
 
 
 @app.route("/api/dispatch/start", methods=["POST"])
@@ -124,9 +129,8 @@ def api_dispatch_start():
     result = docker_actions.start_dispatch()
     if not result.ok:
         status = docker_actions.dispatch_status()
-        tick = reliability_view.is_it_deciding()
         submission = _latest_mijnbatterij_submission()
-        return render_template("dashboard.html", status=status, tick=tick,
+        return render_template("dashboard.html", status=status,
                                 submission=submission, error=result.stderr), 500
     return redirect(url_for("dashboard"))
 
@@ -136,9 +140,8 @@ def api_dispatch_stop():
     result = docker_actions.stop_dispatch()
     if not result.ok:
         status = docker_actions.dispatch_status()
-        tick = reliability_view.is_it_deciding()
         submission = _latest_mijnbatterij_submission()
-        return render_template("dashboard.html", status=status, tick=tick,
+        return render_template("dashboard.html", status=status,
                                 submission=submission, error=result.stderr), 500
     return redirect(url_for("dashboard"))
 
@@ -207,8 +210,20 @@ def api_live():
     target_live = request.form.get("target") == "live"
     confirmation = request.form.get("confirmation", "")
     status = docker_actions.dispatch_status()
-    from_state = "live" if status.get("live") else "dry-run"
+    # None (container missing) must not read as "dry-run" -- that would let a confirmation
+    # typed against a phantom "dry-run -> live" transition through, and the compose call
+    # below would then create a brand-new container from scratch rather than recreating one
+    # that never existed to begin with.
+    current_live = status.get("live")
+    from_state = "live" if current_live else ("unknown" if current_live is None else "dry-run")
     to_state = "live" if target_live else "dry-run"
+
+    if not status.get("exists"):
+        audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
+                                        accepted=False, reason="dispatch container not found")
+        return render_template(
+            "live.html", status=status,
+            error="dispatch container not found -- nothing to toggle."), 409
 
     expected = _confirmation_phrase(target_live)
     if confirmation != expected:
@@ -218,16 +233,29 @@ def api_live():
             "live.html", status=status,
             error=f'Type exactly "{expected}" to confirm.'), 400
 
+    if current_live == target_live:
+        # Already in the requested state -- skip the recreate entirely rather than bounce
+        # dispatch for a no-op, but still log the attempt: an operator who thinks they just
+        # went live and didn't should see that in the audit trail, not a silent redirect.
+        audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
+                                        accepted=True, reason="already in the requested state")
+        return redirect(url_for("live"))
+
     result = docker_actions.set_dispatch_live(target_live)
-    audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
-                                    accepted=result.ok,
-                                    reason="" if result.ok else f"compose failed: {result.stderr}")
-    if not result.ok:
-        status = docker_actions.dispatch_status()
+    # Never trust `result.ok` alone for the audit: a client-side timeout here (see
+    # docker_actions.set_dispatch_live) kills our `docker compose` CLI, not the recreate the
+    # daemon is carrying out -- that can go on to succeed after we already reported failure.
+    # Reading the container back after the call is the only way to know what actually
+    # happened, and is exactly what dashboard()/live() themselves trust.
+    status_after = docker_actions.dispatch_status()
+    achieved = status_after.get("live") == target_live
+    audit.log_dispatch_live_toggle(
+        from_state=from_state, to_state=to_state, accepted=achieved,
+        reason="" if achieved else f"compose result ok={result.ok}: {result.stderr}")
+    if not achieved:
         return render_template(
-            "live.html", status=status,
-            error=f"Compose recreate failed, dispatch state may be unchanged: {result.stderr}"
-        ), 500
+            "live.html", status=status_after,
+            error=f"Dispatch did not end up in the requested state: {result.stderr}"), 500
     return redirect(url_for("live"))
 
 

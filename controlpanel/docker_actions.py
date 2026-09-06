@@ -122,4 +122,9 @@ def set_dispatch_live(live: bool) -> ActionResult:
         # dispatch env var, and doing so against controlpanel.env's placeholder InfluxDB
         # credentials rather than the real ones in .env.
         "up", "-d", "--force-recreate", "--no-deps", DISPATCH_CONTAINER,
-    ], timeout=120)
+    # dispatch's `stop_grace_period: 30s` alone can absorb most of a short timeout before
+    # the new container even starts; give real headroom over the worst case rather than
+    # timing out on a recreate that was actually still in progress. api_live() re-checks
+    # the container's actual state afterwards regardless of what this returns, precisely
+    # because a client-side timeout here does not mean the daemon-side recreate stopped.
+    ], timeout=180)

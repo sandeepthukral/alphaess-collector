@@ -50,32 +50,43 @@ def _validate_month(value: str, label: str) -> str:
     return value
 
 
+def _docker_exec(container: str, script_argv: list[str], timeout: int) -> ActionResult:
+    # `timeout <n>s` runs INSIDE the container, ahead of the script, so the script is the
+    # one that gets SIGTERM'd when time is up -- not just this process's local `docker exec`
+    # client. Without it, killing the client on our own subprocess.run() timeout only drops
+    # our end of the attach connection; the script keeps running server-side in
+    # collector/mijnbatterij and keeps writing to InfluxDB, invisible to us and to the
+    # operator who was just told the action "timed out". The client-side timeout below is
+    # kept slightly longer, as a backstop in case the in-container `timeout` itself hangs.
+    argv = ["docker", "exec", container, "timeout", f"{timeout}s", *script_argv]
+    return _run(argv, timeout=timeout + 30)
+
+
 def backfill_prices(start: str, end: str) -> ActionResult:
     start, end = _validate_date(start, "start"), _validate_date(end, "end")
-    return _run(["docker", "exec", "collector", "python", "prices.py",
-                 "--backfill", start, end], timeout=1800)
+    return _docker_exec("collector", ["python", "prices.py", "--backfill", start, end],
+                         timeout=1800)
 
 
 def backfill_pricing(start: str, end: str) -> ActionResult:
     start, end = _validate_date(start, "start"), _validate_date(end, "end")
-    return _run(["docker", "exec", "collector", "python", "pricing.py",
-                 "--backfill", start, end], timeout=1800)
+    return _docker_exec("collector", ["python", "pricing.py", "--backfill", start, end],
+                         timeout=1800)
 
 
 def backfill_efficiency(start: str, end: str) -> ActionResult:
     start, end = _validate_date(start, "start"), _validate_date(end, "end")
-    return _run(["docker", "exec", "collector", "python", "efficiency.py",
-                 "--backfill", start, end], timeout=1800)
+    return _docker_exec("collector", ["python", "efficiency.py", "--backfill", start, end],
+                         timeout=1800)
 
 
 def mijnbatterij_monthly(months: list[str]) -> ActionResult:
     if not months:
         raise InvalidArgument("at least one month is required")
     validated = [_validate_month(m, "month") for m in months]
-    return _run(["docker", "exec", "mijnbatterij", "python", "mijnbatterij.py",
-                 "--monthly", *validated], timeout=900)
+    return _docker_exec("mijnbatterij",
+                         ["python", "mijnbatterij.py", "--monthly", *validated], timeout=900)
 
 
 def mijnbatterij_resubmit_now() -> ActionResult:
-    return _run(["docker", "exec", "mijnbatterij", "python", "mijnbatterij.py",
-                 "--once"], timeout=60)
+    return _docker_exec("mijnbatterij", ["python", "mijnbatterij.py", "--once"], timeout=60)

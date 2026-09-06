@@ -526,6 +526,13 @@ services:
       # root too, and controlpanel must never read ALPHAESS_APP_SECRET,
       # MIJNBATTERIJ_API_KEY or the other services' InfluxDB tokens. See
       # deploy/controlpanel.env.example for the env file used instead.
+      #
+      # A single-file bind mount pins to the INODE that existed at container start, not the
+      # path -- `git pull` replaces this file rather than editing it in place, so a running
+      # controlpanel container keeps reading a stale copy until it is restarted. See
+      # DEPLOY.md, "Updating": restart controlpanel after every pull, not just ones that
+      # touch this file, since docker_actions.set_dispatch_live() passes this exact stale
+      # path to `docker compose -f ...` on every live-toggle click.
       - ${HOST_REPO_PATH:?set HOST_REPO_PATH in .env}/docker-compose.yml:${HOST_REPO_PATH}/docker-compose.yml:ro
       - ${HOST_REPO_PATH}/deploy:${HOST_REPO_PATH}/deploy:rw
       # Read-only; reliability_view.py subprocesses these unmodified.

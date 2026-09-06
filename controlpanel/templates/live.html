@@ -3,9 +3,9 @@
 {% block content %}
 <h1>Dispatch live toggle</h1>
 
-<div class="banner {{ 'bad' if status.live else 'ok' }}">
+<div class="banner {{ 'warn' if not status.exists else ('bad' if status.live else 'ok') }}">
   {% if not status.exists %}
-    dispatch container not found: {{ status.error }}
+    UNKNOWN -- dispatch container not found: {{ status.error }}
   {% elif status.live %}
     DISPATCH IS LIVE -- writing to the inverter.
   {% else %}

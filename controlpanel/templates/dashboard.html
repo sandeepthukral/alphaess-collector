@@ -26,12 +26,7 @@
   </form>
 {% endif %}
 
-<h2>Last tick</h2>
-{% if tick.ok %}
-  <pre>{{ tick.stdout }}</pre>
-{% else %}
-  <pre class="bad">{{ tick.stderr or tick.stdout }}</pre>
-{% endif %}
+<p><a href="/reliability">Check whether it's deciding right now &rarr;</a></p>
 
 <h2>Latest mijnbatterij submission</h2>
 {% if submission %}
@@ -40,7 +35,7 @@
     outcome: <strong class="{{ 'ok' if submission.outcome == 'ok' else 'bad' }}">
       {{ submission.outcome }}
     </strong>
-    {% if submission.status_code is defined %}(status {{ submission.status_code | int }}){% endif %}
+    {% if submission.status_code is not none %}(status {{ submission.status_code | int }}){% endif %}
   </p>
 {% else %}
   <p>no submission in the last 26h</p>

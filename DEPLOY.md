@@ -1611,10 +1611,26 @@ a `SIGKILL` or a power cut is not. Recovery is
 ```sh
 git pull
 docker compose up -d --build
+sudo docker compose restart controlpanel   # only if you run the control panel -- see below
 ```
 
 InfluxDB data lives in the `alphaess-influxdb-data` volume and survives updates.
 Only `down -v` deletes it.
+
+**If you run the control panel, always restart it after a pull, even one that
+doesn't touch `docker-compose.yml`.** It bind-mounts `docker-compose.yml` itself as a
+single file (`docker-compose.yml`, "Control panel"), and a single-file bind mount is
+pinned to the inode that existed at the file's path when the container last started —
+not the path itself. `git pull` normally replaces the file rather than editing it in
+place, which changes the inode, so a running `controlpanel` container keeps reading
+whatever `docker-compose.yml` looked like when it was last started, however old that
+is. That matters because `docker_actions.set_dispatch_live()` passes this same stale
+path to `docker compose -f ...` from inside the container on every live-toggle
+click — an out-of-date copy can recreate `dispatch` missing config this branch added
+(the `container_name:` pins are exactly this kind of change). `restart` (not just
+`up -d`, which only recreates a container whose *resolved config* changed — nothing
+about `controlpanel`'s own config references file content, so it never notices) forces
+a fresh mount of the current file.
 
 Three kinds of change are **not** applied by that pair, each silently. If a pull
 touched one of them, read the matching section below before assuming you have
