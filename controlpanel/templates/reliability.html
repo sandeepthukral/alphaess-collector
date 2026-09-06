@@ -2,6 +2,9 @@
 {% block title %}Reliability{% endblock %}
 {% block content %}
 <h1>Reliability</h1>
+{% if error %}
+  <p class="bad">{{ error }}</p>
+{% endif %}
 
 <h2>Is it deciding? (right now)</h2>
 <form method="post" action="/api/reliability/tick">

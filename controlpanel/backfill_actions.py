@@ -12,6 +12,8 @@ import re
 import subprocess
 from dataclasses import dataclass
 
+from docker_actions import COLLECTOR_CONTAINER, MIJNBATTERIJ_CONTAINER
+
 # \Z, not `$` -- `$` matches immediately before a trailing newline too, so a value ending
 # "\n" (e.g. a form field submitted with one) would pass this "strict" boundary check and
 # reach argv with the newline still attached. Not an injection risk either way (argv, no
@@ -79,27 +81,27 @@ def _docker_exec(container: str, script_argv: list[str], timeout: int) -> Action
 
 def backfill_prices(start: str, end: str) -> ActionResult:
     start, end = _validate_date(start, "start"), _validate_date(end, "end")
-    return _docker_exec("collector", ["python", "prices.py", "--backfill", start, end],
+    return _docker_exec(COLLECTOR_CONTAINER, ["python", "prices.py", "--backfill", start, end],
                          timeout=1800)
 
 
 def backfill_pricing(start: str, end: str) -> ActionResult:
     start, end = _validate_date(start, "start"), _validate_date(end, "end")
-    return _docker_exec("collector", ["python", "pricing.py", "--backfill", start, end],
+    return _docker_exec(COLLECTOR_CONTAINER, ["python", "pricing.py", "--backfill", start, end],
                          timeout=1800)
 
 
 def backfill_efficiency(start: str, end: str) -> ActionResult:
     start, end = _validate_date(start, "start"), _validate_date(end, "end")
-    return _docker_exec("collector", ["python", "efficiency.py", "--backfill", start, end],
-                         timeout=1800)
+    return _docker_exec(COLLECTOR_CONTAINER,
+                         ["python", "efficiency.py", "--backfill", start, end], timeout=1800)
 
 
 def mijnbatterij_monthly(months: list[str]) -> ActionResult:
     if not months:
         raise InvalidArgument("at least one month is required")
     validated = [_validate_month(m, "month") for m in months]
-    return _docker_exec("mijnbatterij",
+    return _docker_exec(MIJNBATTERIJ_CONTAINER,
                          ["python", "mijnbatterij.py", "--monthly", *validated], timeout=900)
 
 
@@ -109,4 +111,5 @@ def mijnbatterij_resubmit_now() -> ActionResult:
     # MIJNBATTERIJ_TIMEOUT_SECONDS (15s) each -- a 60s ceiling could SIGTERM it mid-retry
     # after the platform already accepted the submission, and the panel would report
     # "timed out" for a resubmit that in fact went through, inviting a duplicate click.
-    return _docker_exec("mijnbatterij", ["python", "mijnbatterij.py", "--once"], timeout=180)
+    return _docker_exec(MIJNBATTERIJ_CONTAINER, ["python", "mijnbatterij.py", "--once"],
+                         timeout=180)

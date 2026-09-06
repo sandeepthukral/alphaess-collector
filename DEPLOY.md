@@ -470,6 +470,7 @@ identical either way.
     change this container's live state.
 14. **The audit trail landed:**
     ```sh
+    set -a; . ./.env; set +a
     sudo docker compose exec -T influxdb influx query \
       -t "$INFLUX_TOKEN_CONTROLPANEL" -o "$INFLUX_ORG" \
       'from(bucket:"alphaess") |> range(start: -1h) |> filter(fn: (r) => r._measurement == "controlpanel_audit")'

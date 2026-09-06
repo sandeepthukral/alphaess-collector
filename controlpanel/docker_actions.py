@@ -42,6 +42,38 @@ DISPATCH_CONTAINER = "dispatch"
 COLLECTOR_CONTAINER = "collector"
 MIJNBATTERIJ_CONTAINER = "mijnbatterij"
 
+class EnvUnconfigured(Exception):
+    """Raised by set_dispatch_live(True) when deploy/controlpanel.env fails a sanity check --
+    distinct from a compose failure so callers can skip the post-toggle status poll (there
+    is nothing to poll for: nothing was ever run) and report the real reason directly."""
+
+
+def _parse_env_file(text: str) -> dict[str, str]:
+    """`KEY=value` lines -> a dict, tolerant of the ways a hand-edited file actually varies:
+    surrounding whitespace (a stray trailing space defeated the exact-match placeholder
+    check below), and a value wrapped in quotes (some editors/shells add them on paste;
+    `"real-token"` must compare equal to `real-token`, not to itself literally)."""
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def _parse_docker_env_list(env_lines: list[str]) -> dict[str, str]:
+    """`docker inspect`'s `Config.Env`, a list of literal `KEY=VALUE` strings -- same
+    tolerant parsing as `_parse_env_file` (Docker doesn't quote these, but nothing here
+    depends on that not changing)."""
+    return _parse_env_file("\n".join(env_lines))
+
+
 # The literal values deploy/controlpanel.env.example ships for two "REAL values" keys that
 # can never legitimately match the example verbatim on a real install -- a per-install
 # InfluxDB token and a real device serial number. tests/test_controlpanel_env_completeness.py
@@ -57,20 +89,63 @@ _UNCONFIGURED_MARKERS = {
     "INFLUX_TOKEN_DISPATCH": "read_planning_read_write_alphaess",
 }
 
+# The seven Kuma push URLs dispatch's `docker-compose.yml` block declares. Unlike the two
+# markers above, blank is a LEGITIMATE value here in general (unset = no heartbeat, the
+# same `:-` default the compose file itself falls back to) -- so these can't be guarded by
+# "must not equal a placeholder." What they can be guarded against is REGRESSING: if the
+# container currently running already has one of these populated (a real .env with real
+# Kuma URLs, already live), a go-live recreate must never silently blank it out just
+# because deploy/controlpanel.env was copied without filling this section in. See
+# DISPATCH-GOLIVE.md section 3 -- these back the dead-man's-switch pushes required before
+# `--live`, and dispatch has no way to notice its own heartbeat went dark.
+_HEARTBEAT_URL_KEYS = (
+    "PLAN_INFLUX_HEARTBEAT_URL",
+    "SLOTS_WRITTEN_HEARTBEAT_URL",
+    "SLOTS_FRESH_HEARTBEAT_URL",
+    "DISPATCHER_ALIVE_HEARTBEAT_URL",
+    "DISPATCH_CONFIRMED_HEARTBEAT_URL",
+    "INVERTER_NOT_HIJACKED_HEARTBEAT_URL",
+    "SOC_FLOOR_HEARTBEAT_URL",
+)
+
 
 def _controlpanel_env_unconfigured_reason() -> str | None:
     try:
         with open(CONTROLPANEL_ENV_FILE, encoding="utf-8") as f:
-            values = dict(
-                line.split("=", 1) for line in f.read().splitlines()
-                if line and not line.startswith("#") and "=" in line
-            )
+            values = _parse_env_file(f.read())
     except OSError as e:
         return f"could not read {CONTROLPANEL_ENV_FILE}: {e}"
     for key, placeholder in _UNCONFIGURED_MARKERS.items():
         if values.get(key) == placeholder:
             return (f"{key} in deploy/controlpanel.env still holds the example's shipped "
                      f"placeholder value -- see DEPLOY.md, \"Control panel\" step 7")
+    return None
+
+
+def _heartbeat_regression_reason() -> str | None:
+    proc = _run(["docker", "inspect", DISPATCH_CONTAINER])
+    if not proc.ok:
+        return None  # nothing running yet to regress FROM -- dispatch_status() etc. handle
+                     # "container doesn't exist" elsewhere; this check has nothing to add.
+    try:
+        current = _parse_docker_env_list(json.loads(proc.stdout)[0]["Config"]["Env"])
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None  # same reasoning as dispatch_status()'s own parse guard
+
+    try:
+        with open(CONTROLPANEL_ENV_FILE, encoding="utf-8") as f:
+            new = _parse_env_file(f.read())
+    except OSError as e:
+        return f"could not read {CONTROLPANEL_ENV_FILE}: {e}"
+
+    regressing = sorted(
+        key for key in _HEARTBEAT_URL_KEYS
+        if current.get(key, "").strip() and not new.get(key, "").strip()
+    )
+    if regressing:
+        return (f"deploy/controlpanel.env would blank out already-configured heartbeat "
+                 f"URL(s) {regressing} on the recreated dispatch container -- copy them "
+                 f"from the real .env first (see DEPLOY.md, \"Control panel\" step 7)")
     return None
 
 
@@ -151,9 +226,9 @@ def set_dispatch_live(live: bool) -> ActionResult:
     docs/DEPLOY.md, "The DISPATCH_LIVE mechanism". Writes the override file, then recreates
     only the dispatch service against it."""
     if live:
-        reason = _controlpanel_env_unconfigured_reason()
+        reason = _controlpanel_env_unconfigured_reason() or _heartbeat_regression_reason()
         if reason:
-            return ActionResult(ok=False, stdout="", stderr=reason, returncode=-1)
+            raise EnvUnconfigured(reason)
 
     override = {
         "services": {

@@ -275,12 +275,29 @@ def api_reliability_tick():
 
 @app.route("/api/reliability/review-dry-run", methods=["POST"])
 def api_reliability_review():
-    review = reliability_view.review_dry_run()
+    # review_dry_run() writes ONE shared file (reliability_view.REVIEW_OUT) -- without the
+    # same lock every other mutating action uses, two clicks (or two people, across either
+    # of gunicorn's 2 worker processes) racing to write it at once would interleave into
+    # one corrupt HTML file, not just waste a run.
+    try:
+        with _exclusive_action():
+            review = reliability_view.review_dry_run()
+    except ActionInProgress as e:
+        return render_template("reliability.html", tick=None, review=None, error=str(e)), 409
     return render_template("reliability.html", tick=None, review=review)
 
 
 @app.route("/reliability/review-dry-run.html")
 def reliability_review_report():
+    report_path = os.path.join(reliability_view.OUTPUT_DIR, "review-dry-run.html")
+    if not os.path.exists(report_path):
+        # Bare send_from_directory() 404s with Werkzeug's generic error page, which reads
+        # as "this URL doesn't exist" rather than "nobody has clicked the button on
+        # /reliability yet" -- the actual, common reason for a fresh install or a
+        # container that was just recreated.
+        return render_template(
+            "reliability.html", tick=None, review=None,
+            error="No report has been generated yet -- run it from /reliability first."), 404
     return send_from_directory(reliability_view.OUTPUT_DIR, "review-dry-run.html")
 
 
@@ -316,68 +333,92 @@ def _poll_dispatch_status_until(target_live: bool, attempts: int = 6,
     return status
 
 
+def _from_state(status: dict) -> str:
+    live = status.get("live")
+    return "live" if live else ("unknown" if live is None else "dry-run")
+
+
 @app.route("/api/live", methods=["POST"])
 def api_live():
     target_live = request.form.get("target") == "live"
     confirmation = request.form.get("confirmation", "")
-    status = docker_actions.dispatch_status()
-    # None (container missing) must not read as "dry-run" -- that would let a confirmation
-    # typed against a phantom "dry-run -> live" transition through, and the compose call
-    # below would then create a brand-new container from scratch rather than recreating one
-    # that never existed to begin with.
-    current_live = status.get("live")
-    from_state = "live" if current_live else ("unknown" if current_live is None else "dry-run")
     to_state = "live" if target_live else "dry-run"
 
-    if not status.get("exists"):
-        audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
-                                        accepted=False, reason="dispatch container not found")
-        return render_template(
-            "live.html", status=status,
-            error="dispatch container not found -- nothing to toggle."), 409
-
-    if not status.get("running"):
-        # `--force-recreate` starts the container regardless of whether it was running --
-        # an operator who stopped dispatch deliberately (mid-incident, say) and then opens
-        # /live sees a DRY RUN banner (dispatch_status() only reports the mode baked into
-        # the stopped container's env, not that it's stopped) and could easily confirm a
-        # toggle believing dispatch stays stopped. It doesn't: the recreate brings it back
-        # up, live if that's what was requested. Refuse outright and make them start it
-        # from the dashboard first, where the stopped state is visible.
-        audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
-                                        accepted=False, reason="dispatch is stopped")
-        return render_template(
-            "live.html", status=status,
-            error=("dispatch is stopped -- toggling live/dry-run would also start it back "
-                   "up. Start it from the dashboard first if that's what you want.")), 409
-
-    expected = _confirmation_phrase(target_live)
-    if confirmation != expected:
-        audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
-                                        accepted=False, reason="confirmation text mismatch")
-        return render_template(
-            "live.html", status=status,
-            error=f'Type exactly "{expected}" to confirm.'), 400
-
-    if current_live == target_live:
-        # Already in the requested state -- skip the recreate entirely rather than bounce
-        # dispatch for a no-op, but still log the attempt: an operator who thinks they just
-        # went live and didn't should see that in the audit trail, not a silent redirect.
-        audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
-                                        accepted=True, reason="already in the requested state")
-        return redirect(url_for("live"))
-
     try:
+        # Status is read, and every decision based on it made, INSIDE the lock -- not
+        # before acquiring it. Reading it outside first would let two concurrent requests
+        # (A -> live, B -> dry-run) each see `current_live != target_live` as true from
+        # their own pre-lock snapshot and both fall through to the compose call, one right
+        # after the other, with B's audit row recording whatever `from_state` its own stale
+        # snapshot had -- not what dispatch was actually in when B's compose call ran.
         with _exclusive_action():
-            # set_dispatch_live() writes the override file (makedirs/open/yaml.safe_dump)
-            # BEFORE it ever runs `docker compose` -- a missing or read-only `deploy/`
-            # would raise there, and an uncaught exception at this point would 500 with no
-            # audit point and no stdout line, which is exactly the silent-toggle-attempt
-            # gap audit.py exists to close. A confirmed go-live attempt has to show up in
-            # the trail even when it fails before touching Docker.
+            status = docker_actions.dispatch_status()
+            current_live = status.get("live")
+            from_state = _from_state(status)
+
+            if not status.get("exists"):
+                audit.log_dispatch_live_toggle(
+                    from_state=from_state, to_state=to_state,
+                    accepted=False, reason="dispatch container not found")
+                return render_template(
+                    "live.html", status=status,
+                    error="dispatch container not found -- nothing to toggle."), 409
+
+            if not status.get("running"):
+                # `--force-recreate` starts the container regardless of whether it was
+                # running -- an operator who stopped dispatch deliberately (mid-incident,
+                # say) and then opens /live sees a DRY RUN banner (dispatch_status() only
+                # reports the mode baked into the stopped container's env, not that it's
+                # stopped) and could easily confirm a toggle believing dispatch stays
+                # stopped. It doesn't: the recreate brings it back up, live if that's what
+                # was requested. Refuse outright and make them start it from the dashboard
+                # first, where the stopped state is visible.
+                audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
+                                                accepted=False, reason="dispatch is stopped")
+                return render_template(
+                    "live.html", status=status,
+                    error=("dispatch is stopped -- toggling live/dry-run would also start "
+                           "it back up. Start it from the dashboard first if that's what "
+                           "you want.")), 409
+
+            expected = _confirmation_phrase(target_live)
+            if confirmation != expected:
+                audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
+                                                accepted=False,
+                                                reason="confirmation text mismatch")
+                return render_template(
+                    "live.html", status=status,
+                    error=f'Type exactly "{expected}" to confirm.'), 400
+
+            if current_live == target_live:
+                # Already in the requested state -- skip the recreate entirely rather than
+                # bounce dispatch for a no-op, but still log the attempt: an operator who
+                # thinks they just went live and didn't should see that in the audit trail,
+                # not a silent redirect.
+                audit.log_dispatch_live_toggle(
+                    from_state=from_state, to_state=to_state,
+                    accepted=True, reason="already in the requested state")
+                return redirect(url_for("live"))
+
             try:
                 result = docker_actions.set_dispatch_live(target_live)
+            except docker_actions.EnvUnconfigured as e:
+                # Distinct from the generic `except Exception` below: nothing was ever run
+                # (set_dispatch_live() raises this BEFORE writing the override file or
+                # touching compose), so there is no daemon-side action to poll for -- doing
+                # so anyway would waste ~30s and then report the wrong thing ("did not end
+                # up in the requested state") instead of the real, immediately-known reason.
+                audit.log_dispatch_live_toggle(from_state=from_state, to_state=to_state,
+                                                accepted=False, reason=str(e))
+                return render_template("live.html", status=status, error=str(e)), 409
             except Exception as e:
+                # set_dispatch_live() writes the override file (makedirs/open/
+                # yaml.safe_dump) before ever running `docker compose` -- a missing or
+                # read-only `deploy/` would raise here, and an uncaught exception at this
+                # point would 500 with no audit point and no stdout line, which is exactly
+                # the silent-toggle-attempt gap audit.py exists to close. A confirmed
+                # go-live attempt has to show up in the trail even when it fails before
+                # touching Docker.
                 audit.log_dispatch_live_toggle(
                     from_state=from_state, to_state=to_state, accepted=False,
                     reason=f"exception before compose: {e}")
@@ -391,14 +432,23 @@ def api_live():
             audit.log_dispatch_live_toggle(
                 from_state=from_state, to_state=to_state, accepted=achieved,
                 reason="" if achieved else f"compose result ok={result.ok}: {result.stderr}")
+            if not achieved:
+                return render_template(
+                    "live.html", status=status_after,
+                    error=f"Dispatch did not end up in the requested state: {result.stderr}"
+                ), 500
+            return redirect(url_for("live"))
     except ActionInProgress as e:
-        return render_template("live.html", status=status, error=str(e)), 409
-
-    if not achieved:
-        return render_template(
-            "live.html", status=status_after,
-            error=f"Dispatch did not end up in the requested state: {result.stderr}"), 500
-    return redirect(url_for("live"))
+        # Still audit -- every OTHER rejection path here does, and "another operator's
+        # request was already in flight" is exactly the kind of attempt live.html/DEPLOY.md
+        # promise shows up in the trail ("every attempt here, accepted or rejected"). The
+        # status read for `from_state` is necessarily outside the lock (that's the whole
+        # problem) and so only best-effort/informational -- it plays no part in any
+        # decision, unlike the read at the top of the `with` block above.
+        fallback_status = docker_actions.dispatch_status()
+        audit.log_dispatch_live_toggle(from_state=_from_state(fallback_status),
+                                        to_state=to_state, accepted=False, reason=str(e))
+        return render_template("live.html", status=fallback_status, error=str(e)), 409
 
 
 if __name__ == "__main__":

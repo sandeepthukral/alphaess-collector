@@ -14,6 +14,7 @@ every test that exercises a route patches `docker_actions`/`audit`/the submissio
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -223,20 +224,45 @@ def test_concurrent_mutating_actions_are_rejected_while_one_is_in_progress(clien
     """flock is the only thing that can catch this: two requests (from two gunicorn worker
     PROCESSES, or just two browser tabs) both passing every earlier check and both reaching
     docker_actions.set_dispatch_live() at once. Simulated here by holding the same lock file
-    open and exclusively locked before the request comes in."""
+    open and exclusively locked before the request comes in. Also: this rejection must
+    still be audited, same as every other rejection path -- the loser's attempt should not
+    vanish from controlpanel_audit just because it lost a race for the lock."""
     import fcntl
     token = _get_csrf_token(client)
     status = {"exists": True, "live": False, "running": True, "started_at": None}
     with open(controlpanel_app._LOCK_FILE, "w") as held:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
         with patch.object(docker_actions, "dispatch_status", return_value=status), \
-             patch.object(docker_actions, "set_dispatch_live") as set_live:
+             patch.object(docker_actions, "set_dispatch_live") as set_live, \
+             patch.object(controlpanel_app.audit, "log_dispatch_live_toggle") as log_toggle:
             resp = client.post("/api/live", data={
                 "csrf_token": token, "target": "live", "confirmation": "MAKE DISPATCH LIVE",
             })
         fcntl.flock(held, fcntl.LOCK_UN)
     set_live.assert_not_called()
     assert resp.status_code == 409
+    log_toggle.assert_called_once()
+    assert log_toggle.call_args.kwargs["accepted"] is False
+
+
+def test_live_toggle_skips_the_poll_when_env_is_unconfigured(client):
+    """EnvUnconfigured means set_dispatch_live() never ran anything -- polling
+    dispatch_status() afterward would waste ~30s and then report the misleading "did not
+    end up in the requested state" instead of the real, already-known reason."""
+    token = _get_csrf_token(client)
+    status = {"exists": True, "live": False, "running": True, "started_at": None}
+    with patch.object(docker_actions, "dispatch_status", return_value=status), \
+         patch.object(docker_actions, "set_dispatch_live",
+                       side_effect=docker_actions.EnvUnconfigured("still a placeholder")), \
+         patch.object(controlpanel_app.time, "sleep") as sleep, \
+         patch.object(controlpanel_app.audit, "log_dispatch_live_toggle") as log_toggle:
+        resp = client.post("/api/live", data={
+            "csrf_token": token, "target": "live", "confirmation": "MAKE DISPATCH LIVE",
+        })
+    sleep.assert_not_called()
+    assert resp.status_code == 409
+    assert log_toggle.call_args.kwargs["accepted"] is False
+    assert "still a placeholder" in log_toggle.call_args.kwargs["reason"]
 
 
 # ---- docker_actions: refuse a go-live toggle against an unedited env file ----------------
@@ -247,10 +273,23 @@ def test_set_dispatch_live_refuses_when_env_still_has_placeholder_values(tmp_pat
         "ALPHAESS_SYS_SN=your_system_serial_number\n"
         "INFLUX_TOKEN_DISPATCH=read_planning_read_write_alphaess\n"
     )
-    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)):
-        result = docker_actions.set_dispatch_live(True)
-    assert not result.ok
-    assert "DEPLOY.md" in result.stderr
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         pytest.raises(docker_actions.EnvUnconfigured, match=r"DEPLOY\.md"):
+        docker_actions.set_dispatch_live(True)
+
+
+@pytest.mark.parametrize("value", [
+    "your_system_serial_number ",       # trailing space
+    " your_system_serial_number",       # leading space
+    '"your_system_serial_number"',      # quoted
+    "'your_system_serial_number'",      # single-quoted
+])
+def test_set_dispatch_live_placeholder_check_tolerates_whitespace_and_quoting(tmp_path, value):
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(f"ALPHAESS_SYS_SN={value}\n")
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         pytest.raises(docker_actions.EnvUnconfigured):
+        docker_actions.set_dispatch_live(True)
 
 
 def test_set_dispatch_live_allows_dry_run_even_with_placeholder_values(tmp_path):
@@ -277,8 +316,43 @@ def test_set_dispatch_live_proceeds_once_placeholders_are_replaced(tmp_path):
     with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
          patch.object(docker_actions, "OVERRIDE_FILE", str(tmp_path / "override.yml")), \
          patch.object(docker_actions, "_run") as run:
+        # Called twice when going live: once by _heartbeat_regression_reason()'s own
+        # `docker inspect` (empty stdout here, so it finds nothing to compare and allows
+        # the toggle through), once for the actual compose recreate.
         run.return_value = docker_actions.ActionResult(ok=True, stdout="", stderr="",
                                                          returncode=0)
         result = docker_actions.set_dispatch_live(True)
     assert result.ok
-    run.assert_called_once()
+    assert run.call_count == 2
+
+
+def test_set_dispatch_live_refuses_a_heartbeat_url_regression(tmp_path):
+    """The container currently running has a real Kuma URL configured; the env file about
+    to be used for the recreate would blank it out -- must be refused, not silently
+    applied."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+        "SOC_FLOOR_HEARTBEAT_URL=\n"
+    )
+    inspect_result = docker_actions.ActionResult(
+        ok=True, stdout=json.dumps([{
+            "Config": {"Env": ["SOC_FLOOR_HEARTBEAT_URL=https://kuma.example/push/abc"]},
+        }]), stderr="", returncode=0)
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "_run", return_value=inspect_result), \
+         pytest.raises(docker_actions.EnvUnconfigured, match="SOC_FLOOR_HEARTBEAT_URL"):
+        docker_actions.set_dispatch_live(True)
+
+
+def test_parse_env_file_strips_whitespace_and_quotes():
+    parsed = docker_actions._parse_env_file(
+        'A=plain\n'
+        'B = padded \n'
+        'C="quoted"\n'
+        "D='single-quoted'\n"
+        "# comment\n"
+        "\n"
+    )
+    assert parsed == {"A": "plain", "B": "padded", "C": "quoted", "D": "single-quoted"}
