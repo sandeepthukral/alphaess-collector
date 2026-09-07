@@ -11,7 +11,9 @@ import logging
 import os
 import sys
 
-from influxdb_client import InfluxDBClient, Point
+from influx_client import INFLUX_BUCKET
+from influx_client import client as _influx
+from influxdb_client import Point
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -19,13 +21,7 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"),
                      stream=sys.stdout)
 log = logging.getLogger("controlpanel")
 
-INFLUX_URL = os.environ["INFLUX_URL"]
-INFLUX_ORG = os.environ.get("INFLUX_ORG", "home")
-INFLUX_BUCKET = os.environ.get("INFLUX_BUCKET", "alphaess")
-INFLUX_TOKEN = os.environ["INFLUX_TOKEN_CONTROLPANEL"]
-
-_client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
-_write_api = _client.write_api(write_options=SYNCHRONOUS)
+_write_api = _influx.write_api(write_options=SYNCHRONOUS)
 
 
 def log_dispatch_live_toggle(*, from_state: str, to_state: str, accepted: bool,

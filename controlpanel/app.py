@@ -27,7 +27,8 @@ from flask import (
     session,
     url_for,
 )
-from influxdb_client import InfluxDBClient
+from influx_client import INFLUX_BUCKET
+from influx_client import client as _influx
 
 app = Flask(__name__)
 # Generated once per container start, before gunicorn forks its workers, so every worker in
@@ -104,12 +105,6 @@ def _exclusive_action():
             fcntl.flock(lock_fp, fcntl.LOCK_UN)
 
 
-INFLUX_URL = os.environ["INFLUX_URL"]
-INFLUX_ORG = os.environ.get("INFLUX_ORG", "home")
-INFLUX_BUCKET = os.environ.get("INFLUX_BUCKET", "alphaess")
-INFLUX_TOKEN = os.environ["INFLUX_TOKEN_CONTROLPANEL"]
-
-_influx = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
 _query_api = _influx.query_api()
 
 
@@ -284,6 +279,13 @@ def api_reliability_review():
             review = reliability_view.review_dry_run()
     except ActionInProgress as e:
         return render_template("reliability.html", tick=None, review=None, error=str(e)), 409
+    except OSError as e:
+        # review_dry_run() does `os.makedirs(OUTPUT_DIR, exist_ok=True)` before running
+        # anything -- a permissions problem or a missing/read-only /data mount raises here,
+        # same class of pre-flight failure api_live() already turns into a friendly error
+        # page rather than the framework's generic 500.
+        return render_template("reliability.html", tick=None, review=None,
+                                error=f"could not prepare the report directory: {e}"), 500
     return render_template("reliability.html", tick=None, review=review)
 
 
@@ -357,12 +359,24 @@ def api_live():
             from_state = _from_state(status)
 
             if not status.get("exists"):
+                # `docker inspect` failing outright (container missing/renamed) and it
+                # succeeding but coming back unparseable are both `exists: False`, but they
+                # are not the same problem -- the first means there is truly nothing to
+                # toggle, the second means the container is there and possibly already live,
+                # just not machine-readable right now. `not_found` (set only by
+                # dispatch_status()'s own inspect-failure branch) tells them apart instead of
+                # reporting "not found" for a state that is merely unknown.
+                if status.get("not_found"):
+                    reason = "dispatch container not found"
+                    message = f"{reason} -- nothing to toggle."
+                else:
+                    reason = status.get("error") or "dispatch state could not be determined"
+                    message = (f"Could not determine dispatch's current state, so refusing "
+                               f"to toggle it: {reason}")
                 audit.log_dispatch_live_toggle(
                     from_state=from_state, to_state=to_state,
-                    accepted=False, reason="dispatch container not found")
-                return render_template(
-                    "live.html", status=status,
-                    error="dispatch container not found -- nothing to toggle."), 409
+                    accepted=False, reason=reason)
+                return render_template("live.html", status=status, error=message), 409
 
             if not status.get("running"):
                 # `--force-recreate` starts the container regardless of whether it was

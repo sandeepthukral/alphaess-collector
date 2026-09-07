@@ -9,10 +9,10 @@ are always one of the hardcoded constants below, never built from request data.
 from __future__ import annotations
 
 import re
-import subprocess
-from dataclasses import dataclass
 
 from docker_actions import COLLECTOR_CONTAINER, MIJNBATTERIJ_CONTAINER
+from subprocess_utils import ActionResult
+from subprocess_utils import run as _run
 
 # \Z, not `$` -- `$` matches immediately before a trailing newline too, so a value ending
 # "\n" (e.g. a form field submitted with one) would pass this "strict" boundary check and
@@ -24,35 +24,6 @@ MONTH_RE = re.compile(r"^\d{4}-\d{2}\Z")
 
 class InvalidArgument(ValueError):
     pass
-
-
-@dataclass
-class ActionResult:
-    ok: bool
-    stdout: str
-    stderr: str
-    returncode: int
-
-
-def _decode(value: bytes | str | None) -> str:
-    # `subprocess.TimeoutExpired.stdout` is `bytes` even with `subprocess.run(text=True)` --
-    # `text=`/`universal_newlines=` only governs the successful-completion path, not what
-    # lands on the exception. Left undecoded this renders as a literal "b'...'" string in
-    # backfill.html instead of the partial output of a backfill that ran for up to 30
-    # minutes -- exactly when an operator most needs to read it.
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value or ""
-
-
-def _run(argv: list[str], timeout: int) -> ActionResult:
-    try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return ActionResult(ok=proc.returncode == 0, stdout=proc.stdout,
-                             stderr=proc.stderr, returncode=proc.returncode)
-    except subprocess.TimeoutExpired as e:
-        return ActionResult(ok=False, stdout=_decode(e.stdout),
-                             stderr=f"timed out after {timeout}s", returncode=-1)
 
 
 def _validate_date(value: str, label: str) -> str:

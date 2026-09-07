@@ -432,6 +432,7 @@ identical either way.
    traceback.
 11. **The dashboard is reachable and honest:**
     ```sh
+    set -a; . ./.env; set +a
     curl -u <user>:<password> -o /dev/null -w '%{http_code}\n' http://localhost:${CONTROLPANEL_PORT:-8090}/
     ```
     Should print `200`. Then open `http://<nas-lan-ip>:${CONTROLPANEL_PORT:-8090}/` in a

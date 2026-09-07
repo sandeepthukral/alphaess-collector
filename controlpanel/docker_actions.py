@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-from dataclasses import dataclass
 
 import yaml
+from subprocess_utils import ActionResult
+from subprocess_utils import run as _run
 
 # The identical absolute path this repo lives at on the host (e.g.
 # /volume1/docker/alphaess-collector). Required -- see DEPLOY.md, "Control panel" -- because
@@ -123,7 +123,7 @@ def _controlpanel_env_unconfigured_reason() -> str | None:
 
 
 def _heartbeat_regression_reason() -> str | None:
-    proc = _run(["docker", "inspect", DISPATCH_CONTAINER])
+    proc = _run(["docker", "inspect", DISPATCH_CONTAINER], timeout=60)
     if not proc.ok:
         return None  # nothing running yet to regress FROM -- dispatch_status() etc. handle
                      # "container doesn't exist" elsewhere; this check has nothing to add.
@@ -149,40 +149,13 @@ def _heartbeat_regression_reason() -> str | None:
     return None
 
 
-@dataclass
-class ActionResult:
-    ok: bool
-    stdout: str
-    stderr: str
-    returncode: int
-
-
-def _decode(value: bytes | str | None) -> str:
-    # `subprocess.TimeoutExpired.stdout` is `bytes` even with `subprocess.run(text=True)` --
-    # `text=`/`universal_newlines=` only governs the successful-completion path, not what
-    # lands on the exception. Left undecoded this renders as a literal "b'...'" string
-    # instead of the actual partial output.
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return value or ""
-
-
-def _run(argv: list[str], timeout: int = 60) -> ActionResult:
-    try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return ActionResult(ok=proc.returncode == 0, stdout=proc.stdout,
-                             stderr=proc.stderr, returncode=proc.returncode)
-    except subprocess.TimeoutExpired as e:
-        return ActionResult(ok=False, stdout=_decode(e.stdout),
-                             stderr=f"timed out after {timeout}s", returncode=-1)
-
-
 def dispatch_status() -> dict:
     """Current running state and DISPATCH_LIVE value, read from the container itself --
     never from the override file, which could be stale or never applied."""
-    proc = _run(["docker", "inspect", DISPATCH_CONTAINER])
+    proc = _run(["docker", "inspect", DISPATCH_CONTAINER], timeout=60)
     if not proc.ok:
-        return {"exists": False, "running": False, "live": None, "error": proc.stderr}
+        return {"exists": False, "running": False, "live": None,
+                "not_found": True, "error": proc.stderr}
 
     # `dispatch_status()` backs the dashboard's Start/Stop buttons and the live-toggle
     # banner -- both need to render even if `docker inspect`'s own output can't be parsed
@@ -207,12 +180,16 @@ def dispatch_status() -> dict:
         # dashboard and live-toggle templates already treat that as "state unknown, don't
         # claim dry-run/stopped" (see live.html's amber banner), which is exactly right when
         # this container's actual state genuinely can't be determined from what came back.
+        # `not_found` stays absent (falsy): the container plainly exists, `docker inspect`
+        # said so -- api_live() uses this to tell "nothing to toggle" apart from "state
+        # unknown because the output couldn't be parsed", which need a different message and
+        # a different operator response.
         return {"exists": False, "running": False, "live": None,
                 "error": f"could not parse `docker inspect` output: {e}"}
 
 
 def start_dispatch() -> ActionResult:
-    return _run(["docker", "start", DISPATCH_CONTAINER])
+    return _run(["docker", "start", DISPATCH_CONTAINER], timeout=60)
 
 
 def stop_dispatch() -> ActionResult:
