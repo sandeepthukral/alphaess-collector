@@ -7,6 +7,7 @@
 {% endif %}
 
 <h2>Is it deciding? (right now)</h2>
+<div class="card">
 <form method="post" action="/api/reliability/tick">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <button type="submit">Run scripts/is-it-deciding.py</button>
@@ -14,8 +15,10 @@
 {% if tick %}
   <pre class="{{ '' if tick.ok else 'bad' }}">{{ tick.stdout }}{{ tick.stderr }}</pre>
 {% endif %}
+</div>
 
 <h2>Review dry run (whole day)</h2>
+<div class="card">
 <form method="post" action="/api/reliability/review-dry-run">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <button type="submit">Run scripts/review-dry-run.py</button>
@@ -27,4 +30,5 @@
     <pre class="bad">{{ review.stdout }}{{ review.stderr }}</pre>
   {% endif %}
 {% endif %}
+</div>
 {% endblock %}
