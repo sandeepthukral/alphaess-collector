@@ -18,14 +18,16 @@
     </span>
   </p>
   <p><small>started {{ status.started_at or "-" }}</small></p>
-  <form method="post" action="/api/dispatch/start" style="display:inline">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit" {{ "disabled" if status.running else "" }}>Start</button>
-  </form>
-  <form method="post" action="/api/dispatch/stop" style="display:inline">
-  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-    <button type="submit" {{ "disabled" if not status.running else "" }}>Stop</button>
-  </form>
+  <div class="actions">
+    <form method="post" action="/api/dispatch/start">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" {{ "disabled" if status.running else "" }}>Start</button>
+    </form>
+    <form method="post" action="/api/dispatch/stop">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" {{ "disabled" if not status.running else "" }}>Stop</button>
+    </form>
+  </div>
 {% endif %}
 </div>
 
