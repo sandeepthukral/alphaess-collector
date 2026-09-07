@@ -59,6 +59,15 @@ def _inject_csrf_token():
 _DISPLAY_TZ = ZoneInfo("Europe/Amsterdam")
 
 
+@app.context_processor
+def _inject_max_backfill_date():
+    # Today is never a complete day for prices/pricing/efficiency's gates (series
+    # coverage can't hit 100% before the day ends), so selecting it always fails --
+    # cap the date pickers at yesterday, in the same local zone the gates key off.
+    yesterday = dt.datetime.now(_DISPLAY_TZ).date() - dt.timedelta(days=1)
+    return {"max_backfill_date": yesterday.isoformat()}
+
+
 @app.template_filter("local_time")
 def _local_time(value: str | None) -> str:
     if not value:

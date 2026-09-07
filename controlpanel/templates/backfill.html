@@ -14,8 +14,8 @@
 <div class="card">
 <form method="post" action="/api/backfill/prices">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label>Start <input type="date" name="start" required></label>
-  <label>End <input type="date" name="end" required></label>
+  <label>Start <input type="date" name="start" max="{{ max_backfill_date }}" required></label>
+  <label>End <input type="date" name="end" max="{{ max_backfill_date }}" required></label>
   <button type="submit">Run</button>
 </form>
 </div>
@@ -24,8 +24,8 @@
 <div class="card">
 <form method="post" action="/api/backfill/pricing">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label>Start <input type="date" name="start" required></label>
-  <label>End <input type="date" name="end" required></label>
+  <label>Start <input type="date" name="start" max="{{ max_backfill_date }}" required></label>
+  <label>End <input type="date" name="end" max="{{ max_backfill_date }}" required></label>
   <button type="submit">Run</button>
 </form>
 </div>
@@ -34,8 +34,8 @@
 <div class="card">
 <form method="post" action="/api/backfill/efficiency">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-  <label>Start <input type="date" name="start" required></label>
-  <label>End <input type="date" name="end" required></label>
+  <label>Start <input type="date" name="start" max="{{ max_backfill_date }}" required></label>
+  <label>End <input type="date" name="end" max="{{ max_backfill_date }}" required></label>
   <button type="submit">Run</button>
 </form>
 </div>
