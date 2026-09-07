@@ -373,15 +373,56 @@ def api_backfill(action: str):
     return render_template("backfill.html", result=result)
 
 
+def _daily_gate_history(days: int = 14) -> dict | list[dict]:
+    # daily_energy (efficiency) and daily_cost (pricing) are written ONLY when their
+    # respective gate() passes -- there is no "gated" record, just an absent day. So this
+    # can show which days produced output, but can't tell a gated day apart from one never
+    # attempted; the label in the template says so. Two simple queries, like the
+    # mijnbatterij widget above, rather than one query joining both measurements.
+    def _dates_present(measurement: str) -> set:
+        flux = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: -{int(days)}d)
+          |> filter(fn: (r) => r._measurement == "{measurement}")
+          |> keep(columns: ["_time"])
+          |> group()
+        '''
+        return {record.get_time().astimezone(_DISPLAY_TZ).date()
+                for table in _query_api.query(flux) for record in table.records}
+
+    try:
+        efficiency_dates = _dates_present("daily_energy")
+        pricing_dates = _dates_present("daily_cost")
+    except Exception as e:
+        return {"query_error": str(e)}
+
+    today = dt.datetime.now(_DISPLAY_TZ).date()
+    return [
+        {
+            "date": (today - dt.timedelta(days=offset)).isoformat(),
+            "efficiency": (today - dt.timedelta(days=offset)) in efficiency_dates,
+            "pricing": (today - dt.timedelta(days=offset)) in pricing_dates,
+        }
+        for offset in range(1, days + 1)
+    ]
+
+
+def _render_reliability(tick=None, review=None, error=None, code=200):
+    gate_history = _daily_gate_history()
+    result = render_template("reliability.html", tick=tick, review=review, error=error,
+                              gate_history=gate_history)
+    return (result, code) if code != 200 else result
+
+
 @app.route("/reliability")
 def reliability():
-    return render_template("reliability.html", tick=None, review=None)
+    return _render_reliability()
 
 
 @app.route("/api/reliability/tick", methods=["POST"])
 def api_reliability_tick():
     tick = reliability_view.is_it_deciding()
-    return render_template("reliability.html", tick=tick, review=None)
+    return _render_reliability(tick=tick)
 
 
 @app.route("/api/reliability/review-dry-run", methods=["POST"])
@@ -394,15 +435,15 @@ def api_reliability_review():
         with _exclusive_action():
             review = reliability_view.review_dry_run()
     except ActionInProgress as e:
-        return render_template("reliability.html", tick=None, review=None, error=str(e)), 409
+        return _render_reliability(error=str(e), code=409)
     except OSError as e:
         # review_dry_run() does `os.makedirs(OUTPUT_DIR, exist_ok=True)` before running
         # anything -- a permissions problem or a missing/read-only /data mount raises here,
         # same class of pre-flight failure api_live() already turns into a friendly error
         # page rather than the framework's generic 500.
-        return render_template("reliability.html", tick=None, review=None,
-                                error=f"could not prepare the report directory: {e}"), 500
-    return render_template("reliability.html", tick=None, review=review)
+        return _render_reliability(error=f"could not prepare the report directory: {e}",
+                                    code=500)
+    return _render_reliability(review=review)
 
 
 @app.route("/reliability/review-dry-run.html")

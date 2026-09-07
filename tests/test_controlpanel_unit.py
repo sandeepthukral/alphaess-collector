@@ -97,6 +97,22 @@ def _get_csrf_token(client) -> str:
         return sess["csrf_token"]
 
 
+def test_reliability_page_shows_gate_history(client):
+    history = [{"date": "2026-09-06", "efficiency": True, "pricing": False}]
+    with patch.object(controlpanel_app, "_daily_gate_history", return_value=history):
+        resp = client.get("/reliability")
+    assert resp.status_code == 200
+    assert b"2026-09-06" in resp.data
+
+
+def test_reliability_page_surfaces_gate_history_query_error(client):
+    with patch.object(controlpanel_app, "_daily_gate_history",
+                       return_value={"query_error": "connection refused"}):
+        resp = client.get("/reliability")
+    assert resp.status_code == 200
+    assert b"connection refused" in resp.data
+
+
 def test_dashboard_shows_collector_gap(client):
     collector = {"last_sample": "2026-09-07 12:00:00 CEST", "samples_last_hour": 40, "gap": True}
     with patch.object(docker_actions, "dispatch_status",

@@ -31,4 +31,30 @@
   {% endif %}
 {% endif %}
 </div>
+
+<h2>Daily gate history</h2>
+<div class="card">
+<p><small>A day shows here once its gate passes and it's written -- a blank cell means
+  gated, not yet run, or not backfilled, not necessarily a failure.</small></p>
+{% if gate_history is mapping and gate_history.query_error is defined %}
+  <p class="bad">could not query InfluxDB: {{ gate_history.query_error }}</p>
+{% else %}
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>Date</th><th>Efficiency</th><th>Pricing</th></tr>
+    </thead>
+    <tbody>
+      {% for row in gate_history %}
+      <tr>
+        <td>{{ row.date }}</td>
+        <td><span class="pill {{ 'ok' if row.efficiency else 'warn' }}">{{ "yes" if row.efficiency else "-" }}</span></td>
+        <td><span class="pill {{ 'ok' if row.pricing else 'warn' }}">{{ "yes" if row.pricing else "-" }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+{% endif %}
+</div>
 {% endblock %}
