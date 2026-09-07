@@ -97,6 +97,29 @@ def _get_csrf_token(client) -> str:
         return sess["csrf_token"]
 
 
+def test_dashboard_shows_collector_gap(client):
+    collector = {"last_sample": "2026-09-07 12:00:00 CEST", "samples_last_hour": 40, "gap": True}
+    with patch.object(docker_actions, "dispatch_status",
+                       return_value={"exists": False, "live": None, "error": "n/a"}), \
+         patch.object(controlpanel_app, "_latest_mijnbatterij_submission", return_value=None), \
+         patch.object(controlpanel_app, "_collector_health", return_value=collector):
+        resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"gap" in resp.data
+    assert b"40 samples" in resp.data
+
+
+def test_dashboard_shows_collector_healthy(client):
+    collector = {"last_sample": "2026-09-07 12:00:00 CEST", "samples_last_hour": 110, "gap": False}
+    with patch.object(docker_actions, "dispatch_status",
+                       return_value={"exists": False, "live": None, "error": "n/a"}), \
+         patch.object(controlpanel_app, "_latest_mijnbatterij_submission", return_value=None), \
+         patch.object(controlpanel_app, "_collector_health", return_value=collector):
+        resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"healthy" in resp.data
+
+
 def test_audit_page_renders_entries(client):
     entries = [
         {"time": "2026-09-07 12:00:00 CEST", "action": "dispatch_live",

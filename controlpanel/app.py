@@ -244,6 +244,50 @@ def _recent_audit_entries(limit: int = 25) -> list[dict] | dict:
     return entries
 
 
+def _collector_health() -> dict:
+    # Two cheap queries, same shape as the mijnbatterij widget above: freshness (is the
+    # collector writing at all right now) and a rolling count (is it writing at the right
+    # rate). A healthy hour is 105-114 samples at the 30s poll interval, not 120 -- the
+    # AlphaESS API round-trip costs a few every hour as a matter of course. <90 is a real
+    # gap (see the collector-gap-baseline runbook that set this threshold).
+    freshness_flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: -6h)
+      |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "pv_power_w")
+      |> sort(columns: ["_time"], desc: true)
+      |> limit(n: 1)
+    '''
+    try:
+        last_sample = None
+        for table in _query_api.query(freshness_flux):
+            for record in table.records:
+                last_sample = record.get_time()
+    except Exception as e:
+        return {"query_error": str(e)}
+
+    count_flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: -1h)
+      |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "pv_power_w")
+      |> count()
+    '''
+    samples_last_hour = 0
+    try:
+        for table in _query_api.query(count_flux):
+            for record in table.records:
+                samples_last_hour = record.get_value()
+    except Exception:
+        pass  # freshness above is already known good; a broken count query here must not
+              # blank out a result we already have.
+
+    return {
+        "last_sample": (last_sample.astimezone(_DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+                         if last_sample else None),
+        "samples_last_hour": samples_last_hour,
+        "gap": samples_last_hour < 90,
+    }
+
+
 @app.route("/audit")
 def audit_trail():
     return render_template("audit.html", entries=_recent_audit_entries())
@@ -259,14 +303,17 @@ def dashboard():
     # with a button to run it on demand.
     status = docker_actions.dispatch_status()
     submission = _latest_mijnbatterij_submission()
-    return render_template("dashboard.html", status=status, submission=submission)
+    collector = _collector_health()
+    return render_template("dashboard.html", status=status, submission=submission,
+                            collector=collector)
 
 
 def _dashboard_error(error: str, code: int = 500):
     status = docker_actions.dispatch_status()
     submission = _latest_mijnbatterij_submission()
+    collector = _collector_health()
     return render_template("dashboard.html", status=status, submission=submission,
-                            error=error), code
+                            collector=collector, error=error), code
 
 
 @app.route("/api/dispatch/start", methods=["POST"])

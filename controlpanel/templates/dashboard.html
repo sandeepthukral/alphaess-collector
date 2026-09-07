@@ -33,6 +33,21 @@
 
 <p><a href="/reliability">Check whether it's deciding right now &rarr;</a></p>
 
+<h2>Collector</h2>
+<div class="card">
+{% if collector.query_error is defined %}
+  <p class="bad">could not query InfluxDB: {{ collector.query_error }}</p>
+{% else %}
+  <p>
+    <span class="pill {{ 'bad' if not collector.last_sample else ('warn' if collector.gap else 'ok') }}">
+      {{ "no recent samples" if not collector.last_sample else ("gap" if collector.gap else "healthy") }}
+    </span>
+  </p>
+  <p><small>last sample {{ collector.last_sample or "-" }} &middot;
+    {{ collector.samples_last_hour }} samples in the last hour (healthy: 105-114)</small></p>
+{% endif %}
+</div>
+
 <h2>Latest mijnbatterij submission</h2>
 <div class="card">
 {% if submission and submission.query_error is defined %}
