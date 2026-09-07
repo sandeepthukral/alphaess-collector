@@ -233,6 +233,14 @@ __marimo__/
 # See PLAN-repo-seams.md and DESIGN-dispatch.md.
 dispatch/testdata/
 
+# Control panel: nginx basic-auth file (created by hand on the NAS with `htpasswd -B -c`),
+# and the two files controlpanel rewrites on every dispatch-live toggle / recreate. See
+# DEPLOY.md, "Control panel", and deploy/controlpanel.env.example for why the env file is
+# separate from the real .env.
+controlpanel/.htpasswd
+deploy/dispatch-live.override.yml
+deploy/controlpanel.env
+
 # Editor swap and backup files. Not hypothetical: `scripts/.backup-influxdb.sh.swp`
 # was committed to the `backup-folder-cloud-sync` branch in August 2026, because
 # nothing here excluded it. A swapfile carries whatever was in the buffer at the

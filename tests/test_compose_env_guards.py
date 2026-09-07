@@ -35,6 +35,7 @@ MINT_DESCRIPTION = {
     "INFLUX_TOKEN_PUSHER": "awtrix-pusher",
     "INFLUX_TOKEN_GRAFANA": "grafana",
     "INFLUX_TOKEN_DISPATCH": "dispatch",
+    "INFLUX_TOKEN_CONTROLPANEL": "controlpanel",
 }
 
 

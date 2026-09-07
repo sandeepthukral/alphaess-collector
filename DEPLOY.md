@@ -292,6 +292,212 @@ giving up, which is longer than Docker's default 10 s grace. A stop that took th
 full 30 s and still did not release means the inverter was not answering at all, and
 the next question is whether anything else is holding its single Modbus connection.
 
+## Control panel
+
+A small web UI, `controlpanel` + `nginx`, wrapping the console operations above (start/stop
+dispatch, backfills, the reliability scripts, the dispatch-live toggle) so they don't each
+need SSH and the right incantation from memory. It is not new dispatch logic — every action
+it exposes runs one of the exact commands already documented in this file.
+
+**This is now the second thing exposed to the LAN, besides Grafana.** It sits behind nginx
+basic auth; there is no session/login code of its own to maintain. Two brand-new services
+(`controlpanel`, `nginx`) and one brand-new volume (`alphaess-controlpanel-data`) — but this
+change ALSO pins `container_name:` on `dispatch`, `collector` and `mijnbatterij` themselves
+(step 8 below explains why), which is a config change to those three services too. None of
+the three caveats in ["Updating"](#updating) applies (no `networks:`/`volumes:` change here,
+and none of the three ships provisioning files), but they do each need an explicit recreate
+once, which is its own step below — they will not just keep running untouched.
+
+### First-time setup, after the PR merges
+
+Assumes the PR is already merged to `main` and you are SSH'd into the NAS. If you are instead
+deploying this branch directly, before it merges, substitute step 1's `git checkout main &&
+git pull` with `git fetch && git checkout <branch-name>` — everything after that step is
+identical either way.
+
+1. **Sync the checkout:**
+   ```sh
+   cd /volume1/docker/alphaess-collector
+   git checkout main
+   git pull
+   ```
+2. **Add the new `.env` keys.** `diff` against the example to see exactly what's new and
+   confirm you haven't missed one:
+   ```sh
+   diff <(grep -oE '^[A-Z_]+=' .env | sort) <(grep -oE '^[A-Z_]+=' .env.example | sort)
+   ```
+   The ones this feature adds: `INFLUX_TOKEN_CONTROLPANEL`, `HOST_REPO_PATH`,
+   `COMPOSE_PROJECT_NAME`, `CONTROLPANEL_PORT`. Add each to the real `.env` — see steps 3-5
+   below for what to put in the first three. `CONTROLPANEL_PORT` is the only one of the four
+   safe to leave at its `.env.example` default, unless something on the NAS already uses
+   port 8090. **`COMPOSE_PROJECT_NAME` is NOT safe to default** — do not skip step 3 below.
+   This key isn't new to controlpanel's own compose calls, it changes what every `docker
+   compose` command on this host resolves container and volume names to. Guessing wrong
+   (or taking the `.env.example` default when it doesn't match) makes the very next `docker
+   compose up -d` build an entire second stack under the wrong project name — a brand new,
+   empty `alphaess-influxdb-data` volume included — alongside the real one, rather than
+   operating on it.
+3. **Confirm the compose project name** compose already uses, rather than guessing:
+   ```sh
+   sudo docker compose ls
+   ```
+   Set `COMPOSE_PROJECT_NAME` in `.env` to match exactly what's printed there (usually the
+   checkout's directory name). A mismatch here means `controlpanel`'s own compose calls
+   compute container names that don't match the ones actually running, and the live toggle's
+   `--force-recreate dispatch` would create a second, orphaned `dispatch` container instead of
+   recreating the real one.
+4. **Set `HOST_REPO_PATH`** in `.env` to this checkout's absolute path on the host — confirm
+   it, don't guess:
+   ```sh
+   pwd   # should print e.g. /volume1/docker/alphaess-collector
+   ```
+   This has to be exact: `controlpanel` drives `docker compose` from inside its own container
+   over the mounted Docker socket, and compose resolves relative paths in
+   `docker-compose.yml` against this before sending them to the daemon, which can only mount
+   what exists on the host.
+5. **Mint `INFLUX_TOKEN_CONTROLPANEL`** the same way as the other tokens above (`-d
+   "controlpanel: rw alphaess"`; see ["Scoped tokens"](#scoped-tokens) for the full
+   `influx auth create` recipe), and set it in `.env`.
+6. **Generate the basic-auth file** (bcrypt, not the weaker default — plain `htpasswd -c` can
+   pick a weaker scheme depending on the build). **Do this before any bare `sudo docker
+   compose up -d` runs on this checkout again** — `nginx`'s compose service bind-mounts this
+   path, and if it doesn't exist yet Docker creates it as an empty *directory* instead, which
+   then makes nginx fail to start with a confusing mount error until you `rmdir` it and redo
+   this step:
+   ```sh
+   sudo docker run --rm httpd:alpine htpasswd -Bbn <user> <password> > controlpanel/.htpasswd
+   ```
+7. **Create `deploy/controlpanel.env`** from the example and fill in the real, dispatch-scoped
+   values by hand:
+   ```sh
+   cp deploy/controlpanel.env.example deploy/controlpanel.env
+   ```
+   Edit it: copy `INVERTER_IP`, `INFLUX_TOKEN_DISPATCH`, `ALPHAESS_SYS_SN`,
+   `BATTERY_CAPACITY_WH`, `TRANSLATE_INTERVAL_S`, `SOC_FLOOR_PCT`, `KUMA_ADDR`,
+   `INFLUX_ORG`/`INFLUX_BUCKET`/`PLANNING_BUCKET` (if you changed any from their defaults), and
+   the dispatch heartbeat URLs straight out of the real `.env`. Leave `HOST_REPO_PATH` as the
+   same absolute path you set in step 4 (that one *is* a real value here too — see the file's
+   own comment for why). Leave the "other services" section as its shipped placeholders —
+   **do not** put `ALPHAESS_APP_SECRET`, `MIJNBATTERIJ_API_KEY`, or any other service's
+   InfluxDB token in this file; it exists specifically so `controlpanel` never has to read
+   them. `tests/test_controlpanel_env_completeness.py` catches a *missing* key, not a *wrong*
+   value, so double-check the dispatch-scoped values by eye against `.env`.
+8. **Build and start the two new services** — named explicitly so this only ever creates
+   `controlpanel` and `nginx` themselves, and `--no-deps` so it doesn't also touch
+   `influxdb` (`controlpanel` declares `depends_on: influxdb`, same reasoning as `--no-deps`
+   on the live-toggle's own compose call in `docker_actions.py` — without it this could
+   recreate `influxdb` too, bouncing `collector`, `dispatch`, `grafana` and `awtrix-pusher`
+   along with it):
+   ```sh
+   sudo docker compose build controlpanel
+   sudo docker compose up -d --no-deps controlpanel nginx
+   ```
+9. **Recreate `dispatch`, `collector` and `mijnbatterij`** so their container names actually
+   match the fixed ones controlpanel addresses by literal name (`docker_actions.py`,
+   `backfill_actions.py`) — without this, everything on the dashboard and `/backfill` fails
+   with "No such container", because compose's default names
+   (`alphaess-collector-dispatch-1`, etc.) are still what's actually running:
+   ```sh
+   sudo docker compose up -d --no-deps dispatch mijnbatterij
+   ```
+   `--no-deps` so this doesn't also touch `influxdb`. `dispatch` and `mijnbatterij` are cheap
+   to recreate — dispatch just re-reads `.env`'s `DISPATCH_LIVE` (dry run stays dry run) and
+   mijnbatterij is a stateless poller. **`collector` is not cheap**: recreating it stops
+   collection for as long as the new container takes to start, which cost 922 s of samples on
+   2026-08-10 (see the `dispatch` service's own comment in `docker-compose.yml`). Recreate it
+   separately, deliberately, when a short gap is acceptable — not folded into the command
+   above:
+   ```sh
+   sudo docker compose up -d --no-deps collector
+   ```
+   Confirm all three actually got the new name, not just a config-hash no-op:
+   ```sh
+   sudo docker compose ps dispatch collector mijnbatterij
+   docker inspect dispatch collector mijnbatterij --format '{{.Name}}'
+   ```
+   The last command should print `/dispatch`, `/collector`, `/mijnbatterij` — anything else
+   means the recreate did not take and controlpanel will still fail to find them. If you
+   later pull a plain `git pull && docker compose up -d --build` for an unrelated change and
+   these three were never recreated this way, they still won't have the fixed names — this
+   step has to happen once, deliberately, not as a side effect of a routine update.
+
+### Verify before trusting it
+
+10. **Containers are actually up:**
+   ```sh
+   sudo docker compose ps controlpanel nginx
+   sudo docker compose logs --tail 50 controlpanel nginx
+   ```
+   Both should show `Up`, and controlpanel's log should show gunicorn's boot lines with no
+   traceback.
+11. **The dashboard is reachable and honest:**
+    ```sh
+    set -a; . ./.env; set +a
+    curl -u <user>:<password> -o /dev/null -w '%{http_code}\n' http://localhost:${CONTROLPANEL_PORT:-8090}/
+    ```
+    Should print `200`. Then open `http://<nas-lan-ip>:${CONTROLPANEL_PORT:-8090}/` in a
+    browser and confirm the dispatch running/stopped state and mode (LIVE/dry-run) shown on
+    the dashboard match what `sudo docker compose ps dispatch` and `docker inspect dispatch |
+    grep DISPATCH_LIVE` say directly — the dashboard reads the same `docker inspect`, so a
+    mismatch here means something is wrong with the container, not the page.
+12. **Reliability scripts run from inside the container**, not just on your laptop: click
+    "Run scripts/is-it-deciding.py" on `/reliability` and confirm it prints the same thing
+    `scripts/is-it-deciding.py --token-env INFLUX_TOKEN_GRAFANA` does from your Mac.
+13. **The live toggle mechanism — the one part of this feature that can't be fully proven out
+    in local dev**, because it depends on Docker-outside-of-Docker path resolution against the
+    real host filesystem. From `/live`, toggle to live and immediately back to dry run once,
+    watching the whole time:
+    ```sh
+    # in a second terminal, watched continuously during the toggle:
+    watch -n1 'docker inspect dispatch --format "{{.State.Running}} {{json .Config.Env}}" | tr , "\n" | grep DISPATCH_LIVE'
+    ```
+    Confirm the value actually changes on the container both times — not just that the page
+    says so — and that `docker compose ps dispatch` shows a fresh `CreatedAt` after each
+    toggle (proof it was really recreated, not just relabelled). **Do this only with the
+    AlphaESS app's own price control already off**, per the warning on the `/live` page
+    itself — two controllers asserting the same registers is the one failure the dead man's
+    switch cannot cover.
+
+    **The override file persists after this — remember it exists.** Each toggle rewrites
+    `deploy/dispatch-live.override.yml` and leaves it there; it is only ever read via the
+    explicit `-f` the panel itself passes, deliberately never the auto-loaded
+    `docker-compose.override.yml` name, so it cannot change what a bare `sudo docker compose
+    up -d` does. But that cuts both ways: a bare `up -d dispatch` run by hand after using the
+    panel recreates dispatch from `.env`'s own `DISPATCH_LIVE` alone, silently undoing
+    whatever the panel last set. If you used the panel to go dry-run for maintenance and later
+    run a plain `up -d` (or `up -d dispatch`) with `.env` still saying `DISPATCH_LIVE=1`, the
+    battery goes back live with no confirmation prompt. Check `/live` (or `docker inspect
+    dispatch | grep DISPATCH_LIVE`) after any manual `up -d` if the panel has ever been used to
+    change this container's live state.
+14. **The audit trail landed:**
+    ```sh
+    set -a; . ./.env; set +a
+    sudo docker compose exec -T influxdb influx query \
+      -t "$INFLUX_TOKEN_CONTROLPANEL" -o "$INFLUX_ORG" \
+      'from(bucket:"alphaess") |> range(start: -1h) |> filter(fn: (r) => r._measurement == "controlpanel_audit")'
+    ```
+    Should show one row per toggle attempt from step 13, each with `accepted=true`.
+
+### If something's wrong
+
+These are two additive services with no bind mounts into the running `dispatch`/`collector`
+containers' own data, so recovery is a plain stop — it cannot affect `dispatch` mid-tick or
+touch InfluxDB's data:
+```sh
+sudo docker compose stop controlpanel nginx
+```
+The stack (dispatch included) keeps running exactly as it was before this feature existed.
+Fix forward and re-run step 8, or `git checkout main -- controlpanel docker-compose.yml
+nginx .env.example` to revert the code once you've decided what to do.
+
+Every toggle attempt, accepted or rejected, is written to the `controlpanel_audit`
+measurement (`action=dispatch_live`, fields `from_state`/`to_state`/`accepted`/`reason`) —
+chartable in Grafana, and the first place to look if a toggle happened that nobody meant.
+
+Deferred to a later iteration, not designed here: a live log tail, a genuine scheduler-level
+hold/pause flag (that one needs new dispatch code, unlike everything else on this page), and
+a backup-trigger/status view.
+
 ## Battery-savings pricing jobs
 
 The **Battery Savings** dashboard reads a `daily_cost` measurement that is _not_
@@ -1418,10 +1624,26 @@ a `SIGKILL` or a power cut is not. Recovery is
 ```sh
 git pull
 docker compose up -d --build
+sudo docker compose restart controlpanel   # only if you run the control panel -- see below
 ```
 
 InfluxDB data lives in the `alphaess-influxdb-data` volume and survives updates.
 Only `down -v` deletes it.
+
+**If you run the control panel, always restart it after a pull, even one that
+doesn't touch `docker-compose.yml`.** It bind-mounts `docker-compose.yml` itself as a
+single file (`docker-compose.yml`, "Control panel"), and a single-file bind mount is
+pinned to the inode that existed at the file's path when the container last started —
+not the path itself. `git pull` normally replaces the file rather than editing it in
+place, which changes the inode, so a running `controlpanel` container keeps reading
+whatever `docker-compose.yml` looked like when it was last started, however old that
+is. That matters because `docker_actions.set_dispatch_live()` passes this same stale
+path to `docker compose -f ...` from inside the container on every live-toggle
+click — an out-of-date copy can recreate `dispatch` missing config this branch added
+(the `container_name:` pins are exactly this kind of change). `restart` (not just
+`up -d`, which only recreates a container whose *resolved config* changed — nothing
+about `controlpanel`'s own config references file content, so it never notices) forces
+a fresh mount of the current file.
 
 Three kinds of change are **not** applied by that pair, each silently. If a pull
 touched one of them, read the matching section below before assuming you have
@@ -1524,6 +1746,7 @@ Every service gets a token scoped to what it actually does:
 | `INFLUX_TOKEN_GRAFANA` | read on every bucket it charts | Read-only. Anyone who reaches the Grafana UI can issue arbitrary Flux through the datasource proxy, so this is the one most worth keeping narrow. |
 | `INFLUX_TOKEN_DISPATCH` | read `planning`, read + write `alphaess` | Reads the plan the translator consumes and writes the `dispatch_state` readback behind the dashboard's dispatch panels. The only process in the stack that reads another project's bucket, which is why it is not the collector's token. **Needed before any compose subcommand works**, including ones that have nothing to do with dispatch — see below. |
 | `INFLUX_TOKEN_MIJNBATTERIJ` | read + write `alphaess` | Reads `power_readings`, `market_price`, `daily_cost` and `daily_energy` to build the mijnbatterij.nl payload; writes only its own `mijnbatterij_submit` and `mijnbatterij_rank` status series. Separate from the collector's because it is the one token in the stack that is also the credential for an outbound public submission — revoking it stops the publishing without touching collection. **The one token without a `:?` guard**, because that service is opt-in: see below. |
+| `INFLUX_TOKEN_CONTROLPANEL` | read + write `alphaess` | Runs the control panel's dashboard status queries and writes the `controlpanel_audit` measurement for every dispatch-live toggle attempt. Its own token rather than the dispatcher's or Grafana's, so it can be revoked without touching either. See ["Control panel"](#control-panel). |
 
 None of them has a fallback — except `INFLUX_TOKEN_MIJNBATTERIJ`, below.
 Compose fails to start and names the missing variable. A service that quietly
@@ -1585,6 +1808,10 @@ sudo docker compose exec -T influxdb influx auth create \
 sudo docker compose exec -T influxdb influx auth create \
   -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "uptime-kuma: r alphaess" \
   --read-bucket "$ALPHAESS_ID"
+
+sudo docker compose exec -T influxdb influx auth create \
+  -t "$INFLUX_TOKEN" -o "$INFLUX_ORG" -d "controlpanel: rw alphaess" \
+  --read-bucket "$ALPHAESS_ID" --write-bucket "$ALPHAESS_ID"
 ```
 
 Copy each printed token into the matching `.env` variable, then `sudo docker
