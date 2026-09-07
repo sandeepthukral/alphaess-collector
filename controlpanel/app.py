@@ -214,6 +214,41 @@ def _latest_mijnbatterij_submission() -> dict | None:
     }
 
 
+def _recent_audit_entries(limit: int = 25) -> list[dict] | dict:
+    # audit.py writes every field of one attempt in a single Point -- one write, one
+    # timestamp, one schema -- so (unlike the mijnbatterij query above) a plain pivot on
+    # _time is safe here; there's no cross-outcome column mismatch to worry about.
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: -30d)
+      |> filter(fn: (r) => r._measurement == "controlpanel_audit")
+      |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+      |> sort(columns: ["_time"], desc: true)
+      |> limit(n: {int(limit)})
+    '''
+    try:
+        tables = _query_api.query(flux)
+    except Exception as e:
+        return {"query_error": str(e)}
+    entries = []
+    for table in tables:
+        for record in table.records:
+            entries.append({
+                "time": record.get_time().astimezone(_DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+                "action": record.values.get("action"),
+                "from_state": record.values.get("from_state"),
+                "to_state": record.values.get("to_state"),
+                "accepted": record.values.get("accepted"),
+                "reason": record.values.get("reason"),
+            })
+    return entries
+
+
+@app.route("/audit")
+def audit_trail():
+    return render_template("audit.html", entries=_recent_audit_entries())
+
+
 @app.route("/")
 def dashboard():
     # No `is_it_deciding()` here on purpose -- it is a subprocess with its own 30s timeout

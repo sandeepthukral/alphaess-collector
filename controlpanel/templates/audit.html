@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Audit{% endblock %}
+{% block content %}
+<h1>Audit trail</h1>
+<p><small>Every dispatch-live toggle attempt, accepted or rejected, last 30 days.</small></p>
+
+<div class="card">
+{% if entries is mapping and entries.query_error is defined %}
+  <p class="bad">could not query InfluxDB: {{ entries.query_error }}</p>
+{% elif not entries %}
+  <p><small>no toggle attempts in the last 30 days</small></p>
+{% else %}
+  <div class="table-scroll">
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>From</th>
+        <th>To</th>
+        <th>Result</th>
+        <th>Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in entries %}
+      <tr>
+        <td>{{ e.time }}</td>
+        <td>{{ e.from_state }}</td>
+        <td>{{ e.to_state }}</td>
+        <td>
+          <span class="pill {{ 'ok' if e.accepted else 'bad' }}">
+            {{ "accepted" if e.accepted else "rejected" }}
+          </span>
+        </td>
+        <td>{{ e.reason or "-" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  </div>
+{% endif %}
+</div>
+{% endblock %}

@@ -97,6 +97,26 @@ def _get_csrf_token(client) -> str:
         return sess["csrf_token"]
 
 
+def test_audit_page_renders_entries(client):
+    entries = [
+        {"time": "2026-09-07 12:00:00 CEST", "action": "dispatch_live",
+         "from_state": "dry-run", "to_state": "live", "accepted": True, "reason": ""},
+    ]
+    with patch.object(controlpanel_app, "_recent_audit_entries", return_value=entries):
+        resp = client.get("/audit")
+    assert resp.status_code == 200
+    assert b"dry-run" in resp.data
+    assert b"accepted" in resp.data
+
+
+def test_audit_page_surfaces_query_error(client):
+    with patch.object(controlpanel_app, "_recent_audit_entries",
+                       return_value={"query_error": "connection refused"}):
+        resp = client.get("/audit")
+    assert resp.status_code == 200
+    assert b"connection refused" in resp.data
+
+
 def test_post_without_csrf_token_is_rejected(client):
     resp = client.post("/api/dispatch/start", data={})
     assert resp.status_code == 400
