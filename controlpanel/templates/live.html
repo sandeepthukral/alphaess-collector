@@ -21,28 +21,32 @@
 
 {% if status.exists and status.running and not status.live %}
 <h2>Go live</h2>
+<div class="card">
 <p>Confirm the AlphaESS app's own price control is OFF before doing this -- two controllers
    asserting the same registers is the one failure the fail-safe cannot cover.</p>
 <form method="post" action="/api/live">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="target" value="live">
-  <label>Type <code>MAKE DISPATCH LIVE</code> to confirm:
+  <label>Type <code>MAKE DISPATCH LIVE</code> to confirm
     <input type="text" name="confirmation" required autocomplete="off">
   </label>
   <button type="submit">Go live</button>
 </form>
+</div>
 {% endif %}
 
 {% if status.exists and status.running and status.live %}
 <h2>Return to dry run</h2>
+<div class="card">
 <form method="post" action="/api/live">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <input type="hidden" name="target" value="dry-run">
-  <label>Type <code>MAKE DISPATCH DRY-RUN</code> to confirm:
+  <label>Type <code>MAKE DISPATCH DRY-RUN</code> to confirm
     <input type="text" name="confirmation" required autocomplete="off">
   </label>
   <button type="submit">Return to dry run</button>
 </form>
+</div>
 {% endif %}
 
 {% if status.exists and not status.running %}

@@ -4,35 +4,44 @@
 <h1>Backfill</h1>
 {% if error %}<p class="bad">{{ error }}</p>{% endif %}
 {% if result %}
-  <h2>Result ({{ "ok" if result.ok else "failed, exit " ~ result.returncode }})</h2>
-  <pre>{{ result.stdout }}{{ result.stderr }}</pre>
+  <div class="card">
+    <h2>Result ({{ "ok" if result.ok else "failed, exit " ~ result.returncode }})</h2>
+    <pre>{{ result.stdout }}{{ result.stderr }}</pre>
+  </div>
 {% endif %}
 
 <h2>Market Rates</h2>
+<div class="card">
 <form method="post" action="/api/backfill/prices">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>Start <input type="date" name="start" required></label>
   <label>End <input type="date" name="end" required></label>
   <button type="submit">Run</button>
 </form>
+</div>
 
 <h2>Battery Savings</h2>
+<div class="card">
 <form method="post" action="/api/backfill/pricing">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>Start <input type="date" name="start" required></label>
   <label>End <input type="date" name="end" required></label>
   <button type="submit">Run</button>
 </form>
+</div>
 
 <h2>Efficiency</h2>
+<div class="card">
 <form method="post" action="/api/backfill/efficiency">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>Start <input type="date" name="start" required></label>
   <label>End <input type="date" name="end" required></label>
   <button type="submit">Run</button>
 </form>
+</div>
 
 <h2>mijnbatterij.nl -- monthly backfill</h2>
+<div class="card">
 <form method="post" action="/api/backfill/mijnbatterij-monthly">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>Months (comma-separated, YYYY-MM)
@@ -40,10 +49,13 @@
   </label>
   <button type="submit">Run</button>
 </form>
+</div>
 
 <h2>mijnbatterij.nl -- resubmit now</h2>
+<div class="card">
 <form method="post" action="/api/backfill/mijnbatterij-resubmit">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <button type="submit">Submit current snapshot</button>
 </form>
+</div>
 {% endblock %}
