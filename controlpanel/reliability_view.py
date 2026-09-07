@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 
 from docker_actions import HOST_REPO_PATH
+from influx_client import INFLUX_BUCKET
 from subprocess_utils import ActionResult
 from subprocess_utils import run as _run
 
@@ -22,9 +23,6 @@ SCRIPTS_DIR = f"{HOST_REPO_PATH}/scripts"
 # into the container solely for the HTML this script produces, not the repo checkout itself.
 OUTPUT_DIR = "/data/reliability"
 REVIEW_OUT = f"{OUTPUT_DIR}/review-dry-run.html"
-
-
-INFLUX_BUCKET = os.environ.get("INFLUX_BUCKET", "alphaess")
 
 
 def is_it_deciding() -> ActionResult:
