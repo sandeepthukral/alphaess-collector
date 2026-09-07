@@ -59,6 +59,15 @@ def _inject_csrf_token():
 _DISPLAY_TZ = ZoneInfo("Europe/Amsterdam")
 
 
+@app.context_processor
+def _inject_max_backfill_date():
+    # Today is never a complete day for prices/pricing/efficiency's gates (series
+    # coverage can't hit 100% before the day ends), so selecting it always fails --
+    # cap the date pickers at yesterday, in the same local zone the gates key off.
+    yesterday = dt.datetime.now(_DISPLAY_TZ).date() - dt.timedelta(days=1)
+    return {"max_backfill_date": yesterday.isoformat()}
+
+
 @app.template_filter("local_time")
 def _local_time(value: str | None) -> str:
     if not value:
@@ -205,6 +214,85 @@ def _latest_mijnbatterij_submission() -> dict | None:
     }
 
 
+def _recent_audit_entries(limit: int = 25) -> list[dict] | dict:
+    # audit.py writes every field of one attempt in a single Point -- one write, one
+    # timestamp, one schema -- so (unlike the mijnbatterij query above) a plain pivot on
+    # _time is safe here; there's no cross-outcome column mismatch to worry about.
+    flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: -30d)
+      |> filter(fn: (r) => r._measurement == "controlpanel_audit")
+      |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+      |> sort(columns: ["_time"], desc: true)
+      |> limit(n: {int(limit)})
+    '''
+    try:
+        tables = _query_api.query(flux)
+    except Exception as e:
+        return {"query_error": str(e)}
+    entries = []
+    for table in tables:
+        for record in table.records:
+            entries.append({
+                "time": record.get_time().astimezone(_DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S %Z"),
+                "action": record.values.get("action"),
+                "from_state": record.values.get("from_state"),
+                "to_state": record.values.get("to_state"),
+                "accepted": record.values.get("accepted"),
+                "reason": record.values.get("reason"),
+            })
+    return entries
+
+
+def _collector_health() -> dict:
+    # Two cheap queries, same shape as the mijnbatterij widget above: freshness (is the
+    # collector writing at all right now) and a rolling count (is it writing at the right
+    # rate). A healthy hour is 105-114 samples at the 30s poll interval, not 120 -- the
+    # AlphaESS API round-trip costs a few every hour as a matter of course. <90 is a real
+    # gap (see the collector-gap-baseline runbook that set this threshold).
+    freshness_flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: -6h)
+      |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "pv_power_w")
+      |> sort(columns: ["_time"], desc: true)
+      |> limit(n: 1)
+    '''
+    try:
+        last_sample = None
+        for table in _query_api.query(freshness_flux):
+            for record in table.records:
+                last_sample = record.get_time()
+    except Exception as e:
+        return {"query_error": str(e)}
+
+    count_flux = f'''
+    from(bucket: "{INFLUX_BUCKET}")
+      |> range(start: -1h)
+      |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "pv_power_w")
+      |> count()
+    '''
+    samples_last_hour = 0
+    try:
+        for table in _query_api.query(count_flux):
+            for record in table.records:
+                samples_last_hour = record.get_value()
+    except Exception:
+        pass  # freshness above is already known good; a broken count query here must not
+              # blank out a result we already have.
+
+    return {
+        "last_sample": (last_sample.astimezone(_DISPLAY_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
+                         if last_sample else None),
+        "samples_last_hour": samples_last_hour,
+        "gap": samples_last_hour < 90,
+    }
+
+
+@app.route("/audit")
+def audit_trail():
+    return render_template("audit.html", entries=_recent_audit_entries())
+
+
 @app.route("/")
 def dashboard():
     # No `is_it_deciding()` here on purpose -- it is a subprocess with its own 30s timeout
@@ -215,14 +303,17 @@ def dashboard():
     # with a button to run it on demand.
     status = docker_actions.dispatch_status()
     submission = _latest_mijnbatterij_submission()
-    return render_template("dashboard.html", status=status, submission=submission)
+    collector = _collector_health()
+    return render_template("dashboard.html", status=status, submission=submission,
+                            collector=collector)
 
 
 def _dashboard_error(error: str, code: int = 500):
     status = docker_actions.dispatch_status()
     submission = _latest_mijnbatterij_submission()
+    collector = _collector_health()
     return render_template("dashboard.html", status=status, submission=submission,
-                            error=error), code
+                            collector=collector, error=error), code
 
 
 @app.route("/api/dispatch/start", methods=["POST"])
@@ -282,15 +373,56 @@ def api_backfill(action: str):
     return render_template("backfill.html", result=result)
 
 
+def _daily_gate_history(days: int = 14) -> dict | list[dict]:
+    # daily_energy (efficiency) and daily_cost (pricing) are written ONLY when their
+    # respective gate() passes -- there is no "gated" record, just an absent day. So this
+    # can show which days produced output, but can't tell a gated day apart from one never
+    # attempted; the label in the template says so. Two simple queries, like the
+    # mijnbatterij widget above, rather than one query joining both measurements.
+    def _dates_present(measurement: str) -> set:
+        flux = f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: -{int(days)}d)
+          |> filter(fn: (r) => r._measurement == "{measurement}")
+          |> keep(columns: ["_time"])
+          |> group()
+        '''
+        return {record.get_time().astimezone(_DISPLAY_TZ).date()
+                for table in _query_api.query(flux) for record in table.records}
+
+    try:
+        efficiency_dates = _dates_present("daily_energy")
+        pricing_dates = _dates_present("daily_cost")
+    except Exception as e:
+        return {"query_error": str(e)}
+
+    today = dt.datetime.now(_DISPLAY_TZ).date()
+    return [
+        {
+            "date": (today - dt.timedelta(days=offset)).isoformat(),
+            "efficiency": (today - dt.timedelta(days=offset)) in efficiency_dates,
+            "pricing": (today - dt.timedelta(days=offset)) in pricing_dates,
+        }
+        for offset in range(1, days + 1)
+    ]
+
+
+def _render_reliability(tick=None, review=None, error=None, code=200):
+    gate_history = _daily_gate_history()
+    result = render_template("reliability.html", tick=tick, review=review, error=error,
+                              gate_history=gate_history)
+    return (result, code) if code != 200 else result
+
+
 @app.route("/reliability")
 def reliability():
-    return render_template("reliability.html", tick=None, review=None)
+    return _render_reliability()
 
 
 @app.route("/api/reliability/tick", methods=["POST"])
 def api_reliability_tick():
     tick = reliability_view.is_it_deciding()
-    return render_template("reliability.html", tick=tick, review=None)
+    return _render_reliability(tick=tick)
 
 
 @app.route("/api/reliability/review-dry-run", methods=["POST"])
@@ -303,15 +435,15 @@ def api_reliability_review():
         with _exclusive_action():
             review = reliability_view.review_dry_run()
     except ActionInProgress as e:
-        return render_template("reliability.html", tick=None, review=None, error=str(e)), 409
+        return _render_reliability(error=str(e), code=409)
     except OSError as e:
         # review_dry_run() does `os.makedirs(OUTPUT_DIR, exist_ok=True)` before running
         # anything -- a permissions problem or a missing/read-only /data mount raises here,
         # same class of pre-flight failure api_live() already turns into a friendly error
         # page rather than the framework's generic 500.
-        return render_template("reliability.html", tick=None, review=None,
-                                error=f"could not prepare the report directory: {e}"), 500
-    return render_template("reliability.html", tick=None, review=review)
+        return _render_reliability(error=f"could not prepare the report directory: {e}",
+                                    code=500)
+    return _render_reliability(review=review)
 
 
 @app.route("/reliability/review-dry-run.html")

@@ -97,6 +97,65 @@ def _get_csrf_token(client) -> str:
         return sess["csrf_token"]
 
 
+def test_reliability_page_shows_gate_history(client):
+    history = [{"date": "2026-09-06", "efficiency": True, "pricing": False}]
+    with patch.object(controlpanel_app, "_daily_gate_history", return_value=history):
+        resp = client.get("/reliability")
+    assert resp.status_code == 200
+    assert b"2026-09-06" in resp.data
+
+
+def test_reliability_page_surfaces_gate_history_query_error(client):
+    with patch.object(controlpanel_app, "_daily_gate_history",
+                       return_value={"query_error": "connection refused"}):
+        resp = client.get("/reliability")
+    assert resp.status_code == 200
+    assert b"connection refused" in resp.data
+
+
+def test_dashboard_shows_collector_gap(client):
+    collector = {"last_sample": "2026-09-07 12:00:00 CEST", "samples_last_hour": 40, "gap": True}
+    with patch.object(docker_actions, "dispatch_status",
+                       return_value={"exists": False, "live": None, "error": "n/a"}), \
+         patch.object(controlpanel_app, "_latest_mijnbatterij_submission", return_value=None), \
+         patch.object(controlpanel_app, "_collector_health", return_value=collector):
+        resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"gap" in resp.data
+    assert b"40 samples" in resp.data
+
+
+def test_dashboard_shows_collector_healthy(client):
+    collector = {"last_sample": "2026-09-07 12:00:00 CEST", "samples_last_hour": 110, "gap": False}
+    with patch.object(docker_actions, "dispatch_status",
+                       return_value={"exists": False, "live": None, "error": "n/a"}), \
+         patch.object(controlpanel_app, "_latest_mijnbatterij_submission", return_value=None), \
+         patch.object(controlpanel_app, "_collector_health", return_value=collector):
+        resp = client.get("/")
+    assert resp.status_code == 200
+    assert b"healthy" in resp.data
+
+
+def test_audit_page_renders_entries(client):
+    entries = [
+        {"time": "2026-09-07 12:00:00 CEST", "action": "dispatch_live",
+         "from_state": "dry-run", "to_state": "live", "accepted": True, "reason": ""},
+    ]
+    with patch.object(controlpanel_app, "_recent_audit_entries", return_value=entries):
+        resp = client.get("/audit")
+    assert resp.status_code == 200
+    assert b"dry-run" in resp.data
+    assert b"accepted" in resp.data
+
+
+def test_audit_page_surfaces_query_error(client):
+    with patch.object(controlpanel_app, "_recent_audit_entries",
+                       return_value={"query_error": "connection refused"}):
+        resp = client.get("/audit")
+    assert resp.status_code == 200
+    assert b"connection refused" in resp.data
+
+
 def test_post_without_csrf_token_is_rejected(client):
     resp = client.post("/api/dispatch/start", data={})
     assert resp.status_code == 400
