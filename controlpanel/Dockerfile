@@ -26,6 +26,8 @@ COPY docker_actions.py .
 COPY backfill_actions.py .
 COPY reliability_view.py .
 COPY audit.py .
+COPY subprocess_utils.py .
+COPY influx_client.py .
 COPY templates/ templates/
 COPY static/ static/
 
