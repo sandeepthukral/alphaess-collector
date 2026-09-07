@@ -8,7 +8,7 @@
   <pre>{{ result.stdout }}{{ result.stderr }}</pre>
 {% endif %}
 
-<h2>Prices</h2>
+<h2>Market Rates</h2>
 <form method="post" action="/api/backfill/prices">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>Start <input type="date" name="start" required></label>
@@ -16,7 +16,7 @@
   <button type="submit">Run</button>
 </form>
 
-<h2>Pricing</h2>
+<h2>Battery Savings</h2>
 <form method="post" action="/api/backfill/pricing">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <label>Start <input type="date" name="start" required></label>
