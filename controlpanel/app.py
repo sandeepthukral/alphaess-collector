@@ -12,6 +12,7 @@ import fcntl
 import os
 import secrets
 import time
+from zoneinfo import ZoneInfo
 
 import audit
 import backfill_actions
@@ -49,6 +50,30 @@ def _csrf_token() -> str:
 @app.context_processor
 def _inject_csrf_token():
     return {"csrf_token": _csrf_token()}
+
+
+# Same zone the rest of the stack renders local time in -- see dispatch/plan.py's
+# PLANNER_TZ and collector/prices.py's NL_TZ. `docker inspect`'s StartedAt is UTC
+# (nanosecond-precision, trailing "Z"); operators reading this on the LAN want to see
+# their own wall-clock time, not have to do the offset in their head.
+_DISPLAY_TZ = ZoneInfo("Europe/Amsterdam")
+
+
+@app.template_filter("local_time")
+def _local_time(value: str | None) -> str:
+    if not value:
+        return "-"
+    # strptime's %f tops out at 6 digits; StartedAt's nanosecond fraction can carry more.
+    trimmed = value[:26] + "Z" if "." in value else value
+    try:
+        parsed = dt.datetime.strptime(trimmed, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError:
+        try:
+            parsed = dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            return value
+    local = parsed.replace(tzinfo=dt.UTC).astimezone(_DISPLAY_TZ)
+    return local.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 @app.before_request

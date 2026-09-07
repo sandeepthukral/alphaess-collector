@@ -17,7 +17,7 @@
       {{ "LIVE" if status.live else "dry-run" }}
     </span>
   </p>
-  <p><small>started {{ status.started_at or "-" }}</small></p>
+  <p><small>started {{ status.started_at | local_time }}</small></p>
   <div class="actions">
     <form method="post" action="/api/dispatch/start">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
