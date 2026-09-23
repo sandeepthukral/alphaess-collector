@@ -33,6 +33,7 @@ import os
 import signal
 import sys
 from pathlib import Path
+from urllib.request import urlopen
 
 import registers as R
 import slots as S
@@ -67,6 +68,30 @@ MONITOR_URLS = {
     "inverter-not-hijacked": os.environ.get("INVERTER_NOT_HIJACKED_HEARTBEAT_URL", ""),
     "soc-floor": os.environ.get("SOC_FLOOR_HEARTBEAT_URL", ""),
 }
+
+# GRID_SOURCE gates whether tick() reads grid power from the inverter's own Modbus
+# register (the default -- and the ONLY correct choice once the inverter is 3-phase
+# again) or from a P1 monitor's local API. The inverter's grid CT only sees one phase
+# on a house wired for three, so its own reading is wrong until the vendor replaces
+# it -- see docs/superpowers/specs/2026-09-23-p1-grid-source-design.md.
+GRID_SOURCE = os.environ.get("GRID_SOURCE", "inverter")
+P1_MONITOR_URL = os.environ.get("P1_MONITOR_URL", "")
+P1_FETCH_TIMEOUT_S = 5
+
+
+def fetch_p1_grid_w(url: str, timeout: float = P1_FETCH_TIMEOUT_S) -> float:
+    """Synchronous fetch of a P1 monitor's grid power -- run via asyncio.to_thread,
+    never called directly from the event loop.
+
+    Same sign convention as REG_GRID_POWER: positive = importing. Raises OSError
+    (timeout, connection failure, non-2xx -- urllib.error.HTTPError subclasses
+    URLError subclasses OSError) or ValueError/KeyError/TypeError on a malformed
+    body. tick() catches all of these identically, exactly like a bad Modbus read.
+    """
+    with urlopen(url, timeout=timeout) as resp:
+        body = json.load(resp)
+    return float(body["active_power_w"])
+
 
 # The inverter's own limit registers are re-read on this cadence, not just at startup.
 #
@@ -644,8 +669,18 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # generation-minus-load does not -- the identity and the measurements are in
     # `slots.SURPLUS_HARVEST_W`. A failed read is None, not zero: None falls back to the old
     # freeze, zero would claim the house is eating everything it makes.
+    #
+    # GRID_SOURCE=p1 replaces the register read with a fetch to a P1 monitor -- see
+    # docs/superpowers/specs/2026-09-23-p1-grid-source-design.md. p1_result records the
+    # fetch's own outcome (independent of the implausible-value check below) for the
+    # p1-reachable Kuma monitor in monitor_pings() (Task 4).
+    p1_result: tuple[bool, str] | None = None
     try:
-        grid_w = await inv.read(R.REG_GRID_POWER, 2, signed=True)
+        if GRID_SOURCE == "p1":
+            grid_w = await asyncio.to_thread(fetch_p1_grid_w, P1_MONITOR_URL)
+            p1_result = (True, "OK")
+        else:
+            grid_w = await inv.read(R.REG_GRID_POWER, 2, signed=True)
         batt_w = await inv.read(R.REG_BATTERY_POWER, signed=True)
         surplus_w = -(grid_w + batt_w)
         log.debug("surplus: grid=%+dW battery=%+dW -> %+dW", grid_w, batt_w, surplus_w)
@@ -658,9 +693,12 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
                         "surplus rule this tick", grid_w, batt_w)
             surplus_w = None
             batt_w = None
-    except OSError as e:
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        if GRID_SOURCE == "p1" and p1_result is None:
+            p1_result = (False, str(e)[:200])
         log.warning("surplus read failed: %s -- a met charge target will hold, not release", e)
         surplus_w, batt_w = None, None
+    cache["p1_result"] = p1_result
 
     # Charging-positive, matching `setpoint_w` -- REG_BATTERY_POWER is discharge-positive.
     # `None`, not 0, when the read failed or looked implausible: 0 would publish "the battery

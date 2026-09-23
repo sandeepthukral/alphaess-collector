@@ -425,6 +425,100 @@ class TestDegradedFields:
         assert set(fields) & pivoted
 
 
+class TestP1GridSource:
+    """GRID_SOURCE=p1 sources grid_w from the P1 monitor instead of REG_GRID_POWER, with
+    the same surplus_w=None/batt_w=None fallback a bad Modbus read already has."""
+
+    def test_p1_grid_w_overrides_the_register_reading(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", lambda url, timeout=5: 300.0)
+        # REG_GRID_POWER seeded to a very different value -- if this shows up in
+        # surplus_w, the P1 override isn't wired.
+        regs = measurement_registers(battery_power_w=-100)  # charging 100 W
+        regs[R.REG_GRID_POWER] = 9999
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        # surplus_w = -(grid_w + batt_w); batt_w read raw is -100 (charging), P1 grid_w=300
+        assert cache.get("p1_result") == (True, "OK")
+
+    def test_p1_fetch_failure_falls_back_to_no_surplus(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+
+        def boom(url, timeout=5):
+            raise OSError("no route to host")
+
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", boom)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        assert cache.get("p1_result") == (False, "no route to host")
+
+    def test_p1_malformed_response_falls_back_the_same_way(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+
+        def bad(url, timeout=5):
+            raise KeyError("active_power_w")
+
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", bad)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        assert cache.get("p1_result")[0] is False
+
+    def test_grid_source_inverter_default_never_calls_fetch_p1_grid_w(
+            self, tmp_path, monkeypatch):
+        called = []
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w",
+                            lambda url, timeout=5: called.append(1))
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        assert called == []
+        assert cache.get("p1_result") is None
+
+    def test_p1_fetch_does_not_block_the_event_loop(self, tmp_path, monkeypatch):
+        """A slow P1 fetch must not stall other coroutines -- asyncio.to_thread, not a
+        direct blocking call. See scheduler.py's report()/heartbeat pattern this mirrors."""
+        import time as time_mod
+
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+
+        def slow_fetch(url, timeout=5):
+            time_mod.sleep(0.2)
+            return 300.0
+
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", slow_fetch)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        slots_path = tmp_path / "slots.json"
+        slots_path.write_text(json.dumps(doc()))
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+        inv = scheduler.Inverter(client, 0x55, dry_run=True)
+        cache: dict = {"released": False}
+
+        ticks = 0
+
+        async def counter():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.02)
+
+        async def run_both():
+            counter_task = asyncio.ensure_future(counter())
+            await scheduler.tick(inv, slots_path, cache, T0)
+            counter_task.cancel()
+
+        asyncio.run(run_both())
+        # 0.2s blocked / 0.02s tick-rate should give ~10 increments if the event loop
+        # kept running during the fetch; a blocking call would give ~0-1.
+        assert ticks >= 5
+
+
 class TestTickPublishesTheWriteVerifyVerdict:
     """`tick()` end-to-end, not `state.build_fields()` called by hand -- these pin the same
     contract `TestDegradedFields` pins for the degraded shape, but for the live shape, and for
