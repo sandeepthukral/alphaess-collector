@@ -46,6 +46,8 @@ now`) and argparse's `Namespace` never reaches it, so `GRID_SOURCE`/`P1_MONITOR_
 as module-level `os.environ.get(...)` globals at import time, the same pattern as
 `HEARTBEAT_PATH` and `MONITOR_URLS`.
 
+`scheduler.py`'s `MONITOR_URLS` dict also gains `"p1-reachable": os.environ.get("P1_REACHABLE_HEARTBEAT_URL", "")` — see the new monitor below.
+
 Reverting: set `GRID_SOURCE=inverter` (or unset it). No code path is removed — this is
 purely a gate — so rollback is a deploy with a changed `.env`, not a revert commit.
 
@@ -95,12 +97,41 @@ Modbus read: the existing fail-safe (a met charge target holds instead of releas
 `batt_w` continues to come from `REG_BATTERY_POWER` regardless of `GRID_SOURCE` — the
 battery reading is unaffected by the phase mismatch.
 
+### New Kuma monitor: `p1-reachable`
+
+Today, a P1 fetch failure on the dispatch side degrades silently: `surplus_w = None` and a
+`log.warning`, same as a bad Modbus read has always done, with no Kuma signal either way. For
+the *existing* Modbus register that's an accepted gap (`DESIGN-dispatch.md` §6.1 has no
+monitor for it either). It is not acceptable to carry the same silence over to a **new**
+external dependency this change is deliberately introducing as the primary data source —
+`DESIGN-dispatch.md` §6.1's entire premise is that a silent degradation gets a monitor, one
+per way of being silently wrong.
+
+Add monitor `p1-reachable`, pinged by the dispatcher every tick, alongside the existing five
+(`monitor_pings()`, `scheduler.py:404`): `up` when the P1 fetch this tick succeeded, `down`
+with the exception summary when it didn't. Only pinged when `GRID_SOURCE=p1` — like `#8
+soc-floor`'s "not pinged when not applicable" rule, pinging `down` under `GRID_SOURCE=inverter`
+would alarm on a monitor nobody configured a URL for. `monitor_pings()` is pure and decided
+from one tick's facts (its own docstring's reason for existing), so it takes the P1 fetch
+outcome as a new parameter rather than reading global state.
+
+This becomes monitor **#10** in `DESIGN-dispatch.md` §6.1's table: "Loop alive, but the
+battery's surplus-harvest decisions are blind — grid reads have silently fallen back to
+freeze." Cadence matches #7/#8 (5-15 min grace — a single dropped P1 read is not an outage,
+a sustained one is).
+
 ### Docs
 
 `docs/DISPATCH-FLOW.md` box C ("read live SoC / grid_w / battery_w → surplus_w") gets a note
 that `grid_w`'s source is gated by `GRID_SOURCE`, with the P1-unreachable case folding into
 the existing "implausible/failed read → surplus_w=None" path already drawn in the flowchart
 — no new branch shape, just a note on where `grid_w` comes from.
+
+`DESIGN-dispatch.md` §6.1's monitor table gets the new `p1-reachable` row (#10), plus a line
+in the "which monitor catches what" narrative alongside #7/#8 (`docs/DESIGN-dispatch.md` is
+not in `CLAUDE.md`'s sync table, since it documents narrative/monitors rather than
+branching/thresholds, but it is the source of truth for the monitor list and would go stale
+otherwise).
 
 `docs/EFFICIENCY-FLOW.md` and `docs/PRICING-FLOW.md` treat `power_readings` as a given input
 and don't diagram `collector.py`'s field mapping, so they need no changes — confirmed during
@@ -118,5 +149,8 @@ exploration, re-checked once the collector.py change lands in case that's stoppe
   `surplus_w=None`/`batt_w=None` outcome as today's bad-Modbus-read path
   (`tests/test_dispatch_scheduler.py`). Also verify the fetch runs off the event loop (e.g.
   that a slow/blocking P1 response doesn't delay a concurrent heartbeat in the test).
+- `monitor_pings()`: unit test that `p1-reachable` pings `up` on a successful P1 fetch,
+  `down` with the failure reason on an unsuccessful one, and is absent from the ping list
+  entirely under `GRID_SOURCE=inverter`.
 - Both: `GRID_SOURCE=inverter` (or unset) reproduces exactly today's behavior — existing
   tests for both modules should pass unmodified under the default.
