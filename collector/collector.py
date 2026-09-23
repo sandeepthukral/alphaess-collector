@@ -556,6 +556,17 @@ def parse_fields(data: dict, p1_data: dict | None = None) -> dict:
     return fields
 
 
+def _grid_source_config() -> tuple[str, str]:
+    """Read GRID_SOURCE/P1_MONITOR_URL and fail fast if p1 mode has no URL to fetch from --
+    shared by run_once and run_loop so the validation can't drift between the two."""
+    grid_source = os.environ.get("GRID_SOURCE", "inverter")
+    p1_monitor_url = os.environ.get("P1_MONITOR_URL", "")
+    if grid_source == "p1" and not p1_monitor_url:
+        log.error("GRID_SOURCE=p1 requires P1_MONITOR_URL")
+        sys.exit(1)
+    return grid_source, p1_monitor_url
+
+
 def run_once(app_id: str, app_secret: str, sys_sn: str) -> None:
     """Print AlphaESS's raw/parsed response for verifying sign conventions and field
     mappings by hand (see parse_fields's docstring). Under GRID_SOURCE=p1, also fetches
@@ -565,11 +576,7 @@ def run_once(app_id: str, app_secret: str, sys_sn: str) -> None:
     "verify before trusting dashboards" check for the one field this feature exists to fix.
     """
     import json
-    grid_source = os.environ.get("GRID_SOURCE", "inverter")
-    p1_monitor_url = os.environ.get("P1_MONITOR_URL", "")
-    if grid_source == "p1" and not p1_monitor_url:
-        log.error("GRID_SOURCE=p1 requires P1_MONITOR_URL")
-        sys.exit(1)
+    grid_source, p1_monitor_url = _grid_source_config()
     data = get_last_power_data(app_id, app_secret, sys_sn)
     print("Raw API data object:")
     print(json.dumps(data, indent=2))
@@ -602,11 +609,7 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
     # Optional: fold a P1 energy monitor's reading into each poll, overriding
     # grid_power_w (and the load_power_w residual derived from it) -- see
     # parse_fields. Unset -> "inverter", collector behaves exactly as before.
-    grid_source = os.environ.get("GRID_SOURCE", "inverter")
-    p1_monitor_url = os.environ.get("P1_MONITOR_URL", "")
-    if grid_source == "p1" and not p1_monitor_url:
-        log.error("GRID_SOURCE=p1 requires P1_MONITOR_URL")
-        sys.exit(1)
+    grid_source, p1_monitor_url = _grid_source_config()
     expected_max_mtu = int(env("EXPECTED_MAX_MTU", str(DEFAULT_EXPECTED_MAX_MTU)))
     diagnostic_url = env("DIAGNOSTIC_URL", DEFAULT_DIAGNOSTIC_URL)
     check_mtu(expected_max_mtu)

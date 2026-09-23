@@ -182,7 +182,9 @@ def _grid_source_regression_reason(env: tuple[dict, dict] | str | None) -> str |
         return env
     current, new = env
 
-    if current.get("GRID_SOURCE", "").strip() == "p1" and new.get("GRID_SOURCE", "inverter").strip() != "p1":
+    current_source = current.get("GRID_SOURCE", "").strip()
+    new_source = new.get("GRID_SOURCE", "inverter").strip()
+    if current_source == "p1" and new_source != "p1":
         return ("the running dispatch container has GRID_SOURCE=p1, but deploy/controlpanel.env "
                  "would recreate it with GRID_SOURCE unset or not \"p1\" -- this would silently "
                  "revert live dispatch to the inverter's known-wrong single-phase grid reading "
