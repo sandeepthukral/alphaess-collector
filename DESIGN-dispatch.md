@@ -504,8 +504,8 @@ hardware.
 8. READ BACK, whenever anything was written -- including the single release
    on the way into idle, which is a write like any other.
 
-9. PING monitors #4-#8 from the completed tick. Append to
-   dispatch_audit.log: slot, command, readback, live SoC, live power.
+9. PING monitors #4-#8, plus #10 (p1-reachable) when GRID_SOURCE=p1, from the completed
+   tick. Append to dispatch_audit.log: slot, command, readback, live SoC, live power.
 
 10. ON error: log, do NOT exit, retry next tick. Never open a second
     Modbus connection.
@@ -625,6 +625,7 @@ Three principles:
 | 7 | `inverter-not-hijacked` | dispatcher | 5 min | The app re-asserted control over the same registers |
 | 8 | `soc-floor` | dispatcher | 15 min | SoC below `minBatterySOCPct` — safety backstop |
 | 9 | `dispatch-vs-plan` | daily job (§5.4) | 24 h + grace | All green, but the battery is not following the plan |
+| 10 | `p1-reachable` | dispatcher | 5-15 min | GRID_SOURCE=p1 only: loop alive, but a P1 fetch failure has surplus-harvest blind and falling back to freeze |
 
 **Monitor 1 is the only one that lands in `battery-planning`, and it is the only change this
 feature makes to that repo.** That repo has no heartbeat and no Kuma reference anywhere today;
@@ -686,8 +687,9 @@ accordingly:
 - **Wake-up:** #7 `inverter-not-hijacked`. A competing controller can force-charge at 5 kW
   from the grid at any price — the 2026-08-15 run caught exactly that
   (`dpwr=−5000W dsoc=100.0% dt=5580s`, grid +4596 W importing). That is real money per hour.
-- **Prompt but not nocturnal:** #5, #6. No dispatch means self-consumption — a lost
-  arbitrage cycle, not a hazard.
+- **Prompt but not nocturnal:** #5, #6, #10. No dispatch — or, for #10, a P1 fetch failure
+  forcing the same freeze fallback — means self-consumption: a lost arbitrage cycle, not a
+  hazard.
 - **Daily digest:** #1, #2, #3, #4, #9. The plan cadence is 3 h and the horizon runs ~36 h,
   so one missed run is tolerable.
 - **#8** is a backstop that should never fire. If it does, treat it as a bug in the
