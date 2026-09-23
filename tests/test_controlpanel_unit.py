@@ -450,6 +450,47 @@ def test_set_dispatch_live_allows_grid_source_p1_carried_forward(tmp_path):
     assert result.ok
 
 
+def test_set_dispatch_live_refuses_grid_source_p1_with_no_monitor_url(tmp_path):
+    """The env file about to be used for the recreate sets GRID_SOURCE=p1 but leaves
+    P1_MONITOR_URL blank -- collector.py and scheduler.py both fail fast on that
+    combination at startup, so this must be refused up front rather than letting the
+    recreated dispatch container crash-loop."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+        "GRID_SOURCE=p1\n"
+    )
+    inspect_result = docker_actions.ActionResult(
+        ok=True, stdout=json.dumps([{"Config": {"Env": []}}]), stderr="", returncode=0)
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "_run", return_value=inspect_result), \
+         pytest.raises(docker_actions.EnvUnconfigured, match="P1_MONITOR_URL"):
+        docker_actions.set_dispatch_live(True)
+
+
+def test_set_dispatch_live_allows_grid_source_p1_with_monitor_url_set(tmp_path):
+    """Sanity check for the sibling refusal test above: GRID_SOURCE=p1 with a real
+    P1_MONITOR_URL must proceed, not be refused."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+        "GRID_SOURCE=p1\n"
+        "P1_MONITOR_URL=http://192.168.1.50/api/v1/live\n"
+    )
+    inspect_result = docker_actions.ActionResult(
+        ok=True, stdout=json.dumps([{"Config": {"Env": []}}]), stderr="", returncode=0)
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "OVERRIDE_FILE", str(tmp_path / "override.yml")), \
+         patch.object(docker_actions, "_run") as run:
+        run.side_effect = [inspect_result,
+                            docker_actions.ActionResult(ok=True, stdout="", stderr="",
+                                                         returncode=0)]
+        result = docker_actions.set_dispatch_live(True)
+    assert result.ok
+
+
 def test_grid_source_regression_reason_is_none_when_no_container_running():
     with patch.object(docker_actions, "_run") as run:
         run.return_value = docker_actions.ActionResult(ok=False, stdout="", stderr="no such",

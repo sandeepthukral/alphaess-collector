@@ -585,6 +585,48 @@ class TestP1GridSource:
         with pytest.raises(ValueError):
             tick_with_cache(tmp_path, monkeypatch, client, cache)
 
+    def test_battery_register_is_still_read_after_a_p1_fetch_failure(
+            self, tmp_path, monkeypatch):
+        """Regression for a second bug in the same area: an earlier restructure made the P1
+        fetch's failure path return early, skipping REG_BATTERY_POWER entirely -- contradicting
+        this file's own comment that the battery register is read unconditionally every tick.
+        A genuine, unrelated Modbus decode bug on that read would then get misattributed to
+        "P1 fetch failed" in the log instead of surfacing as its own failure. Proven here by
+        making the battery read itself fail with a distinguishable OSError and asserting that
+        failure -- not the P1 failure -- is what the log records, which is only possible if the
+        read was actually attempted."""
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+
+        def boom(url, timeout=5):
+            raise OSError("no route to host")
+
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", boom)
+
+        orig_read = scheduler.Inverter.read
+        battery_read_attempted = []
+
+        async def selective_read(self, addr, count=1, signed=False):
+            if addr == R.REG_BATTERY_POWER:
+                battery_read_attempted.append(True)
+                raise OSError("modbus timeout reading battery register")
+            return await orig_read(self, addr, count, signed)
+
+        monkeypatch.setattr(scheduler.Inverter, "read", selective_read)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        heartbeat = tmp_path / "hb.json"
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", heartbeat)
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        # Proves the read was actually attempted, not skipped because the P1 branch
+        # returned early -- a bare surplus_w is None assertion can't tell those apart,
+        # since both a skipped read and a failed read produce the same None.
+        assert battery_read_attempted == [True]
+        # The P1 fetch's own failure is still recorded independently...
+        assert cache.get("p1_result") == (False, "OSError: no route to host")
+        payload = json.loads(heartbeat.read_text())
+        assert payload["surplus_w"] is None
+
 
 class TestTickPublishesTheWriteVerifyVerdict:
     """`tick()` end-to-end, not `state.build_fields()` called by hand -- these pin the same

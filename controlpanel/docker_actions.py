@@ -177,7 +177,13 @@ def _grid_source_regression_reason(env: tuple[dict, dict] | str | None) -> str |
     deploy/controlpanel.env was copied without carrying GRID_SOURCE/P1_MONITOR_URL over.
     That would revert live dispatch to the inverter's known-wrong single-phase grid_w while
     the collector (a separate container, unaffected by this recreate) stays on P1 -- the
-    two halves of this feature would silently split."""
+    two halves of this feature would silently split.
+
+    A second, independent hazard: the recreate ships GRID_SOURCE=p1 (new, whether carried
+    forward from `current` or freshly set) with no P1_MONITOR_URL -- collector.py and
+    scheduler.py both fail fast on that combination at startup, but this control panel
+    never did, so the recreated dispatch container would just crash-loop instead of the
+    toggle being refused with a clear reason up front."""
     if env is None or isinstance(env, str):
         return env
     current, new = env
@@ -190,6 +196,11 @@ def _grid_source_regression_reason(env: tuple[dict, dict] | str | None) -> str |
                  "revert live dispatch to the inverter's known-wrong single-phase grid reading "
                  "while the collector stays on P1. Copy GRID_SOURCE=p1 and P1_MONITOR_URL from "
                  "the real .env first (see DEPLOY.md, \"Control panel\" step 7)")
+    if new_source == "p1" and not new.get("P1_MONITOR_URL", "").strip():
+        return ("deploy/controlpanel.env would recreate dispatch with GRID_SOURCE=p1 but no "
+                 "P1_MONITOR_URL -- the recreated container would crash-loop on startup "
+                 "instead of running. Set P1_MONITOR_URL in the real .env first (see "
+                 "DEPLOY.md, \"Control panel\" step 7)")
     return None
 
 
