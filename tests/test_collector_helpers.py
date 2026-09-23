@@ -193,3 +193,45 @@ def test_fetch_p1_data_raises_on_missing_active_power_w(monkeypatch):
                         lambda url, timeout=10: FakeResponse())
     with pytest.raises(RuntimeError, match="active_power_w"):
         collector_mod.fetch_p1_data("http://192.168.2.46/api/v1/data")
+
+
+def test_fetch_p1_data_wraps_connection_error_as_runtime_error(monkeypatch):
+    import collector as collector_mod
+
+    def fake_get(*args, **kwargs):
+        raise collector_mod.requests.exceptions.ConnectionError("Network unreachable")
+
+    monkeypatch.setattr(collector_mod.requests, "get", fake_get)
+    with pytest.raises(RuntimeError, match="P1 fetch failed"):
+        collector_mod.fetch_p1_data("http://192.168.2.46/api/v1/data")
+
+
+def test_fetch_p1_data_forwards_custom_timeout(monkeypatch):
+    import collector as collector_mod
+
+    captured_kwargs = {}
+
+    def fake_get(url, timeout=10):
+        captured_kwargs["timeout"] = timeout
+        class FakeResponse:
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return {"active_power_w": 100}
+        return FakeResponse()
+
+    monkeypatch.setattr(collector_mod.requests, "get", fake_get)
+    collector_mod.fetch_p1_data("http://192.168.2.46/api/v1/data", timeout=25)
+    assert captured_kwargs["timeout"] == 25
+
+
+def test_parse_fields_with_p1_data_but_missing_battery():
+    """When p1_data overrides grid but battery is missing, load_power_w isn't recomputed."""
+    fields = parse_fields(
+        {"ppv": 1500, "pgrid": -9999, "soc": 87.5},
+        p1_data={"active_power_w": 200},
+    )
+    assert fields["grid_power_w"] == 200.0
+    assert "load_power_w" not in fields  # not recomputed because battery_power_w is missing
+    assert fields["pv_power_w"] == 1500.0
+    assert "battery_power_w" not in fields

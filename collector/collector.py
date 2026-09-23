@@ -306,8 +306,11 @@ def fetch_p1_data(url: str, timeout: float = 10) -> dict:
     the one field this collector uses. Positive active_power_w = importing from the
     grid, same convention as AlphaESS's pgrid.
     """
-    resp = requests.get(url, timeout=timeout)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"P1 fetch failed: {error_summary(e)}") from e
     body = resp.json()
     if "active_power_w" not in body:
         raise RuntimeError(f"P1 response missing active_power_w: {body}")
