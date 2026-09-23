@@ -543,7 +543,12 @@ def parse_fields(data: dict, p1_data: dict | None = None) -> dict:
         log.warning("API response missing fields: %s (raw keys: %s)",
                     missing, sorted(data.keys()))
     fields = {k: float(v) for k, v in fields.items() if v is not None}
-    if p1_data is not None:
+    # Guarded on `fields` already being non-empty: an all-None AlphaESS response (a
+    # degraded/empty poll) must stay `{}` even under GRID_SOURCE=p1, so run_loop()'s
+    # `if fields:` skip-write guard still skips it. Without this guard, injecting
+    # grid_power_w unconditionally would make an otherwise-empty poll look non-empty and
+    # write a point holding only the P1 reading -- changing what "nothing to write" means.
+    if p1_data is not None and fields:
         fields["grid_power_w"] = float(p1_data["active_power_w"])
         if "pv_power_w" in fields and "battery_power_w" in fields:
             fields["load_power_w"] = (

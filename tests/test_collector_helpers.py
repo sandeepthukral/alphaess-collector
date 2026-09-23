@@ -159,6 +159,18 @@ def test_parse_fields_ignores_p1_data_when_none():
     assert fields["load_power_w"] == 800.0
 
 
+def test_parse_fields_stays_empty_on_an_all_none_response_even_with_p1_data():
+    """A degraded/empty AlphaESS poll (every field None) must produce {}, not a point
+    holding only the P1 reading -- run_loop()'s `if fields:` guard exists specifically to
+    skip writing a point for a poll like this, and an unconditional P1 injection would make
+    an otherwise-empty poll look non-empty, silently changing what "nothing to write" means."""
+    fields = parse_fields(
+        {"ppv": None, "pgrid": None, "pload": None, "pbat": None, "soc": None},
+        p1_data={"active_power_w": 300},
+    )
+    assert fields == {}
+
+
 # --------------------------------------------------------------------------
 # fetch_p1_data
 # --------------------------------------------------------------------------
