@@ -71,11 +71,26 @@ writes nothing rather than writing a silently-wrong single-phase number.
 
 In `tick()`, when `GRID_SOURCE=p1`: replace the `inv.read(R.REG_GRID_POWER, 2, signed=True)`
 call with a P1 fetch, using `urllib.request` (this image deliberately has no `requests` —
-see `dispatch/heartbeat.py`'s docstring). The fetch is wrapped in the same
-`try`/`except OSError` block that already handles a bad Modbus read: on failure,
-`surplus_w = None` and `batt_w = None`, which is the existing fail-safe (a met charge target
-holds instead of releasing; see `DISPATCH-FLOW.md`'s box C). No new failure path here
-either.
+see `dispatch/heartbeat.py`'s docstring), with an explicit timeout (matching every other
+network call in this repo, e.g. `heartbeat.py`'s 5s default, `collector.py`'s 5-30s range —
+`urlopen()` with no timeout can hang indefinitely on a socket that connects but never
+responds, stalling the 60s control loop past its watchdogs).
+
+`tick()` is async, and every other network call inside it is already async or offloaded
+(`inv.read` via pymodbus's async client, heartbeats via `asyncio.to_thread` — see
+`report()`, `scheduler.py:481-482`); a raw blocking `urlopen()` call would stall the whole
+event loop, including heartbeats, for the fetch's duration. The P1 fetch is wrapped in
+`asyncio.to_thread` the same way.
+
+The fetch is wrapped in a `try`/`except` alongside the existing block that already handles a
+bad Modbus read. That block currently catches only `OSError`, which covers a connection
+failure but not a malformed response — a non-JSON body or one missing `active_power_w`
+raises `JSONDecodeError`/`KeyError`, neither an `OSError`, and would otherwise crash `tick()`
+instead of degrading gracefully. The except clause is broadened (or an explicit second
+`except` added) to cover those too. Any of these failures — connection, timeout, malformed
+response — produces the same `surplus_w = None`/`batt_w = None` outcome as today's bad
+Modbus read: the existing fail-safe (a met charge target holds instead of releasing; see
+`DISPATCH-FLOW.md`'s box C). No new failure *behavior*, just a wider net catching it.
 
 `batt_w` continues to come from `REG_BATTERY_POWER` regardless of `GRID_SOURCE` — the
 battery reading is unaffected by the phase mismatch.
@@ -98,8 +113,10 @@ exploration, re-checked once the collector.py change lands in case that's stoppe
   failure indistinguishable from an AlphaESS fetch failure (reuses
   `tests/test_collector_failure_domains.py`'s pattern).
 - `dispatch/scheduler.py`: unit test that `GRID_SOURCE=p1` sources `grid_w` from the P1 fetch
-  instead of `inv.read(REG_GRID_POWER, ...)`, and that a P1 fetch failure produces the same
+  instead of `inv.read(REG_GRID_POWER, ...)`, and that a connection failure, a timeout, and a
+  malformed response (missing `active_power_w`) each produce the same
   `surplus_w=None`/`batt_w=None` outcome as today's bad-Modbus-read path
-  (`tests/test_dispatch_scheduler.py`).
+  (`tests/test_dispatch_scheduler.py`). Also verify the fetch runs off the event loop (e.g.
+  that a slow/blocking P1 response doesn't delay a concurrent heartbeat in the test).
 - Both: `GRID_SOURCE=inverter` (or unset) reproduces exactly today's behavior — existing
   tests for both modules should pass unmodified under the default.
