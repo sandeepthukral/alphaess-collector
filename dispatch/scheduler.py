@@ -54,11 +54,12 @@ log = logging.getLogger("dispatch")
 
 HEARTBEAT_PATH = Path(os.environ.get("DISPATCH_HEARTBEAT", "dispatch_heartbeat.json"))
 
-# The five Kuma monitors this loop is responsible for -- section 6.1's #4-#8. #1-#3 are pinged
-# elsewhere (#1 in `battery-planning`, #2 and #3 by the translator) and #9 is a daily job.
+# The Kuma monitors this loop is responsible for -- section 6.1's #4-#8, plus #10
+# (p1-reachable, conditional on GRID_SOURCE=p1). #1-#3 are pinged elsewhere (#1 in
+# `battery-planning`, #2 and #3 by the translator) and #9 is a daily job.
 #
 # Read once at import and keyed by monitor name so the mapping between "the table in section
-# 6.1" and "the env var in docker-compose.yml" is one dict rather than five scattered lookups.
+# 6.1" and "the env var in docker-compose.yml" is one dict rather than scattered lookups.
 # Unset is the documented "not monitored yet" state: monitors get created during go-live, and
 # the loop has to run before that. An unset URL makes `send_heartbeat` a no-op.
 MONITOR_URLS = {
@@ -67,6 +68,7 @@ MONITOR_URLS = {
     "dispatch-confirmed": os.environ.get("DISPATCH_CONFIRMED_HEARTBEAT_URL", ""),
     "inverter-not-hijacked": os.environ.get("INVERTER_NOT_HIJACKED_HEARTBEAT_URL", ""),
     "soc-floor": os.environ.get("SOC_FLOOR_HEARTBEAT_URL", ""),
+    "p1-reachable": os.environ.get("P1_REACHABLE_HEARTBEAT_URL", ""),
 }
 
 # GRID_SOURCE gates whether tick() reads grid power from the inverter's own Modbus
@@ -427,10 +429,12 @@ def write_heartbeat(decision: S.Decision, state: dict | None, live_soc: float | 
 
 
 def monitor_pings(decision: S.Decision, cache: dict, live_soc: float | None,
-                  dry_run: bool) -> list[tuple[str, str, str]]:
-    """(monitor, status, message) for section 6.1's #4-#8. Pure -- the I/O is the caller's.
+                  dry_run: bool, p1_result: tuple[bool, str] | None = None
+                  ) -> list[tuple[str, str, str]]:
+    """(monitor, status, message) for section 6.1's #4-#8, plus #10 (p1-reachable) when
+    GRID_SOURCE=p1. Pure -- the I/O is the caller's.
 
-    All five are answered from one tick's worth of facts, so they are decided in one place;
+    Every ping is answered from one tick's worth of facts, so they are decided in one place;
     scattering five `send_heartbeat` calls through `tick()` is how a monitor ends up silently
     never pinged, which is the state this function exists to end.
 
@@ -487,6 +491,10 @@ def monitor_pings(decision: S.Decision, cache: dict, live_soc: float | None,
     if live_soc is not None:
         status = "up" if live_soc >= S.SOC_FLOOR_PCT else "down"
         pings.append(("soc-floor", status, f"SoC {live_soc:.1f}% (floor {S.SOC_FLOOR_PCT}%)"))
+
+    if p1_result is not None:
+        ok, msg = p1_result
+        pings.append(("p1-reachable", "up" if ok else "down", msg))
 
     return [(name, status, msg[:200]) for name, status, msg in pings]
 
@@ -1125,7 +1133,9 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # 10. Report to Kuma. Last, so every ping describes a completed tick rather than one in
     # progress -- and after the heartbeat file, which is the check that must never depend on
     # the network.
-    await report(monitor_pings(decision, cache, live_soc, inv.dry_run), publisher)
+    await report(
+        monitor_pings(decision, cache, live_soc, inv.dry_run, cache.get("p1_result")),
+        publisher)
 
     log.info("%s | %s | soc=%s | temp=%s | verified=%s | %s", decision.kind, decision.reason,
              f"{live_soc:.1f}%" if live_soc is not None else "?",
