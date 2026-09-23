@@ -375,15 +375,15 @@ def test_set_dispatch_live_proceeds_once_placeholders_are_replaced(tmp_path):
     with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
          patch.object(docker_actions, "OVERRIDE_FILE", str(tmp_path / "override.yml")), \
          patch.object(docker_actions, "_run") as run:
-        # Called three times when going live: once each by _heartbeat_regression_reason()'s
-        # and _grid_source_regression_reason()'s own `docker inspect` (empty stdout here, so
-        # each finds nothing to compare and allows the toggle through), once for the actual
-        # compose recreate.
+        # Called twice when going live: once for the shared `docker inspect`
+        # _current_and_new_dispatch_env() fetches for both regression checks (empty stdout
+        # here, so nothing to compare and both allow the toggle through), once for the
+        # actual compose recreate.
         run.return_value = docker_actions.ActionResult(ok=True, stdout="", stderr="",
                                                          returncode=0)
         result = docker_actions.set_dispatch_live(True)
     assert result.ok
-    assert run.call_count == 3
+    assert run.call_count == 2
 
 
 def test_set_dispatch_live_refuses_a_heartbeat_url_regression(tmp_path):
@@ -443,7 +443,7 @@ def test_set_dispatch_live_allows_grid_source_p1_carried_forward(tmp_path):
     with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
          patch.object(docker_actions, "OVERRIDE_FILE", str(tmp_path / "override.yml")), \
          patch.object(docker_actions, "_run") as run:
-        run.side_effect = [inspect_result, inspect_result,
+        run.side_effect = [inspect_result,
                             docker_actions.ActionResult(ok=True, stdout="", stderr="",
                                                          returncode=0)]
         result = docker_actions.set_dispatch_live(True)
@@ -454,7 +454,8 @@ def test_grid_source_regression_reason_is_none_when_no_container_running():
     with patch.object(docker_actions, "_run") as run:
         run.return_value = docker_actions.ActionResult(ok=False, stdout="", stderr="no such",
                                                          returncode=1)
-        assert docker_actions._grid_source_regression_reason() is None
+        env = docker_actions._current_and_new_dispatch_env()
+        assert docker_actions._grid_source_regression_reason(env) is None
 
 
 def test_parse_env_file_strips_whitespace_and_quotes():

@@ -123,21 +123,39 @@ def _controlpanel_env_unconfigured_reason() -> str | None:
     return None
 
 
-def _heartbeat_regression_reason() -> str | None:
+def _current_and_new_dispatch_env() -> tuple[dict, dict] | str | None:
+    """The running dispatch container's env and deploy/controlpanel.env's, fetched once and
+    shared by every regression check in set_dispatch_live() -- each check used to run this
+    same `docker inspect` and re-read/re-parse the same env file on its own, so an ordinary
+    go-live click paid for the subprocess spawn and file read twice for no logic benefit.
+
+    Returns (current, new) to compare, None when there's nothing to regress FROM (no
+    container running yet -- dispatch_status() etc. handle "container doesn't exist"
+    elsewhere; or its `docker inspect` output couldn't be parsed, same reasoning as
+    dispatch_status()'s own parse guard), or an error string when controlpanel.env itself
+    couldn't be read.
+    """
     proc = _run(["docker", "inspect", DISPATCH_CONTAINER], timeout=60)
     if not proc.ok:
-        return None  # nothing running yet to regress FROM -- dispatch_status() etc. handle
-                     # "container doesn't exist" elsewhere; this check has nothing to add.
+        return None
     try:
         current = _parse_docker_env_list(json.loads(proc.stdout)[0]["Config"]["Env"])
     except (ValueError, KeyError, IndexError, TypeError):
-        return None  # same reasoning as dispatch_status()'s own parse guard
+        return None
 
     try:
         with open(CONTROLPANEL_ENV_FILE, encoding="utf-8") as f:
             new = _parse_env_file(f.read())
     except OSError as e:
         return f"could not read {CONTROLPANEL_ENV_FILE}: {e}"
+
+    return current, new
+
+
+def _heartbeat_regression_reason(env: tuple[dict, dict] | str | None) -> str | None:
+    if env is None or isinstance(env, str):
+        return env
+    current, new = env
 
     regressing = sorted(
         key for key in _HEARTBEAT_URL_KEYS
@@ -150,7 +168,7 @@ def _heartbeat_regression_reason() -> str | None:
     return None
 
 
-def _grid_source_regression_reason() -> str | None:
+def _grid_source_regression_reason(env: tuple[dict, dict] | str | None) -> str | None:
     """GRID_SOURCE=inverter (or blank, same thing via the compose default) is a normal,
     common, CORRECT value -- unlike the heartbeat URLs above, there's nothing wrong with it
     in general. The hazard is narrower: if the container currently running is already in P1
@@ -160,19 +178,9 @@ def _grid_source_regression_reason() -> str | None:
     That would revert live dispatch to the inverter's known-wrong single-phase grid_w while
     the collector (a separate container, unaffected by this recreate) stays on P1 -- the
     two halves of this feature would silently split."""
-    proc = _run(["docker", "inspect", DISPATCH_CONTAINER], timeout=60)
-    if not proc.ok:
-        return None  # nothing running yet to regress FROM
-    try:
-        current = _parse_docker_env_list(json.loads(proc.stdout)[0]["Config"]["Env"])
-    except (ValueError, KeyError, IndexError, TypeError):
-        return None  # same reasoning as dispatch_status()'s own parse guard
-
-    try:
-        with open(CONTROLPANEL_ENV_FILE, encoding="utf-8") as f:
-            new = _parse_env_file(f.read())
-    except OSError as e:
-        return f"could not read {CONTROLPANEL_ENV_FILE}: {e}"
+    if env is None or isinstance(env, str):
+        return env
+    current, new = env
 
     if current.get("GRID_SOURCE", "").strip() == "p1" and new.get("GRID_SOURCE", "inverter").strip() != "p1":
         return ("the running dispatch container has GRID_SOURCE=p1, but deploy/controlpanel.env "
@@ -237,8 +245,11 @@ def set_dispatch_live(live: bool) -> ActionResult:
     docs/DEPLOY.md, "The DISPATCH_LIVE mechanism". Writes the override file, then recreates
     only the dispatch service against it."""
     if live:
-        reason = (_controlpanel_env_unconfigured_reason() or _heartbeat_regression_reason()
-                  or _grid_source_regression_reason())
+        reason = _controlpanel_env_unconfigured_reason()
+        if not reason:
+            env = _current_and_new_dispatch_env()
+            reason = (_heartbeat_regression_reason(env)
+                      or _grid_source_regression_reason(env))
         if reason:
             raise EnvUnconfigured(reason)
 

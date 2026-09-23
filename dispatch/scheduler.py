@@ -701,8 +701,21 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
                         "surplus rule this tick", grid_w, batt_w)
             surplus_w = None
             batt_w = None
-    except (OSError, ValueError, KeyError, TypeError) as e:
+    except OSError as e:
         if GRID_SOURCE == "p1" and p1_result is None:
+            p1_result = (False, f"{type(e).__name__}: {e}"[:200])
+        log.warning("surplus read failed: %s -- a met charge target will hold, not release", e)
+        surplus_w, batt_w = None, None
+    except (ValueError, KeyError, TypeError) as e:
+        # Only fetch_p1_grid_w's malformed-response cases belong here -- a ValueError from
+        # inv.read()'s own R.decode() (a corrupt/mismatched-length Modbus response, not a
+        # connection failure) is exactly the class of bug this file's read() docstring
+        # (~line 184) says used to sail past every except-OSError handler and crash the tick
+        # loudly. That crash is the honest response to a genuine decode bug; only re-route it
+        # to the fail-safe when it's actually a P1 response, never for the inverter register.
+        if GRID_SOURCE != "p1":
+            raise
+        if p1_result is None:
             p1_result = (False, f"{type(e).__name__}: {e}"[:200])
         log.warning("surplus read failed: %s -- a met charge target will hold, not release", e)
         surplus_w, batt_w = None, None

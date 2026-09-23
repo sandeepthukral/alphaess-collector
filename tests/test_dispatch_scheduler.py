@@ -533,6 +533,30 @@ class TestP1GridSource:
         # kept running during the fetch; a blocking call would give ~0-1.
         assert ticks >= 5
 
+    def test_a_decode_error_on_the_inverter_branch_is_not_swallowed(
+            self, tmp_path, monkeypatch):
+        """The surplus block's except clause was widened to (OSError, ValueError, KeyError,
+        TypeError) so fetch_p1_grid_w's malformed-response cases degrade to the fail-safe
+        instead of crashing tick(). That widening must not also catch a ValueError from
+        registers.decode() on the INVERTER branch (GRID_SOURCE=inverter, the default) -- a
+        decode failure there is a genuine bug (a corrupt/mismatched-length Modbus response,
+        not a connection failure), and this file's own read() docstring explains why every
+        caller here used to crash loudly on exactly this class of failure rather than
+        silently degrading. Only a P1 response gets the fail-safe treatment."""
+        orig_read = scheduler.Inverter.read
+
+        async def selective_read(self, addr, count=1, signed=False):
+            if addr == R.REG_GRID_POWER:
+                raise ValueError("decode expects 1 or 2 registers, got 3")
+            return await orig_read(self, addr, count, signed)
+
+        monkeypatch.setattr(scheduler.Inverter, "read", selective_read)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        with pytest.raises(ValueError):
+            tick_with_cache(tmp_path, monkeypatch, client, cache)
+
 
 class TestTickPublishesTheWriteVerifyVerdict:
     """`tick()` end-to-end, not `state.build_fields()` called by hand -- these pin the same
