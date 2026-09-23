@@ -40,8 +40,11 @@ recomputing the same identity with the corrected grid value.
 New env var `GRID_SOURCE`, values `p1` | `inverter`, default `inverter`. When `p1`,
 `P1_MONITOR_URL` (e.g. `http://192.168.2.46/api/v1/data`) must be set — both collector and
 dispatch containers already reach LAN devices (dispatch already speaks Modbus TCP to the
-inverter's LAN IP). Read via each module's existing config convention (`env()` helper in
-`collector.py`; env-default `argparse` args in `scheduler.py`).
+inverter's LAN IP). Read via each module's existing config convention: `env()` helper in
+`collector.py`; in `scheduler.py`, `tick()` takes no config args (`inv, slots_path, cache,
+now`) and argparse's `Namespace` never reaches it, so `GRID_SOURCE`/`P1_MONITOR_URL` are read
+as module-level `os.environ.get(...)` globals at import time, the same pattern as
+`HEARTBEAT_PATH` and `MONITOR_URLS`.
 
 Reverting: set `GRID_SOURCE=inverter` (or unset it). No code path is removed — this is
 purely a gate — so rollback is a deploy with a changed `.env`, not a revert commit.
@@ -49,10 +52,14 @@ purely a gate — so rollback is a deploy with a changed `.env`, not a revert co
 ### `collector/collector.py` (historical recording, feeds `efficiency.py`/`pricing.py`)
 
 Inside the existing poll's `try` block, when `GRID_SOURCE=p1`: after the AlphaESS fetch,
-also fetch `P1_MONITOR_URL` via `requests` (already imported). In `parse_fields`, override
-`grid_power_w` with the P1 response's `active_power_w`, and recompute
+also fetch `P1_MONITOR_URL` via `requests` (already imported). `parse_fields(data: dict)`
+only takes the AlphaESS response and has no second parameter today, so it gains one:
+`parse_fields(data: dict, p1_data: dict | None = None)`. When `p1_data` is given, it
+overrides `grid_power_w` with `p1_data["active_power_w"]` and recomputes
 `load_power_w = pv_power_w + grid_power_w + battery_power_w` using the corrected grid value
-and the inverter's own (still-correct) `pv_power_w`/`battery_power_w`.
+and the inverter's own (still-correct) `pv_power_w`/`battery_power_w`. The call site
+(`collector.py:578`, `fields = parse_fields(data)`) passes `p1_data` only when
+`GRID_SOURCE=p1`.
 
 The P1 fetch shares the poll's existing `try`/`except` and `stage` tracking (`collector.py`
 around line 573), so a P1 failure is handled by the exact machinery that already exists for
