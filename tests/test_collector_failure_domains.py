@@ -325,3 +325,54 @@ class TestAnUndeliverableHeartbeatIsVisible:
                         heartbeat_result="ConnectTimeout: timed out")
         assert state["write_api"].points, "polls must still be written"
         assert state["polls"] >= 3
+
+
+class TestP1GridSource:
+    """GRID_SOURCE=p1 folds a P1 fetch into the same poll, sharing its failure domain."""
+
+    def test_p1_data_overrides_grid_and_load_in_the_written_point(
+            self, monkeypatch, harness):
+        monkeypatch.setenv("GRID_SOURCE", "p1")
+        monkeypatch.setenv("P1_MONITOR_URL", "http://192.168.2.46/api/v1/data")
+        monkeypatch.setattr(
+            collector, "fetch_p1_data",
+            lambda url, timeout=10: {"active_power_w": 300})
+
+        def fetch(poll):
+            return {"ppv": 1000, "pgrid": -9999, "pload": -9999,
+                    "pbat": -200, "soc": 80}
+
+        state = harness(fetch=fetch, stop_after=1)
+        point = state["write_api"].points[0]
+        line = point.to_line_protocol()
+        assert "grid_power_w=300" in line
+        assert "load_power_w=1100" in line  # 1000 + 300 + (-200)
+
+    def test_a_p1_fetch_failure_counts_as_a_poll_failure(self, monkeypatch, harness):
+        """Same failure domain as an AlphaESS API failure -- no separate handling."""
+        monkeypatch.setenv("GRID_SOURCE", "p1")
+        monkeypatch.setenv("P1_MONITOR_URL", "http://192.168.2.46/api/v1/data")
+
+        def boom(url, timeout=10):
+            raise RuntimeError("P1 unreachable")
+
+        monkeypatch.setattr(collector, "fetch_p1_data", boom)
+
+        def fetch(poll):
+            return {"ppv": 1000, "pgrid": -100, "pload": 900, "pbat": -200, "soc": 80}
+
+        state = harness(fetch=fetch, stop_after=1)
+        assert state["write_api"].points == []
+        assert any(e["event"] == "failure" for e in state["health_events"])
+
+    def test_grid_source_inverter_default_never_calls_fetch_p1_data(
+            self, monkeypatch, harness):
+        called = []
+        monkeypatch.setattr(collector, "fetch_p1_data",
+                            lambda url, timeout=10: called.append(1))
+
+        def fetch(poll):
+            return {"ppv": 1000, "pgrid": -100, "pload": 900, "pbat": -200, "soc": 80}
+
+        harness(fetch=fetch, stop_after=1)
+        assert called == []

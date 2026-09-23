@@ -572,6 +572,14 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
     # Optional: URL of a Kuma "Push" monitor, pinged after each successful
     # write. Unset -> no heartbeat, collector behaves exactly as before.
     heartbeat_url = os.environ.get("HEARTBEAT_URL", "")
+    # Optional: fold a P1 energy monitor's reading into each poll, overriding
+    # grid_power_w (and the load_power_w residual derived from it) -- see
+    # parse_fields. Unset -> "inverter", collector behaves exactly as before.
+    grid_source = os.environ.get("GRID_SOURCE", "inverter")
+    p1_monitor_url = os.environ.get("P1_MONITOR_URL", "")
+    if grid_source == "p1" and not p1_monitor_url:
+        log.error("GRID_SOURCE=p1 requires P1_MONITOR_URL")
+        sys.exit(1)
     expected_max_mtu = int(env("EXPECTED_MAX_MTU", str(DEFAULT_EXPECTED_MAX_MTU)))
     diagnostic_url = env("DIAGNOSTIC_URL", DEFAULT_DIAGNOSTIC_URL)
     check_mtu(expected_max_mtu)
@@ -606,7 +614,8 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
         stage = "fetch"
         try:
             data = get_last_power_data(app_id, app_secret, sys_sn)
-            fields = parse_fields(data)
+            p1_data = fetch_p1_data(p1_monitor_url) if grid_source == "p1" else None
+            fields = parse_fields(data, p1_data)
             if fields:
                 point = Point("power_readings").tag("sys_sn", sys_sn)
                 for key, value in fields.items():
