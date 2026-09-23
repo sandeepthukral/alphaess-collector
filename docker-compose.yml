@@ -21,6 +21,16 @@ x-logging: &default-logging
 x-timezone: &default-timezone
   TZ: ${TZ:-Europe/Amsterdam}
 
+# GRID_SOURCE=p1 replaces the collector's grid_power_w/load_power_w AND dispatch's
+# surplus-harvest grid read with a P1 monitor's local API instead of AlphaESS's own
+# (currently phase-mismatched) reading -- see
+# docs/superpowers/specs/2026-09-23-p1-grid-source-design.md. inverter (default) = today's
+# behavior, unchanged. Both services must agree, or live dispatch and historical recording
+# disagree about which grid reading is true -- shared here so they can't drift apart.
+x-grid-source: &default-grid-source
+  GRID_SOURCE: ${GRID_SOURCE:-inverter}
+  P1_MONITOR_URL: ${P1_MONITOR_URL:-}
+
 services:
   influxdb:
     image: influxdb:2
@@ -61,7 +71,7 @@ services:
     restart: unless-stopped
     logging: *default-logging
     environment:
-      <<: *default-timezone
+      <<: [*default-timezone, *default-grid-source]
       ALPHAESS_APP_ID: ${ALPHAESS_APP_ID}
       ALPHAESS_APP_SECRET: ${ALPHAESS_APP_SECRET}
       ALPHAESS_SYS_SN: ${ALPHAESS_SYS_SN}
@@ -347,7 +357,7 @@ services:
     stop_grace_period: 30s
     command: ["--ip", "${INVERTER_IP:-192.168.68.151}"]
     environment:
-      <<: *default-timezone
+      <<: [*default-timezone, *default-grid-source]
       # Unset or 0 = dry run. This is the go-live switch; see the comment above the service.
       DISPATCH_LIVE: ${DISPATCH_LIVE:-0}
       INFLUX_URL: http://influxdb:8086
@@ -387,6 +397,10 @@ services:
       DISPATCH_CONFIRMED_HEARTBEAT_URL: ${DISPATCH_CONFIRMED_HEARTBEAT_URL:-}
       INVERTER_NOT_HIJACKED_HEARTBEAT_URL: ${INVERTER_NOT_HIJACKED_HEARTBEAT_URL:-}
       SOC_FLOOR_HEARTBEAT_URL: ${SOC_FLOOR_HEARTBEAT_URL:-}
+      # Monitor #10, pinged by the control loop every tick, only when GRID_SOURCE=p1.
+      # Catches: the loop is alive, but surplus-harvest decisions are blind because the
+      # P1 monitor stopped answering.
+      P1_REACHABLE_HEARTBEAT_URL: ${P1_REACHABLE_HEARTBEAT_URL:-}
       # The floor monitor #8 reports against. Matches the planner's `minBatterySOCPct`; it is
       # a backstop, not a control input -- nothing refuses a command because of it.
       SOC_FLOOR_PCT: ${SOC_FLOOR_PCT:-10}

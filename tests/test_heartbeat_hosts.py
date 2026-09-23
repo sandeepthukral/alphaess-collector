@@ -1,6 +1,6 @@
 """Every service that pings Uptime Kuma can resolve the name its URLs use.
 
-The ten `*_HEARTBEAT_URL` settings name the host `kuma`, which no resolver knows: it is an
+The eleven `*_HEARTBEAT_URL` settings name the host `kuma`, which no resolver knows: it is an
 `extra_hosts` alias written into the container's /etc/hosts by docker-compose.yml. That
 indirection exists because the literal IP it replaced moved twice in five days (2026-08-29,
 2026-09-02) and took every heartbeat with it, silently -- heartbeat failures are logged and
@@ -44,9 +44,9 @@ def test_the_pinging_services_were_actually_found():
     assert PINGERS == ["collector", "dispatch", "mijnbatterij"], PINGERS
 
 
-def test_all_ten_heartbeat_urls_are_accounted_for():
+def test_all_eleven_heartbeat_urls_are_accounted_for():
     """The count is the thing TODO 18 is measured against: two collector-side (live and
-    nightly efficiency), one mijnbatterij, seven dispatch. A new monitor should trip this and
+    nightly efficiency), one mijnbatterij, eight dispatch. A new monitor should trip this and
     be added deliberately, not slip in unnoticed."""
     urls = [
         key
@@ -54,7 +54,7 @@ def test_all_ten_heartbeat_urls_are_accounted_for():
         for key in (svc.get("environment") or {})
         if key.endswith("HEARTBEAT_URL")
     ]
-    assert len(urls) == 10, sorted(urls)
+    assert len(urls) == 11, sorted(urls)
 
 
 @pytest.mark.parametrize("service", PINGERS)

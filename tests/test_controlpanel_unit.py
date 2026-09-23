@@ -375,9 +375,10 @@ def test_set_dispatch_live_proceeds_once_placeholders_are_replaced(tmp_path):
     with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
          patch.object(docker_actions, "OVERRIDE_FILE", str(tmp_path / "override.yml")), \
          patch.object(docker_actions, "_run") as run:
-        # Called twice when going live: once by _heartbeat_regression_reason()'s own
-        # `docker inspect` (empty stdout here, so it finds nothing to compare and allows
-        # the toggle through), once for the actual compose recreate.
+        # Called twice when going live: once for the shared `docker inspect`
+        # _current_and_new_dispatch_env() fetches for both regression checks (empty stdout
+        # here, so nothing to compare and both allow the toggle through), once for the
+        # actual compose recreate.
         run.return_value = docker_actions.ActionResult(ok=True, stdout="", stderr="",
                                                          returncode=0)
         result = docker_actions.set_dispatch_live(True)
@@ -403,6 +404,128 @@ def test_set_dispatch_live_refuses_a_heartbeat_url_regression(tmp_path):
          patch.object(docker_actions, "_run", return_value=inspect_result), \
          pytest.raises(docker_actions.EnvUnconfigured, match="SOC_FLOOR_HEARTBEAT_URL"):
         docker_actions.set_dispatch_live(True)
+
+
+def test_set_dispatch_live_refuses_a_grid_source_regression(tmp_path):
+    """The running container is live in P1 mode (GRID_SOURCE=p1); the env file about to be
+    used for the recreate doesn't carry that forward -- must be refused, not silently
+    applied, since that would revert live dispatch to the inverter's known-wrong grid
+    reading while the collector stays on P1."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+    )
+    inspect_result = docker_actions.ActionResult(
+        ok=True, stdout=json.dumps([{
+            "Config": {"Env": ["GRID_SOURCE=p1", "P1_MONITOR_URL=http://192.168.1.50/api/v1/live"]},
+        }]), stderr="", returncode=0)
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "_run", return_value=inspect_result), \
+         pytest.raises(docker_actions.EnvUnconfigured, match="GRID_SOURCE"):
+        docker_actions.set_dispatch_live(True)
+
+
+def test_set_dispatch_live_allows_grid_source_p1_carried_forward(tmp_path):
+    """The running container is in P1 mode and the new env file keeps it in P1 mode -- not
+    a regression, must proceed."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+        "GRID_SOURCE=p1\n"
+        "P1_MONITOR_URL=http://192.168.1.50/api/v1/live\n"
+    )
+    inspect_result = docker_actions.ActionResult(
+        ok=True, stdout=json.dumps([{
+            "Config": {"Env": ["GRID_SOURCE=p1", "P1_MONITOR_URL=http://192.168.1.50/api/v1/live"]},
+        }]), stderr="", returncode=0)
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "OVERRIDE_FILE", str(tmp_path / "override.yml")), \
+         patch.object(docker_actions, "_run") as run:
+        run.side_effect = [inspect_result,
+                            docker_actions.ActionResult(ok=True, stdout="", stderr="",
+                                                         returncode=0)]
+        result = docker_actions.set_dispatch_live(True)
+    assert result.ok
+
+
+def test_set_dispatch_live_refuses_grid_source_p1_with_no_monitor_url(tmp_path):
+    """The env file about to be used for the recreate sets GRID_SOURCE=p1 but leaves
+    P1_MONITOR_URL blank -- collector.py and scheduler.py both fail fast on that
+    combination at startup, so this must be refused up front rather than letting the
+    recreated dispatch container crash-loop."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+        "GRID_SOURCE=p1\n"
+    )
+    inspect_result = docker_actions.ActionResult(
+        ok=True, stdout=json.dumps([{"Config": {"Env": []}}]), stderr="", returncode=0)
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "_run", return_value=inspect_result), \
+         pytest.raises(docker_actions.EnvUnconfigured, match="P1_MONITOR_URL"):
+        docker_actions.set_dispatch_live(True)
+
+
+def test_set_dispatch_live_allows_grid_source_p1_with_monitor_url_set(tmp_path):
+    """Sanity check for the sibling refusal test above: GRID_SOURCE=p1 with a real
+    P1_MONITOR_URL must proceed, not be refused."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+        "GRID_SOURCE=p1\n"
+        "P1_MONITOR_URL=http://192.168.1.50/api/v1/live\n"
+    )
+    inspect_result = docker_actions.ActionResult(
+        ok=True, stdout=json.dumps([{"Config": {"Env": []}}]), stderr="", returncode=0)
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "OVERRIDE_FILE", str(tmp_path / "override.yml")), \
+         patch.object(docker_actions, "_run") as run:
+        run.side_effect = [inspect_result,
+                            docker_actions.ActionResult(ok=True, stdout="", stderr="",
+                                                         returncode=0)]
+        result = docker_actions.set_dispatch_live(True)
+    assert result.ok
+
+
+def test_grid_source_regression_reason_is_none_when_no_container_running(tmp_path):
+    """No container running yet and the candidate env is safe (inverter, or p1 with a real
+    URL) -- nothing to refuse."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text("GRID_SOURCE=inverter\n")
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "_run") as run:
+        run.return_value = docker_actions.ActionResult(ok=False, stdout="", stderr="no such",
+                                                         returncode=1)
+        env = docker_actions._current_and_new_dispatch_env()
+        assert docker_actions._grid_source_regression_reason(env) is None
+
+
+def test_set_dispatch_live_refuses_grid_source_p1_with_no_monitor_url_on_first_deploy(
+        tmp_path):
+    """Regression for the bug in the finding: _current_and_new_dispatch_env() used to return
+    a bare None whenever no dispatch container had ever run yet (`docker inspect` fails on a
+    container that doesn't exist), and both regression checks treated None as "nothing to
+    check" -- silently bypassing the P1_MONITOR_URL guard on exactly the deploy it exists
+    to protect: someone's very first `--live` with a misconfigured GRID_SOURCE=p1. The check
+    must fire even when there is no `current` container to compare against, because it
+    depends only on the candidate env file."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+        "GRID_SOURCE=p1\n"
+    )
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "_run") as run:
+        # `docker inspect` fails outright -- no dispatch container has ever run.
+        run.return_value = docker_actions.ActionResult(ok=False, stdout="", stderr="no such",
+                                                         returncode=1)
+        with pytest.raises(docker_actions.EnvUnconfigured, match="P1_MONITOR_URL"):
+            docker_actions.set_dispatch_live(True)
 
 
 def test_parse_env_file_strips_whitespace_and_quotes():

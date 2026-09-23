@@ -299,6 +299,29 @@ def get_last_power_data(app_id: str, app_secret: str, sys_sn: str) -> dict:
     return data
 
 
+def fetch_p1_data(url: str, timeout: float = 10) -> dict:
+    """Fetch a live snapshot from a HomeWizard-compatible P1 monitor's local API.
+
+    Raises RuntimeError on transport errors or a response missing active_power_w --
+    the one field this collector uses. Positive active_power_w = importing from the
+    grid, same convention as AlphaESS's pgrid.
+    """
+    try:
+        resp = requests.get(url, timeout=timeout)
+        resp.raise_for_status()
+        body = resp.json()
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"P1 fetch failed: {error_summary(e)}") from e
+    except ValueError as e:
+        # resp.json() raises a json.JSONDecodeError (a ValueError subclass) on a non-JSON
+        # body -- wrapped here too, so every transport/parsing failure is a RuntimeError,
+        # matching this function's documented contract.
+        raise RuntimeError(f"P1 response was not valid JSON: {e}") from e
+    if "active_power_w" not in body:
+        raise RuntimeError(f"P1 response missing active_power_w: {body}")
+    return body
+
+
 def format_duration(seconds: float) -> str:
     """Compact duration for log lines and heartbeat messages."""
     minutes, secs = divmod(int(seconds), 60)
@@ -493,13 +516,20 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
     return ""
 
 
-def parse_fields(data: dict) -> dict:
+def parse_fields(data: dict, p1_data: dict | None = None) -> dict:
     """Extract the fields we store. All powers in watts.
 
     Sign conventions (per AlphaESS API):
       pgrid: positive = importing from grid, negative = exporting
       pbat:  positive = discharging battery, negative = charging
     Verify against a live response with --once before trusting dashboards.
+
+    `p1_data`, when given (GRID_SOURCE=p1), overrides grid_power_w with the P1
+    monitor's active_power_w -- same sign convention as pgrid -- and recomputes
+    load_power_w from the load identity (load = pv + grid + battery), since
+    load_power_w has never been an independent measurement: it is AlphaESS's own
+    residual, wrong in exactly the way grid_power_w is wrong on a phase-mismatched
+    inverter, and right again once grid_power_w is corrected.
     """
     fields = {
         "pv_power_w": data.get("ppv"),
@@ -512,16 +542,56 @@ def parse_fields(data: dict) -> dict:
     if missing:
         log.warning("API response missing fields: %s (raw keys: %s)",
                     missing, sorted(data.keys()))
-    return {k: float(v) for k, v in fields.items() if v is not None}
+    fields = {k: float(v) for k, v in fields.items() if v is not None}
+    # Guarded on `fields` already being non-empty: an all-None AlphaESS response (a
+    # degraded/empty poll) must stay `{}` even under GRID_SOURCE=p1, so run_loop()'s
+    # `if fields:` skip-write guard still skips it. Without this guard, injecting
+    # grid_power_w unconditionally would make an otherwise-empty poll look non-empty and
+    # write a point holding only the P1 reading -- changing what "nothing to write" means.
+    if p1_data is not None and fields:
+        fields["grid_power_w"] = float(p1_data["active_power_w"])
+        if "pv_power_w" in fields and "battery_power_w" in fields:
+            fields["load_power_w"] = (
+                fields["pv_power_w"] + fields["grid_power_w"] + fields["battery_power_w"])
+        else:
+            # Can't recompute the identity without both pv and battery -- keeping
+            # AlphaESS's own `pload` here would silently record its known-wrong,
+            # single-phase figure. A missing field is the honest gap, not a guess.
+            fields.pop("load_power_w", None)
+    return fields
+
+
+def _grid_source_config() -> tuple[str, str]:
+    """Read GRID_SOURCE/P1_MONITOR_URL and fail fast if p1 mode has no URL to fetch from --
+    shared by run_once and run_loop so the validation can't drift between the two."""
+    grid_source = os.environ.get("GRID_SOURCE", "inverter")
+    p1_monitor_url = os.environ.get("P1_MONITOR_URL", "")
+    if grid_source == "p1" and not p1_monitor_url:
+        log.error("GRID_SOURCE=p1 requires P1_MONITOR_URL")
+        sys.exit(1)
+    return grid_source, p1_monitor_url
 
 
 def run_once(app_id: str, app_secret: str, sys_sn: str) -> None:
+    """Print AlphaESS's raw/parsed response for verifying sign conventions and field
+    mappings by hand (see parse_fields's docstring). Under GRID_SOURCE=p1, also fetches
+    and prints the P1 monitor's response and folds it into the parsed fields the same way
+    run_loop() does -- without this, --once would show AlphaESS's own known-wrong reading
+    while the running poll loop records the P1-corrected one, defeating the point of a
+    "verify before trusting dashboards" check for the one field this feature exists to fix.
+    """
     import json
+    grid_source, p1_monitor_url = _grid_source_config()
     data = get_last_power_data(app_id, app_secret, sys_sn)
     print("Raw API data object:")
     print(json.dumps(data, indent=2))
+    p1_data = None
+    if grid_source == "p1":
+        p1_data = fetch_p1_data(p1_monitor_url)
+        print("\nRaw P1 monitor data object:")
+        print(json.dumps(p1_data, indent=2))
     print("\nParsed fields:")
-    print(json.dumps(parse_fields(data), indent=2))
+    print(json.dumps(parse_fields(data, p1_data), indent=2))
 
 
 def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
@@ -541,6 +611,10 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
     # Optional: URL of a Kuma "Push" monitor, pinged after each successful
     # write. Unset -> no heartbeat, collector behaves exactly as before.
     heartbeat_url = os.environ.get("HEARTBEAT_URL", "")
+    # Optional: fold a P1 energy monitor's reading into each poll, overriding
+    # grid_power_w (and the load_power_w residual derived from it) -- see
+    # parse_fields. Unset -> "inverter", collector behaves exactly as before.
+    grid_source, p1_monitor_url = _grid_source_config()
     expected_max_mtu = int(env("EXPECTED_MAX_MTU", str(DEFAULT_EXPECTED_MAX_MTU)))
     diagnostic_url = env("DIAGNOSTIC_URL", DEFAULT_DIAGNOSTIC_URL)
     check_mtu(expected_max_mtu)
@@ -575,7 +649,8 @@ def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
         stage = "fetch"
         try:
             data = get_last_power_data(app_id, app_secret, sys_sn)
-            fields = parse_fields(data)
+            p1_data = fetch_p1_data(p1_monitor_url) if grid_source == "p1" else None
+            fields = parse_fields(data, p1_data)
             if fields:
                 point = Point("power_readings").tag("sys_sn", sys_sn)
                 for key, value in fields.items():

@@ -89,7 +89,7 @@ _UNCONFIGURED_MARKERS = {
     "INFLUX_TOKEN_DISPATCH": "read_planning_read_write_alphaess",
 }
 
-# The seven Kuma push URLs dispatch's `docker-compose.yml` block declares. Unlike the two
+# The eight Kuma push URLs dispatch's `docker-compose.yml` block declares. Unlike the two
 # markers above, blank is a LEGITIMATE value here in general (unset = no heartbeat, the
 # same `:-` default the compose file itself falls back to) -- so these can't be guarded by
 # "must not equal a placeholder." What they can be guarded against is REGRESSING: if the
@@ -106,6 +106,7 @@ _HEARTBEAT_URL_KEYS = (
     "DISPATCH_CONFIRMED_HEARTBEAT_URL",
     "INVERTER_NOT_HIJACKED_HEARTBEAT_URL",
     "SOC_FLOOR_HEARTBEAT_URL",
+    "P1_REACHABLE_HEARTBEAT_URL",
 )
 
 
@@ -122,21 +123,46 @@ def _controlpanel_env_unconfigured_reason() -> str | None:
     return None
 
 
-def _heartbeat_regression_reason() -> str | None:
+def _current_and_new_dispatch_env() -> tuple[dict, dict] | str:
+    """The running dispatch container's env and deploy/controlpanel.env's, fetched once and
+    shared by every regression check in set_dispatch_live() -- each check used to run this
+    same `docker inspect` and re-read/re-parse the same env file on its own, so an ordinary
+    go-live click paid for the subprocess spawn and file read twice for no logic benefit.
+
+    `current` is {} when there's nothing to regress FROM -- no container running yet
+    (dispatch_status() etc. handle "container doesn't exist" elsewhere), or its
+    `docker inspect` output couldn't be parsed, same reasoning as dispatch_status()'s own
+    parse guard. This must NOT short-circuit the whole return to "nothing to check": a
+    check like _grid_source_regression_reason()'s P1_MONITOR_URL validation depends only on
+    `new`, and a first-ever deploy (no `current` container by definition) is exactly the
+    case that check exists to catch -- it was silently bypassed before `current` and `new`
+    were split apart like this, an actual bug this docstring records so it isn't
+    reintroduced. `new` is always read, regardless of whether `current` was available.
+
+    Returns (current, new) to compare, or an error string when controlpanel.env itself
+    couldn't be read (there's genuinely nothing to check any check can act on).
+    """
+    current: dict = {}
     proc = _run(["docker", "inspect", DISPATCH_CONTAINER], timeout=60)
-    if not proc.ok:
-        return None  # nothing running yet to regress FROM -- dispatch_status() etc. handle
-                     # "container doesn't exist" elsewhere; this check has nothing to add.
-    try:
-        current = _parse_docker_env_list(json.loads(proc.stdout)[0]["Config"]["Env"])
-    except (ValueError, KeyError, IndexError, TypeError):
-        return None  # same reasoning as dispatch_status()'s own parse guard
+    if proc.ok:
+        try:
+            current = _parse_docker_env_list(json.loads(proc.stdout)[0]["Config"]["Env"])
+        except (ValueError, KeyError, IndexError, TypeError):
+            current = {}
 
     try:
         with open(CONTROLPANEL_ENV_FILE, encoding="utf-8") as f:
             new = _parse_env_file(f.read())
     except OSError as e:
         return f"could not read {CONTROLPANEL_ENV_FILE}: {e}"
+
+    return current, new
+
+
+def _heartbeat_regression_reason(env: tuple[dict, dict] | str) -> str | None:
+    if isinstance(env, str):
+        return env
+    current, new = env
 
     regressing = sorted(
         key for key in _HEARTBEAT_URL_KEYS
@@ -146,6 +172,44 @@ def _heartbeat_regression_reason() -> str | None:
         return (f"deploy/controlpanel.env would blank out already-configured heartbeat "
                  f"URL(s) {regressing} on the recreated dispatch container -- copy them "
                  f"from the real .env first (see DEPLOY.md, \"Control panel\" step 7)")
+    return None
+
+
+def _grid_source_regression_reason(env: tuple[dict, dict] | str) -> str | None:
+    """GRID_SOURCE=inverter (or blank, same thing via the compose default) is a normal,
+    common, CORRECT value -- unlike the heartbeat URLs above, there's nothing wrong with it
+    in general. The hazard is narrower: if the container currently running is already in P1
+    mode (GRID_SOURCE=p1 -- live dispatch is actively using the P1 monitor's grid reading),
+    a go-live recreate must never silently take it back out of P1 mode just because
+    deploy/controlpanel.env was copied without carrying GRID_SOURCE/P1_MONITOR_URL over.
+    That would revert live dispatch to the inverter's known-wrong single-phase grid_w while
+    the collector (a separate container, unaffected by this recreate) stays on P1 -- the
+    two halves of this feature would silently split.
+
+    A second, independent hazard: the recreate ships GRID_SOURCE=p1 (new, whether carried
+    forward from `current` or freshly set) with no P1_MONITOR_URL -- collector.py and
+    scheduler.py both fail fast on that combination at startup, but this control panel
+    never did, so the recreated dispatch container would just crash-loop instead of the
+    toggle being refused with a clear reason up front. This check applies even on a
+    first-ever deploy (no `current` container yet, `current == {}`) -- it depends only
+    on `new`."""
+    if isinstance(env, str):
+        return env
+    current, new = env
+
+    current_source = current.get("GRID_SOURCE", "").strip()
+    new_source = new.get("GRID_SOURCE", "inverter").strip()
+    if current_source == "p1" and new_source != "p1":
+        return ("the running dispatch container has GRID_SOURCE=p1, but deploy/controlpanel.env "
+                 "would recreate it with GRID_SOURCE unset or not \"p1\" -- this would silently "
+                 "revert live dispatch to the inverter's known-wrong single-phase grid reading "
+                 "while the collector stays on P1. Copy GRID_SOURCE=p1 and P1_MONITOR_URL from "
+                 "the real .env first (see DEPLOY.md, \"Control panel\" step 7)")
+    if new_source == "p1" and not new.get("P1_MONITOR_URL", "").strip():
+        return ("deploy/controlpanel.env would recreate dispatch with GRID_SOURCE=p1 but no "
+                 "P1_MONITOR_URL -- the recreated container would crash-loop on startup "
+                 "instead of running. Set P1_MONITOR_URL in the real .env first (see "
+                 "DEPLOY.md, \"Control panel\" step 7)")
     return None
 
 
@@ -203,7 +267,11 @@ def set_dispatch_live(live: bool) -> ActionResult:
     docs/DEPLOY.md, "The DISPATCH_LIVE mechanism". Writes the override file, then recreates
     only the dispatch service against it."""
     if live:
-        reason = _controlpanel_env_unconfigured_reason() or _heartbeat_regression_reason()
+        reason = _controlpanel_env_unconfigured_reason()
+        if not reason:
+            env = _current_and_new_dispatch_env()
+            reason = (_heartbeat_regression_reason(env)
+                      or _grid_source_regression_reason(env))
         if reason:
             raise EnvUnconfigured(reason)
 

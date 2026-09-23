@@ -1,4 +1,5 @@
-"""The five Kuma monitors the control loop owns. DESIGN-dispatch.md section 6.1, #4-#8.
+"""The Kuma monitors the control loop owns. DESIGN-dispatch.md section 6.1, #4-#8, plus #10
+(p1-reachable, conditional on GRID_SOURCE=p1).
 
 `scheduler.monitor_pings()` is pure, so the whole monitoring contract is testable without a
 bus, a network or a clock -- which matters more here than usual, because the failure this
@@ -20,12 +21,12 @@ import slots as S
 
 # Section 6.1, the rows this process is responsible for.
 MONITORS = {"slots-fresh", "dispatcher-alive", "dispatch-confirmed",
-            "inverter-not-hijacked", "soc-floor"}
+            "inverter-not-hijacked", "soc-floor", "p1-reachable"}
 
 
-def pings(decision, cache=None, live_soc=50.0, dry_run=False):
+def pings(decision, cache=None, live_soc=50.0, dry_run=False, p1_result=None):
     return dict((name, (status, msg)) for name, status, msg in
-                scheduler.monitor_pings(decision, cache or {}, live_soc, dry_run))
+                scheduler.monitor_pings(decision, cache or {}, live_soc, dry_run, p1_result))
 
 
 def commanded(reason="charge 4848 W to 26.1%"):
@@ -106,13 +107,25 @@ class TestSendHeartbeat:
 
 class TestEveryDocumentedMonitorIsWired:
     def test_the_url_table_covers_exactly_the_dispatcher_s_monitors(self):
-        """The gap this file exists for: five monitors in the design, none in the code."""
+        """The gap this file exists for: monitors in the design, none in the code."""
         assert set(scheduler.MONITOR_URLS) == MONITORS
 
-    def test_a_healthy_tick_pings_all_five(self):
+    def test_a_healthy_tick_pings_the_five_always_wired_monitors(self):
+        """p1-reachable is NOT one of these -- it's conditional on p1_result, since it's
+        meaningless under GRID_SOURCE=inverter (no URL configured for it, either)."""
         sent = pings(commanded(), {"write_verified": True})
-        assert set(sent) == MONITORS
+        assert set(sent) == MONITORS - {"p1-reachable"}
         assert all(status == "up" for status, _ in sent.values())
+
+    def test_grid_source_p1_also_pings_p1_reachable_up(self):
+        sent = pings(commanded(), {"write_verified": True}, p1_result=(True, "OK"))
+        assert set(sent) == MONITORS
+        assert sent["p1-reachable"] == ("up", "OK")
+
+    def test_a_p1_failure_pings_p1_reachable_down_with_the_reason(self):
+        sent = pings(commanded(), {"write_verified": True},
+                     p1_result=(False, "no route to host"))
+        assert sent["p1-reachable"] == ("down", "no route to host")
 
     def test_an_unset_url_makes_the_ping_a_no_op_rather_than_an_error(self, monkeypatch):
         """Monitors are created during go-live; the loop has to run before that."""

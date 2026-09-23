@@ -425,6 +425,209 @@ class TestDegradedFields:
         assert set(fields) & pivoted
 
 
+class TestP1GridSource:
+    """GRID_SOURCE=p1 sources grid_w from the P1 monitor instead of REG_GRID_POWER, with
+    the same surplus_w=None/batt_w=None fallback a bad Modbus read already has."""
+
+    def test_p1_grid_w_overrides_the_register_reading(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", lambda url, timeout=5: 300.0)
+        # REG_GRID_POWER seeded to a very different value -- if this shows up in
+        # surplus_w, the P1 override isn't wired.
+        regs = measurement_registers(battery_power_w=-100)  # charging 100 W
+        regs[R.REG_GRID_POWER] = 9999
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        heartbeat = tmp_path / "hb.json"
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", heartbeat)
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        assert cache.get("p1_result") == (True, "OK")
+        # surplus_w = -(grid_w + batt_w); batt_w read raw (signed) is -100 (charging),
+        # P1 grid_w=300 -> -(300 + -100) = -200. If REG_GRID_POWER's 9999 leaked through
+        # instead of the P1 value, this would be wildly different (and likely None, since
+        # 9999 W trips the implausible-reading guard).
+        payload = json.loads(heartbeat.read_text())
+        assert payload["surplus_w"] == -200.0
+
+    def test_p1_fetch_failure_falls_back_to_no_surplus(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+
+        def boom(url, timeout=5):
+            raise OSError("no route to host")
+
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", boom)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        heartbeat = tmp_path / "hb.json"
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", heartbeat)
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        assert cache.get("p1_result") == (False, "OSError: no route to host")
+        payload = json.loads(heartbeat.read_text())
+        assert payload["surplus_w"] is None
+
+    def test_p1_malformed_response_falls_back_the_same_way(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+
+        def bad(url, timeout=5):
+            raise KeyError("active_power_w")
+
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", bad)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        heartbeat = tmp_path / "hb.json"
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", heartbeat)
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        assert cache.get("p1_result")[0] is False
+        payload = json.loads(heartbeat.read_text())
+        assert payload["surplus_w"] is None
+
+    def test_grid_source_inverter_default_never_calls_fetch_p1_grid_w(
+            self, tmp_path, monkeypatch):
+        called = []
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w",
+                            lambda url, timeout=5: called.append(1))
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        assert called == []
+        assert cache.get("p1_result") is None
+
+    def test_p1_fetch_does_not_block_the_event_loop(self, tmp_path, monkeypatch):
+        """A slow P1 fetch must not stall other coroutines -- asyncio.to_thread, not a
+        direct blocking call. See scheduler.py's report()/heartbeat pattern this mirrors."""
+        import time as time_mod
+
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+
+        def slow_fetch(url, timeout=5):
+            time_mod.sleep(0.2)
+            return 300.0
+
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", slow_fetch)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        slots_path = tmp_path / "slots.json"
+        slots_path.write_text(json.dumps(doc()))
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+        inv = scheduler.Inverter(client, 0x55, dry_run=True)
+        cache: dict = {"released": False}
+
+        ticks = 0
+
+        async def counter():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.02)
+
+        async def run_both():
+            counter_task = asyncio.ensure_future(counter())
+            await scheduler.tick(inv, slots_path, cache, T0)
+            counter_task.cancel()
+
+        asyncio.run(run_both())
+        # 0.2s blocked / 0.02s tick-rate should give ~10 increments if the event loop
+        # kept running during the fetch; a blocking call would give ~0-1.
+        assert ticks >= 5
+
+    def test_a_decode_error_on_the_inverter_branch_is_not_swallowed(
+            self, tmp_path, monkeypatch):
+        """The surplus block's except clause was widened to (OSError, ValueError, KeyError,
+        TypeError) so fetch_p1_grid_w's malformed-response cases degrade to the fail-safe
+        instead of crashing tick(). That widening must not also catch a ValueError from
+        registers.decode() on the GRID register under GRID_SOURCE=inverter (the default) --
+        a decode failure there is a genuine bug (a corrupt/mismatched-length Modbus
+        response, not a connection failure), and this file's own read() docstring explains
+        why every caller here used to crash loudly on exactly this class of failure rather
+        than silently degrading. Only a P1 response gets the fail-safe treatment. See the
+        sibling test below for the BATTERY register, which is read unconditionally
+        regardless of GRID_SOURCE and must never be swallowed either."""
+        orig_read = scheduler.Inverter.read
+
+        async def selective_read(self, addr, count=1, signed=False):
+            if addr == R.REG_GRID_POWER:
+                raise ValueError("decode expects 1 or 2 registers, got 3")
+            return await orig_read(self, addr, count, signed)
+
+        monkeypatch.setattr(scheduler.Inverter, "read", selective_read)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        with pytest.raises(ValueError):
+            tick_with_cache(tmp_path, monkeypatch, client, cache)
+
+    def test_a_battery_decode_error_under_grid_source_p1_is_not_swallowed(
+            self, tmp_path, monkeypatch):
+        """The earlier fix for the finding above only checked `GRID_SOURCE != "p1": raise`
+        -- a config-flag guard, not a which-call-raised guard. REG_BATTERY_POWER is read
+        unconditionally on every tick regardless of GRID_SOURCE, so under GRID_SOURCE=p1 a
+        genuine decode bug on THAT read was still being caught by the P1-only except clause
+        and silently degraded to the fail-safe, exactly the bug the sibling test above
+        exists to catch -- just on the other register. Must crash loudly here too, even
+        though fetch_p1_grid_w itself succeeds first."""
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", lambda url, timeout=5: 300.0)
+
+        orig_read = scheduler.Inverter.read
+
+        async def selective_read(self, addr, count=1, signed=False):
+            if addr == R.REG_BATTERY_POWER:
+                raise ValueError("decode expects 1 or 2 registers, got 3")
+            return await orig_read(self, addr, count, signed)
+
+        monkeypatch.setattr(scheduler.Inverter, "read", selective_read)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        with pytest.raises(ValueError):
+            tick_with_cache(tmp_path, monkeypatch, client, cache)
+
+    def test_battery_register_is_still_read_after_a_p1_fetch_failure(
+            self, tmp_path, monkeypatch):
+        """Regression for a second bug in the same area: an earlier restructure made the P1
+        fetch's failure path return early, skipping REG_BATTERY_POWER entirely -- contradicting
+        this file's own comment that the battery register is read unconditionally every tick.
+        A genuine, unrelated Modbus decode bug on that read would then get misattributed to
+        "P1 fetch failed" in the log instead of surfacing as its own failure. Proven here by
+        making the battery read itself fail with a distinguishable OSError and asserting that
+        failure -- not the P1 failure -- is what the log records, which is only possible if the
+        read was actually attempted."""
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+
+        def boom(url, timeout=5):
+            raise OSError("no route to host")
+
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", boom)
+
+        orig_read = scheduler.Inverter.read
+        battery_read_attempted = []
+
+        async def selective_read(self, addr, count=1, signed=False):
+            if addr == R.REG_BATTERY_POWER:
+                battery_read_attempted.append(True)
+                raise OSError("modbus timeout reading battery register")
+            return await orig_read(self, addr, count, signed)
+
+        monkeypatch.setattr(scheduler.Inverter, "read", selective_read)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        heartbeat = tmp_path / "hb.json"
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", heartbeat)
+        tick_with_cache(tmp_path, monkeypatch, client, cache)
+        # Proves the read was actually attempted, not skipped because the P1 branch
+        # returned early -- a bare surplus_w is None assertion can't tell those apart,
+        # since both a skipped read and a failed read produce the same None.
+        assert battery_read_attempted == [True]
+        # The P1 fetch's own failure is still recorded independently...
+        assert cache.get("p1_result") == (False, "OSError: no route to host")
+        payload = json.loads(heartbeat.read_text())
+        assert payload["surplus_w"] is None
+
+
 class TestTickPublishesTheWriteVerifyVerdict:
     """`tick()` end-to-end, not `state.build_fields()` called by hand -- these pin the same
     contract `TestDegradedFields` pins for the degraded shape, but for the live shape, and for

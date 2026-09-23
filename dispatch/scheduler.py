@@ -33,6 +33,7 @@ import os
 import signal
 import sys
 from pathlib import Path
+from urllib.request import urlopen
 
 import registers as R
 import slots as S
@@ -53,11 +54,12 @@ log = logging.getLogger("dispatch")
 
 HEARTBEAT_PATH = Path(os.environ.get("DISPATCH_HEARTBEAT", "dispatch_heartbeat.json"))
 
-# The five Kuma monitors this loop is responsible for -- section 6.1's #4-#8. #1-#3 are pinged
-# elsewhere (#1 in `battery-planning`, #2 and #3 by the translator) and #9 is a daily job.
+# The Kuma monitors this loop is responsible for -- section 6.1's #4-#8, plus #10
+# (p1-reachable, conditional on GRID_SOURCE=p1). #1-#3 are pinged elsewhere (#1 in
+# `battery-planning`, #2 and #3 by the translator) and #9 is a daily job.
 #
 # Read once at import and keyed by monitor name so the mapping between "the table in section
-# 6.1" and "the env var in docker-compose.yml" is one dict rather than five scattered lookups.
+# 6.1" and "the env var in docker-compose.yml" is one dict rather than scattered lookups.
 # Unset is the documented "not monitored yet" state: monitors get created during go-live, and
 # the loop has to run before that. An unset URL makes `send_heartbeat` a no-op.
 MONITOR_URLS = {
@@ -66,7 +68,32 @@ MONITOR_URLS = {
     "dispatch-confirmed": os.environ.get("DISPATCH_CONFIRMED_HEARTBEAT_URL", ""),
     "inverter-not-hijacked": os.environ.get("INVERTER_NOT_HIJACKED_HEARTBEAT_URL", ""),
     "soc-floor": os.environ.get("SOC_FLOOR_HEARTBEAT_URL", ""),
+    "p1-reachable": os.environ.get("P1_REACHABLE_HEARTBEAT_URL", ""),
 }
+
+# GRID_SOURCE gates whether tick() reads grid power from the inverter's own Modbus
+# register (the default -- and the ONLY correct choice once the inverter is 3-phase
+# again) or from a P1 monitor's local API. The inverter's grid CT only sees one phase
+# on a house wired for three, so its own reading is wrong until the vendor replaces
+# it -- see docs/superpowers/specs/2026-09-23-p1-grid-source-design.md.
+GRID_SOURCE = os.environ.get("GRID_SOURCE", "inverter")
+P1_MONITOR_URL = os.environ.get("P1_MONITOR_URL", "")
+P1_FETCH_TIMEOUT_S = 5
+
+
+def fetch_p1_grid_w(url: str, timeout: float = P1_FETCH_TIMEOUT_S) -> float:
+    """Synchronous fetch of a P1 monitor's grid power -- run via asyncio.to_thread,
+    never called directly from the event loop.
+
+    Same sign convention as REG_GRID_POWER: positive = importing. Raises OSError
+    (timeout, connection failure, non-2xx -- urllib.error.HTTPError subclasses
+    URLError subclasses OSError) or ValueError/KeyError/TypeError on a malformed
+    body. tick() catches all of these identically, exactly like a bad Modbus read.
+    """
+    with urlopen(url, timeout=timeout) as resp:
+        body = json.load(resp)
+    return float(body["active_power_w"])
+
 
 # The inverter's own limit registers are re-read on this cadence, not just at startup.
 #
@@ -402,10 +429,12 @@ def write_heartbeat(decision: S.Decision, state: dict | None, live_soc: float | 
 
 
 def monitor_pings(decision: S.Decision, cache: dict, live_soc: float | None,
-                  dry_run: bool) -> list[tuple[str, str, str]]:
-    """(monitor, status, message) for section 6.1's #4-#8. Pure -- the I/O is the caller's.
+                  dry_run: bool, p1_result: tuple[bool, str] | None = None
+                  ) -> list[tuple[str, str, str]]:
+    """(monitor, status, message) for section 6.1's #4-#8, plus #10 (p1-reachable) when
+    GRID_SOURCE=p1. Pure -- the I/O is the caller's.
 
-    All five are answered from one tick's worth of facts, so they are decided in one place;
+    Every ping is answered from one tick's worth of facts, so they are decided in one place;
     scattering five `send_heartbeat` calls through `tick()` is how a monitor ends up silently
     never pinged, which is the state this function exists to end.
 
@@ -462,6 +491,10 @@ def monitor_pings(decision: S.Decision, cache: dict, live_soc: float | None,
     if live_soc is not None:
         status = "up" if live_soc >= S.SOC_FLOOR_PCT else "down"
         pings.append(("soc-floor", status, f"SoC {live_soc:.1f}% (floor {S.SOC_FLOOR_PCT}%)"))
+
+    if p1_result is not None:
+        ok, msg = p1_result
+        pings.append(("p1-reachable", "up" if ok else "down", msg))
 
     return [(name, status, msg[:200]) for name, status, msg in pings]
 
@@ -644,23 +677,61 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # generation-minus-load does not -- the identity and the measurements are in
     # `slots.SURPLUS_HARVEST_W`. A failed read is None, not zero: None falls back to the old
     # freeze, zero would claim the house is eating everything it makes.
+    #
+    # GRID_SOURCE=p1 replaces the register read with a fetch to a P1 monitor -- see
+    # docs/superpowers/specs/2026-09-23-p1-grid-source-design.md. p1_result records the
+    # fetch's own outcome (independent of the implausible-value check below) for the
+    # p1-reachable Kuma monitor in monitor_pings().
+    # The P1 fetch gets its OWN try/except, isolated from the Modbus reads below -- not
+    # keyed off GRID_SOURCE inside a shared except clause. A shared clause can only
+    # distinguish "which mode are we in", not "which call actually raised", and
+    # REG_BATTERY_POWER is read UNCONDITIONALLY below, whether or not the P1 fetch just
+    # failed -- a P1 outage must not also skip the one register read that would otherwise
+    # surface a genuine, unrelated Modbus decode bug (the honest response this file's
+    # read() docstring, ~line 184, explains at length), and must not get misattributed to
+    # "P1 fetch failed" in the log if the battery read is what actually broke.
+    p1_result: tuple[bool, str] | None = None
+    grid_w = None
+    p1_failed = False
+    if GRID_SOURCE == "p1":
+        try:
+            grid_w = await asyncio.to_thread(fetch_p1_grid_w, P1_MONITOR_URL)
+            p1_result = (True, "OK")
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            p1_result = (False, f"{type(e).__name__}: {e}"[:200])
+            p1_failed = True
+    cache["p1_result"] = p1_result
+
+    batt_w = None
     try:
-        grid_w = await inv.read(R.REG_GRID_POWER, 2, signed=True)
+        if GRID_SOURCE != "p1":
+            grid_w = await inv.read(R.REG_GRID_POWER, 2, signed=True)
         batt_w = await inv.read(R.REG_BATTERY_POWER, signed=True)
+    except OSError as e:
+        log.warning("surplus read failed: %s -- a met charge target will hold, not "
+                    "release", e)
+        batt_w = None
+        if GRID_SOURCE != "p1":
+            grid_w = None
+
+    if p1_failed:
+        log.warning("P1 fetch failed: %s -- a met charge target will hold, not release",
+                    p1_result[1])
+        surplus_w = None
+    elif grid_w is None or batt_w is None:
+        surplus_w = None
+    else:
         surplus_w = -(grid_w + batt_w)
         log.debug("surplus: grid=%+dW battery=%+dW -> %+dW", grid_w, batt_w, surplus_w)
         if abs(grid_w) > IMPLAUSIBLE_POWER_W or abs(batt_w) > IMPLAUSIBLE_POWER_W:
-            # Neither register has ever been read by this process before 2026-08-20, so their
-            # scale is documented rather than observed. A decode that is wrong by a factor is
-            # the failure this guard is for, and the honest response is None -- the same
-            # fallback as an unreadable register, i.e. the pre-existing freeze.
-            log.warning("implausible power reading (grid=%+dW battery=%+dW) -- ignoring the "
-                        "surplus rule this tick", grid_w, batt_w)
+            # Neither register has ever been read by this process before 2026-08-20, so
+            # their scale is documented rather than observed. A decode that is wrong by a
+            # factor is the failure this guard is for, and the honest response is None --
+            # the same fallback as an unreadable register, i.e. the pre-existing freeze.
+            log.warning("implausible power reading (grid=%+dW battery=%+dW) -- ignoring "
+                        "the surplus rule this tick", grid_w, batt_w)
             surplus_w = None
             batt_w = None
-    except OSError as e:
-        log.warning("surplus read failed: %s -- a met charge target will hold, not release", e)
-        surplus_w, batt_w = None, None
 
     # Charging-positive, matching `setpoint_w` -- REG_BATTERY_POWER is discharge-positive.
     # `None`, not 0, when the read failed or looked implausible: 0 would publish "the battery
@@ -1087,7 +1158,9 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # 10. Report to Kuma. Last, so every ping describes a completed tick rather than one in
     # progress -- and after the heartbeat file, which is the check that must never depend on
     # the network.
-    await report(monitor_pings(decision, cache, live_soc, inv.dry_run), publisher)
+    await report(
+        monitor_pings(decision, cache, live_soc, inv.dry_run, cache.get("p1_result")),
+        publisher)
 
     log.info("%s | %s | soc=%s | temp=%s | verified=%s | %s", decision.kind, decision.reason,
              f"{live_soc:.1f}%" if live_soc is not None else "?",
@@ -1250,6 +1323,9 @@ def main():
     configure_logging(a.log_retention_days, a.verbose)
     if not a.ip:
         p.error("--ip is required unless --alive")
+    if GRID_SOURCE == "p1" and not P1_MONITOR_URL:
+        p.error("P1_MONITOR_URL is required when GRID_SOURCE=p1 -- without it, every tick's "
+                 "fetch_p1_grid_w call fails and the surplus rule freezes silently forever")
     if AsyncModbusTcpClient is None:
         sys.exit("pymodbus is not installed: pip install -r dispatch/requirements.txt")
 
