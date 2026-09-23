@@ -299,6 +299,21 @@ def get_last_power_data(app_id: str, app_secret: str, sys_sn: str) -> dict:
     return data
 
 
+def fetch_p1_data(url: str, timeout: float = 10) -> dict:
+    """Fetch a live snapshot from a HomeWizard-compatible P1 monitor's local API.
+
+    Raises RuntimeError on transport errors or a response missing active_power_w --
+    the one field this collector uses. Positive active_power_w = importing from the
+    grid, same convention as AlphaESS's pgrid.
+    """
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    body = resp.json()
+    if "active_power_w" not in body:
+        raise RuntimeError(f"P1 response missing active_power_w: {body}")
+    return body
+
+
 def format_duration(seconds: float) -> str:
     """Compact duration for log lines and heartbeat messages."""
     minutes, secs = divmod(int(seconds), 60)
@@ -493,13 +508,20 @@ def send_heartbeat(url: str, status: str = "up", msg: str = "OK",
     return ""
 
 
-def parse_fields(data: dict) -> dict:
+def parse_fields(data: dict, p1_data: dict | None = None) -> dict:
     """Extract the fields we store. All powers in watts.
 
     Sign conventions (per AlphaESS API):
       pgrid: positive = importing from grid, negative = exporting
       pbat:  positive = discharging battery, negative = charging
     Verify against a live response with --once before trusting dashboards.
+
+    `p1_data`, when given (GRID_SOURCE=p1), overrides grid_power_w with the P1
+    monitor's active_power_w -- same sign convention as pgrid -- and recomputes
+    load_power_w from the load identity (load = pv + grid + battery), since
+    load_power_w has never been an independent measurement: it is AlphaESS's own
+    residual, wrong in exactly the way grid_power_w is wrong on a phase-mismatched
+    inverter, and right again once grid_power_w is corrected.
     """
     fields = {
         "pv_power_w": data.get("ppv"),
@@ -512,7 +534,13 @@ def parse_fields(data: dict) -> dict:
     if missing:
         log.warning("API response missing fields: %s (raw keys: %s)",
                     missing, sorted(data.keys()))
-    return {k: float(v) for k, v in fields.items() if v is not None}
+    fields = {k: float(v) for k, v in fields.items() if v is not None}
+    if p1_data is not None:
+        fields["grid_power_w"] = float(p1_data["active_power_w"])
+        if "pv_power_w" in fields and "battery_power_w" in fields:
+            fields["load_power_w"] = (
+                fields["pv_power_w"] + fields["grid_power_w"] + fields["battery_power_w"])
+    return fields
 
 
 def run_once(app_id: str, app_secret: str, sys_sn: str) -> None:

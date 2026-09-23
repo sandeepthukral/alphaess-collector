@@ -138,3 +138,58 @@ def test_parse_fields_keeps_zero_values():
 
 def test_parse_fields_on_an_empty_response():
     assert parse_fields({}) == {}
+
+
+def test_parse_fields_overrides_grid_and_recomputes_load_from_p1():
+    fields = parse_fields(
+        {"ppv": 1500, "pgrid": -9999, "pload": -9999, "pbat": -500, "soc": 87.5},
+        p1_data={"active_power_w": 200},
+    )
+    assert fields["grid_power_w"] == 200.0
+    # load = pv + grid + battery = 1500 + 200 + (-500)
+    assert fields["load_power_w"] == 1200.0
+    assert fields["pv_power_w"] == 1500.0
+    assert fields["battery_power_w"] == -500.0
+
+
+def test_parse_fields_ignores_p1_data_when_none():
+    fields = parse_fields({"ppv": 1500, "pgrid": -200, "pload": 800,
+                           "pbat": -500, "soc": 87.5}, p1_data=None)
+    assert fields["grid_power_w"] == -200.0
+    assert fields["load_power_w"] == 800.0
+
+
+# --------------------------------------------------------------------------
+# fetch_p1_data
+# --------------------------------------------------------------------------
+
+def test_fetch_p1_data_returns_the_body(monkeypatch):
+    import collector as collector_mod
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"active_power_w": 8742, "active_power_l1_w": 3640}
+
+    monkeypatch.setattr(collector_mod.requests, "get",
+                        lambda url, timeout=10: FakeResponse())
+    body = collector_mod.fetch_p1_data("http://192.168.2.46/api/v1/data")
+    assert body["active_power_w"] == 8742
+
+
+def test_fetch_p1_data_raises_on_missing_active_power_w(monkeypatch):
+    import collector as collector_mod
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"active_power_l1_w": 3640}
+
+    monkeypatch.setattr(collector_mod.requests, "get",
+                        lambda url, timeout=10: FakeResponse())
+    with pytest.raises(RuntimeError, match="active_power_w"):
+        collector_mod.fetch_p1_data("http://192.168.2.46/api/v1/data")
