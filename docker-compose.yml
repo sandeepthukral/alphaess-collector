@@ -78,6 +78,12 @@ services:
       BATTERY_CAPACITY_KWH: ${BATTERY_CAPACITY_KWH:-}
       # Optional Kuma "Push" monitor URL; unset = no heartbeat.
       HEARTBEAT_URL: ${HEARTBEAT_URL:-}
+      # GRID_SOURCE=p1 replaces this collector's grid_power_w/load_power_w with a P1
+      # monitor's local API instead of AlphaESS's own (currently phase-mismatched)
+      # reading -- see docs/superpowers/specs/2026-09-23-p1-grid-source-design.md.
+      # inverter (default) = today's behavior, unchanged.
+      GRID_SOURCE: ${GRID_SOURCE:-inverter}
+      P1_MONITOR_URL: ${P1_MONITOR_URL:-}
       # Keep in sync with the com.docker.network.driver.mtu driver_opt on
       # alphaess-net below. The collector warns at startup if the MTU it
       # actually has is larger, which catches the network having been created
@@ -387,6 +393,15 @@ services:
       DISPATCH_CONFIRMED_HEARTBEAT_URL: ${DISPATCH_CONFIRMED_HEARTBEAT_URL:-}
       INVERTER_NOT_HIJACKED_HEARTBEAT_URL: ${INVERTER_NOT_HIJACKED_HEARTBEAT_URL:-}
       SOC_FLOOR_HEARTBEAT_URL: ${SOC_FLOOR_HEARTBEAT_URL:-}
+      # Same GRID_SOURCE as the collector service -- keep both set the same way, or
+      # live dispatch and historical recording disagree about which grid reading is
+      # true. See docs/superpowers/specs/2026-09-23-p1-grid-source-design.md.
+      GRID_SOURCE: ${GRID_SOURCE:-inverter}
+      P1_MONITOR_URL: ${P1_MONITOR_URL:-}
+      # Monitor #10, pinged by the control loop every tick, only when GRID_SOURCE=p1.
+      # Catches: the loop is alive, but surplus-harvest decisions are blind because the
+      # P1 monitor stopped answering.
+      P1_REACHABLE_HEARTBEAT_URL: ${P1_REACHABLE_HEARTBEAT_URL:-}
       # The floor monitor #8 reports against. Matches the planner's `minBatterySOCPct`; it is
       # a backstop, not a control input -- nothing refuses a command because of it.
       SOC_FLOOR_PCT: ${SOC_FLOOR_PCT:-10}
