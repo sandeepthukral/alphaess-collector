@@ -128,10 +128,10 @@ the existing "implausible/failed read → surplus_w=None" path already drawn in 
 — no new branch shape, just a note on where `grid_w` comes from.
 
 `DESIGN-dispatch.md` §6.1's monitor table gets the new `p1-reachable` row (#10), plus a line
-in the "which monitor catches what" narrative alongside #7/#8 (`docs/DESIGN-dispatch.md` is
-not in `CLAUDE.md`'s sync table, since it documents narrative/monitors rather than
-branching/thresholds, but it is the source of truth for the monitor list and would go stale
-otherwise).
+in the "which monitor catches what" narrative alongside #7/#8 (`DESIGN-dispatch.md` lives at
+the repo root, not under `docs/` — only `docs/*-FLOW.md` files do. It's not in `CLAUDE.md`'s
+sync table, since it documents narrative/monitors rather than branching/thresholds, but it
+is the source of truth for the monitor list and would go stale otherwise).
 
 `docs/EFFICIENCY-FLOW.md` and `docs/PRICING-FLOW.md` treat `power_readings` as a given input
 and don't diagram `collector.py`'s field mapping, so they need no changes — confirmed during
@@ -151,6 +151,7 @@ exploration, re-checked once the collector.py change lands in case that's stoppe
   that a slow/blocking P1 response doesn't delay a concurrent heartbeat in the test).
 - `monitor_pings()`: unit test that `p1-reachable` pings `up` on a successful P1 fetch,
   `down` with the failure reason on an unsuccessful one, and is absent from the ping list
-  entirely under `GRID_SOURCE=inverter`.
+  entirely under `GRID_SOURCE=inverter` — belongs in `tests/test_dispatch_monitors.py`,
+  which already holds this function's other cases, not `test_dispatch_scheduler.py`.
 - Both: `GRID_SOURCE=inverter` (or unset) reproduces exactly today's behavior — existing
   tests for both modules should pass unmodified under the default.
