@@ -123,25 +123,32 @@ def _controlpanel_env_unconfigured_reason() -> str | None:
     return None
 
 
-def _current_and_new_dispatch_env() -> tuple[dict, dict] | str | None:
+def _current_and_new_dispatch_env() -> tuple[dict, dict] | str:
     """The running dispatch container's env and deploy/controlpanel.env's, fetched once and
     shared by every regression check in set_dispatch_live() -- each check used to run this
     same `docker inspect` and re-read/re-parse the same env file on its own, so an ordinary
     go-live click paid for the subprocess spawn and file read twice for no logic benefit.
 
-    Returns (current, new) to compare, None when there's nothing to regress FROM (no
-    container running yet -- dispatch_status() etc. handle "container doesn't exist"
-    elsewhere; or its `docker inspect` output couldn't be parsed, same reasoning as
-    dispatch_status()'s own parse guard), or an error string when controlpanel.env itself
-    couldn't be read.
+    `current` is {} when there's nothing to regress FROM -- no container running yet
+    (dispatch_status() etc. handle "container doesn't exist" elsewhere), or its
+    `docker inspect` output couldn't be parsed, same reasoning as dispatch_status()'s own
+    parse guard. This must NOT short-circuit the whole return to "nothing to check": a
+    check like _grid_source_regression_reason()'s P1_MONITOR_URL validation depends only on
+    `new`, and a first-ever deploy (no `current` container by definition) is exactly the
+    case that check exists to catch -- it was silently bypassed before `current` and `new`
+    were split apart like this, an actual bug this docstring records so it isn't
+    reintroduced. `new` is always read, regardless of whether `current` was available.
+
+    Returns (current, new) to compare, or an error string when controlpanel.env itself
+    couldn't be read (there's genuinely nothing to check any check can act on).
     """
+    current: dict = {}
     proc = _run(["docker", "inspect", DISPATCH_CONTAINER], timeout=60)
-    if not proc.ok:
-        return None
-    try:
-        current = _parse_docker_env_list(json.loads(proc.stdout)[0]["Config"]["Env"])
-    except (ValueError, KeyError, IndexError, TypeError):
-        return None
+    if proc.ok:
+        try:
+            current = _parse_docker_env_list(json.loads(proc.stdout)[0]["Config"]["Env"])
+        except (ValueError, KeyError, IndexError, TypeError):
+            current = {}
 
     try:
         with open(CONTROLPANEL_ENV_FILE, encoding="utf-8") as f:
@@ -152,8 +159,8 @@ def _current_and_new_dispatch_env() -> tuple[dict, dict] | str | None:
     return current, new
 
 
-def _heartbeat_regression_reason(env: tuple[dict, dict] | str | None) -> str | None:
-    if env is None or isinstance(env, str):
+def _heartbeat_regression_reason(env: tuple[dict, dict] | str) -> str | None:
+    if isinstance(env, str):
         return env
     current, new = env
 
@@ -168,7 +175,7 @@ def _heartbeat_regression_reason(env: tuple[dict, dict] | str | None) -> str | N
     return None
 
 
-def _grid_source_regression_reason(env: tuple[dict, dict] | str | None) -> str | None:
+def _grid_source_regression_reason(env: tuple[dict, dict] | str) -> str | None:
     """GRID_SOURCE=inverter (or blank, same thing via the compose default) is a normal,
     common, CORRECT value -- unlike the heartbeat URLs above, there's nothing wrong with it
     in general. The hazard is narrower: if the container currently running is already in P1
@@ -183,8 +190,10 @@ def _grid_source_regression_reason(env: tuple[dict, dict] | str | None) -> str |
     forward from `current` or freshly set) with no P1_MONITOR_URL -- collector.py and
     scheduler.py both fail fast on that combination at startup, but this control panel
     never did, so the recreated dispatch container would just crash-loop instead of the
-    toggle being refused with a clear reason up front."""
-    if env is None or isinstance(env, str):
+    toggle being refused with a clear reason up front. This check applies even on a
+    first-ever deploy (no `current` container yet, `current == {}`) -- it depends only
+    on `new`."""
+    if isinstance(env, str):
         return env
     current, new = env
 

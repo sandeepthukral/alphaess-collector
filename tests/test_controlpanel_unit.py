@@ -491,12 +491,41 @@ def test_set_dispatch_live_allows_grid_source_p1_with_monitor_url_set(tmp_path):
     assert result.ok
 
 
-def test_grid_source_regression_reason_is_none_when_no_container_running():
-    with patch.object(docker_actions, "_run") as run:
+def test_grid_source_regression_reason_is_none_when_no_container_running(tmp_path):
+    """No container running yet and the candidate env is safe (inverter, or p1 with a real
+    URL) -- nothing to refuse."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text("GRID_SOURCE=inverter\n")
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "_run") as run:
         run.return_value = docker_actions.ActionResult(ok=False, stdout="", stderr="no such",
                                                          returncode=1)
         env = docker_actions._current_and_new_dispatch_env()
         assert docker_actions._grid_source_regression_reason(env) is None
+
+
+def test_set_dispatch_live_refuses_grid_source_p1_with_no_monitor_url_on_first_deploy(
+        tmp_path):
+    """Regression for the bug in the finding: _current_and_new_dispatch_env() used to return
+    a bare None whenever no dispatch container had ever run yet (`docker inspect` fails on a
+    container that doesn't exist), and both regression checks treated None as "nothing to
+    check" -- silently bypassing the P1_MONITOR_URL guard on exactly the deploy it exists
+    to protect: someone's very first `--live` with a misconfigured GRID_SOURCE=p1. The check
+    must fire even when there is no `current` container to compare against, because it
+    depends only on the candidate env file."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+        "GRID_SOURCE=p1\n"
+    )
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "_run") as run:
+        # `docker inspect` fails outright -- no dispatch container has ever run.
+        run.return_value = docker_actions.ActionResult(ok=False, stdout="", stderr="no such",
+                                                         returncode=1)
+        with pytest.raises(docker_actions.EnvUnconfigured, match="P1_MONITOR_URL"):
+            docker_actions.set_dispatch_live(True)
 
 
 def test_parse_env_file_strips_whitespace_and_quotes():
