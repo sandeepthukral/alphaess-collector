@@ -11,7 +11,7 @@ this doc is the visual reference for the control flow itself.
 flowchart LR
     P["battery-planning<br/>LP planner<br/>Wh forecast"] -->|batch, hrs ahead| T
     T["translator.py<br/>classify() / to_slots()<br/>→ slots.json"] -->|writes| S
-    S["scheduler.py<br/>tick()<br/>read live SoC/grid/batt<br/>→ surplus_w"] -->|every 60s| D
+    S["scheduler.py<br/>tick()<br/>read live SoC/grid/batt<br/>(grid via inverter or P1)<br/>→ surplus_w"] -->|every 60s| D
     D["slots.py<br/>decide() / clamp()"] -->|verified| I["inverter · apply/release<br/>readback verify, alarm debounced<br/>+ cell voltage/temp, hourly/daily/weekly health gates<br/>→ InfluxDB + Kuma"]
 ```
 
@@ -28,7 +28,11 @@ the inverter — a planned charge/discharge is downgraded to hold once the targe
 ```mermaid
 flowchart TD
     A["tick() · every 60s"] --> B[reload slots.json if changed]
-    B --> C["read live SoC / grid_w / battery_w<br/>→ surplus_w = −(grid_w + battery_w)"]
+    B --> GS{"GRID_SOURCE?"}
+    GS -- inverter --> C1["grid_w = REG_GRID_POWER"]
+    GS -- p1 --> C2["grid_w = fetch_p1_grid_w()<br/>via asyncio.to_thread · p1_result recorded"]
+    C1 --> C["read battery_w<br/>→ surplus_w = −(grid_w + battery_w)"]
+    C2 --> C
     C --> D{doc is None?}
     D -- yes --> IDLE1[IDLE · no plan]
     D -- no --> E{"plan fresh?<br/>age &lt; 2h · before horizon"}
@@ -81,6 +85,16 @@ flowchart TD
 
 `dispatch/slots.py:231-323` (decide) and `:326-367` (clamp). The charge/discharge "target
 reached" outcomes release if `surplus_w > 0`, else hold.
+
+`GRID_SOURCE` (env var, default `inverter`) swaps where `grid_w` for the surplus calc comes
+from: the inverter's own `REG_GRID_POWER` register, or (`GRID_SOURCE=p1`) a P1 energy monitor's
+local API via `scheduler.fetch_p1_grid_w()`, offloaded with `asyncio.to_thread` so a slow P1
+response cannot stall the tick's Modbus work. This exists because the inverter's grid CT only
+sees one phase on a house wired for three — see
+`docs/superpowers/specs/2026-09-23-p1-grid-source-design.md`. Either source feeds the same
+`IMPLAUSIBLE_POWER_W` guard and `None`-on-failure fallback below. The P1 fetch's own
+success/failure is recorded separately as `cache["p1_result"]` (`(True, "OK")` /
+`(False, reason)` / `None` when `GRID_SOURCE != "p1"`), for `monitor_pings()` to report on.
 
 The loop's period is the interval, not the interval plus the work (`scheduler.next_deadline`).
 The tick talks to an inverter and to Kuma, so sleeping a flat 60s after it re-times the loop by
