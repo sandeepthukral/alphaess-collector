@@ -538,15 +538,43 @@ class TestP1GridSource:
         """The surplus block's except clause was widened to (OSError, ValueError, KeyError,
         TypeError) so fetch_p1_grid_w's malformed-response cases degrade to the fail-safe
         instead of crashing tick(). That widening must not also catch a ValueError from
-        registers.decode() on the INVERTER branch (GRID_SOURCE=inverter, the default) -- a
-        decode failure there is a genuine bug (a corrupt/mismatched-length Modbus response,
-        not a connection failure), and this file's own read() docstring explains why every
-        caller here used to crash loudly on exactly this class of failure rather than
-        silently degrading. Only a P1 response gets the fail-safe treatment."""
+        registers.decode() on the GRID register under GRID_SOURCE=inverter (the default) --
+        a decode failure there is a genuine bug (a corrupt/mismatched-length Modbus
+        response, not a connection failure), and this file's own read() docstring explains
+        why every caller here used to crash loudly on exactly this class of failure rather
+        than silently degrading. Only a P1 response gets the fail-safe treatment. See the
+        sibling test below for the BATTERY register, which is read unconditionally
+        regardless of GRID_SOURCE and must never be swallowed either."""
         orig_read = scheduler.Inverter.read
 
         async def selective_read(self, addr, count=1, signed=False):
             if addr == R.REG_GRID_POWER:
+                raise ValueError("decode expects 1 or 2 registers, got 3")
+            return await orig_read(self, addr, count, signed)
+
+        monkeypatch.setattr(scheduler.Inverter, "read", selective_read)
+        regs = measurement_registers()
+        client = ScriptedClient(regs)
+        cache: dict = {"released": False}
+        with pytest.raises(ValueError):
+            tick_with_cache(tmp_path, monkeypatch, client, cache)
+
+    def test_a_battery_decode_error_under_grid_source_p1_is_not_swallowed(
+            self, tmp_path, monkeypatch):
+        """The earlier fix for the finding above only checked `GRID_SOURCE != "p1": raise`
+        -- a config-flag guard, not a which-call-raised guard. REG_BATTERY_POWER is read
+        unconditionally on every tick regardless of GRID_SOURCE, so under GRID_SOURCE=p1 a
+        genuine decode bug on THAT read was still being caught by the P1-only except clause
+        and silently degraded to the fail-safe, exactly the bug the sibling test above
+        exists to catch -- just on the other register. Must crash loudly here too, even
+        though fetch_p1_grid_w itself succeeds first."""
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", lambda url, timeout=5: 300.0)
+
+        orig_read = scheduler.Inverter.read
+
+        async def selective_read(self, addr, count=1, signed=False):
+            if addr == R.REG_BATTERY_POWER:
                 raise ValueError("decode expects 1 or 2 registers, got 3")
             return await orig_read(self, addr, count, signed)
 

@@ -682,43 +682,48 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # docs/superpowers/specs/2026-09-23-p1-grid-source-design.md. p1_result records the
     # fetch's own outcome (independent of the implausible-value check below) for the
     # p1-reachable Kuma monitor in monitor_pings().
+    # The P1 fetch gets its OWN try/except, isolated from the Modbus reads below -- not
+    # keyed off GRID_SOURCE inside a shared except clause. A shared clause can only
+    # distinguish "which mode are we in", not "which call actually raised", and
+    # REG_BATTERY_POWER is read unconditionally on every tick regardless of GRID_SOURCE: a
+    # genuine decode bug on THAT read must always crash loudly (the honest response this
+    # file's read() docstring, ~line 184, explains at length), even under GRID_SOURCE=p1.
+    # Only a failure from fetch_p1_grid_w itself gets the fail-safe treatment.
     p1_result: tuple[bool, str] | None = None
-    try:
-        if GRID_SOURCE == "p1":
+    grid_w = None
+    p1_failed = False
+    if GRID_SOURCE == "p1":
+        try:
             grid_w = await asyncio.to_thread(fetch_p1_grid_w, P1_MONITOR_URL)
             p1_result = (True, "OK")
-        else:
-            grid_w = await inv.read(R.REG_GRID_POWER, 2, signed=True)
-        batt_w = await inv.read(R.REG_BATTERY_POWER, signed=True)
-        surplus_w = -(grid_w + batt_w)
-        log.debug("surplus: grid=%+dW battery=%+dW -> %+dW", grid_w, batt_w, surplus_w)
-        if abs(grid_w) > IMPLAUSIBLE_POWER_W or abs(batt_w) > IMPLAUSIBLE_POWER_W:
-            # Neither register has ever been read by this process before 2026-08-20, so their
-            # scale is documented rather than observed. A decode that is wrong by a factor is
-            # the failure this guard is for, and the honest response is None -- the same
-            # fallback as an unreadable register, i.e. the pre-existing freeze.
-            log.warning("implausible power reading (grid=%+dW battery=%+dW) -- ignoring the "
-                        "surplus rule this tick", grid_w, batt_w)
-            surplus_w = None
-            batt_w = None
-    except OSError as e:
-        if GRID_SOURCE == "p1" and p1_result is None:
+        except (OSError, ValueError, KeyError, TypeError) as e:
             p1_result = (False, f"{type(e).__name__}: {e}"[:200])
-        log.warning("surplus read failed: %s -- a met charge target will hold, not release", e)
+            p1_failed = True
+
+    if p1_failed:
+        log.warning("P1 fetch failed: %s -- a met charge target will hold, not release",
+                    p1_result[1])
         surplus_w, batt_w = None, None
-    except (ValueError, KeyError, TypeError) as e:
-        # Only fetch_p1_grid_w's malformed-response cases belong here -- a ValueError from
-        # inv.read()'s own R.decode() (a corrupt/mismatched-length Modbus response, not a
-        # connection failure) is exactly the class of bug this file's read() docstring
-        # (~line 184) says used to sail past every except-OSError handler and crash the tick
-        # loudly. That crash is the honest response to a genuine decode bug; only re-route it
-        # to the fail-safe when it's actually a P1 response, never for the inverter register.
-        if GRID_SOURCE != "p1":
-            raise
-        if p1_result is None:
-            p1_result = (False, f"{type(e).__name__}: {e}"[:200])
-        log.warning("surplus read failed: %s -- a met charge target will hold, not release", e)
-        surplus_w, batt_w = None, None
+    else:
+        try:
+            if GRID_SOURCE != "p1":
+                grid_w = await inv.read(R.REG_GRID_POWER, 2, signed=True)
+            batt_w = await inv.read(R.REG_BATTERY_POWER, signed=True)
+            surplus_w = -(grid_w + batt_w)
+            log.debug("surplus: grid=%+dW battery=%+dW -> %+dW", grid_w, batt_w, surplus_w)
+            if abs(grid_w) > IMPLAUSIBLE_POWER_W or abs(batt_w) > IMPLAUSIBLE_POWER_W:
+                # Neither register has ever been read by this process before 2026-08-20, so
+                # their scale is documented rather than observed. A decode that is wrong by a
+                # factor is the failure this guard is for, and the honest response is None --
+                # the same fallback as an unreadable register, i.e. the pre-existing freeze.
+                log.warning("implausible power reading (grid=%+dW battery=%+dW) -- ignoring "
+                            "the surplus rule this tick", grid_w, batt_w)
+                surplus_w = None
+                batt_w = None
+        except OSError as e:
+            log.warning("surplus read failed: %s -- a met charge target will hold, not "
+                        "release", e)
+            surplus_w, batt_w = None, None
     cache["p1_result"] = p1_result
 
     # Charging-positive, matching `setpoint_w` -- REG_BATTERY_POWER is discharge-positive.

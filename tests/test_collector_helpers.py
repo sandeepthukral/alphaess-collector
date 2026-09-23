@@ -237,3 +237,54 @@ def test_parse_fields_with_p1_data_but_missing_battery():
     assert "load_power_w" not in fields  # dropped, not recomputed and not left stale
     assert fields["pv_power_w"] == 1500.0
     assert "battery_power_w" not in fields
+
+
+# --------------------------------------------------------------------------
+# run_once
+# --------------------------------------------------------------------------
+
+def test_run_once_fetches_and_prints_p1_data_under_grid_source_p1(monkeypatch, capsys):
+    """--once under GRID_SOURCE=p1 must show the P1-corrected values the running poll loop
+    will actually record, not AlphaESS's own known-wrong reading -- otherwise the "verify
+    before trusting dashboards" check parse_fields's docstring describes is a false
+    confidence check for the one field this feature exists to fix."""
+    import collector as collector_mod
+
+    monkeypatch.setenv("GRID_SOURCE", "p1")
+    monkeypatch.setenv("P1_MONITOR_URL", "http://192.168.2.46/api/v1/data")
+    monkeypatch.setattr(
+        collector_mod, "get_last_power_data",
+        lambda *a, **k: {"ppv": 1000, "pgrid": -9999, "pload": -9999,
+                         "pbat": -200, "soc": 80})
+    monkeypatch.setattr(collector_mod, "fetch_p1_data",
+                        lambda url, timeout=10: {"active_power_w": 300})
+    collector_mod.run_once("id", "secret", "SN")
+    out = capsys.readouterr().out
+    assert "Raw P1 monitor data object" in out
+    assert '"active_power_w": 300' in out
+    assert '"grid_power_w": 300.0' in out
+    assert '"load_power_w": 1100.0' in out  # 1000 + 300 + (-200)
+
+
+def test_run_once_skips_p1_fetch_under_default_grid_source(monkeypatch, capsys):
+    import collector as collector_mod
+
+    called = []
+    monkeypatch.setattr(
+        collector_mod, "get_last_power_data",
+        lambda *a, **k: {"ppv": 1000, "pgrid": -100, "pload": 900,
+                         "pbat": -200, "soc": 80})
+    monkeypatch.setattr(collector_mod, "fetch_p1_data",
+                        lambda url, timeout=10: called.append(1))
+    collector_mod.run_once("id", "secret", "SN")
+    assert called == []
+    assert "Raw P1 monitor data object" not in capsys.readouterr().out
+
+
+def test_run_once_exits_when_grid_source_p1_missing_url(monkeypatch):
+    import collector as collector_mod
+
+    monkeypatch.setenv("GRID_SOURCE", "p1")
+    monkeypatch.delenv("P1_MONITOR_URL", raising=False)
+    with pytest.raises(SystemExit):
+        collector_mod.run_once("id", "secret", "SN")

@@ -557,12 +557,29 @@ def parse_fields(data: dict, p1_data: dict | None = None) -> dict:
 
 
 def run_once(app_id: str, app_secret: str, sys_sn: str) -> None:
+    """Print AlphaESS's raw/parsed response for verifying sign conventions and field
+    mappings by hand (see parse_fields's docstring). Under GRID_SOURCE=p1, also fetches
+    and prints the P1 monitor's response and folds it into the parsed fields the same way
+    run_loop() does -- without this, --once would show AlphaESS's own known-wrong reading
+    while the running poll loop records the P1-corrected one, defeating the point of a
+    "verify before trusting dashboards" check for the one field this feature exists to fix.
+    """
     import json
+    grid_source = os.environ.get("GRID_SOURCE", "inverter")
+    p1_monitor_url = os.environ.get("P1_MONITOR_URL", "")
+    if grid_source == "p1" and not p1_monitor_url:
+        log.error("GRID_SOURCE=p1 requires P1_MONITOR_URL")
+        sys.exit(1)
     data = get_last_power_data(app_id, app_secret, sys_sn)
     print("Raw API data object:")
     print(json.dumps(data, indent=2))
+    p1_data = None
+    if grid_source == "p1":
+        p1_data = fetch_p1_data(p1_monitor_url)
+        print("\nRaw P1 monitor data object:")
+        print(json.dumps(p1_data, indent=2))
     print("\nParsed fields:")
-    print(json.dumps(parse_fields(data), indent=2))
+    print(json.dumps(parse_fields(data, p1_data), indent=2))
 
 
 def run_loop(app_id: str, app_secret: str, sys_sn: str) -> None:
