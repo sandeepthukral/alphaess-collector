@@ -89,7 +89,7 @@ _UNCONFIGURED_MARKERS = {
     "INFLUX_TOKEN_DISPATCH": "read_planning_read_write_alphaess",
 }
 
-# The seven Kuma push URLs dispatch's `docker-compose.yml` block declares. Unlike the two
+# The eight Kuma push URLs dispatch's `docker-compose.yml` block declares. Unlike the two
 # markers above, blank is a LEGITIMATE value here in general (unset = no heartbeat, the
 # same `:-` default the compose file itself falls back to) -- so these can't be guarded by
 # "must not equal a placeholder." What they can be guarded against is REGRESSING: if the
@@ -106,6 +106,7 @@ _HEARTBEAT_URL_KEYS = (
     "DISPATCH_CONFIRMED_HEARTBEAT_URL",
     "INVERTER_NOT_HIJACKED_HEARTBEAT_URL",
     "SOC_FLOOR_HEARTBEAT_URL",
+    "P1_REACHABLE_HEARTBEAT_URL",
 )
 
 
@@ -146,6 +147,39 @@ def _heartbeat_regression_reason() -> str | None:
         return (f"deploy/controlpanel.env would blank out already-configured heartbeat "
                  f"URL(s) {regressing} on the recreated dispatch container -- copy them "
                  f"from the real .env first (see DEPLOY.md, \"Control panel\" step 7)")
+    return None
+
+
+def _grid_source_regression_reason() -> str | None:
+    """GRID_SOURCE=inverter (or blank, same thing via the compose default) is a normal,
+    common, CORRECT value -- unlike the heartbeat URLs above, there's nothing wrong with it
+    in general. The hazard is narrower: if the container currently running is already in P1
+    mode (GRID_SOURCE=p1 -- live dispatch is actively using the P1 monitor's grid reading),
+    a go-live recreate must never silently take it back out of P1 mode just because
+    deploy/controlpanel.env was copied without carrying GRID_SOURCE/P1_MONITOR_URL over.
+    That would revert live dispatch to the inverter's known-wrong single-phase grid_w while
+    the collector (a separate container, unaffected by this recreate) stays on P1 -- the
+    two halves of this feature would silently split."""
+    proc = _run(["docker", "inspect", DISPATCH_CONTAINER], timeout=60)
+    if not proc.ok:
+        return None  # nothing running yet to regress FROM
+    try:
+        current = _parse_docker_env_list(json.loads(proc.stdout)[0]["Config"]["Env"])
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None  # same reasoning as dispatch_status()'s own parse guard
+
+    try:
+        with open(CONTROLPANEL_ENV_FILE, encoding="utf-8") as f:
+            new = _parse_env_file(f.read())
+    except OSError as e:
+        return f"could not read {CONTROLPANEL_ENV_FILE}: {e}"
+
+    if current.get("GRID_SOURCE", "").strip() == "p1" and new.get("GRID_SOURCE", "inverter").strip() != "p1":
+        return ("the running dispatch container has GRID_SOURCE=p1, but deploy/controlpanel.env "
+                 "would recreate it with GRID_SOURCE unset or not \"p1\" -- this would silently "
+                 "revert live dispatch to the inverter's known-wrong single-phase grid reading "
+                 "while the collector stays on P1. Copy GRID_SOURCE=p1 and P1_MONITOR_URL from "
+                 "the real .env first (see DEPLOY.md, \"Control panel\" step 7)")
     return None
 
 
@@ -203,7 +237,8 @@ def set_dispatch_live(live: bool) -> ActionResult:
     docs/DEPLOY.md, "The DISPATCH_LIVE mechanism". Writes the override file, then recreates
     only the dispatch service against it."""
     if live:
-        reason = _controlpanel_env_unconfigured_reason() or _heartbeat_regression_reason()
+        reason = (_controlpanel_env_unconfigured_reason() or _heartbeat_regression_reason()
+                  or _grid_source_regression_reason())
         if reason:
             raise EnvUnconfigured(reason)
 

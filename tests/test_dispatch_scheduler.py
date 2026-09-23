@@ -438,9 +438,16 @@ class TestP1GridSource:
         regs[R.REG_GRID_POWER] = 9999
         client = ScriptedClient(regs)
         cache: dict = {"released": False}
+        heartbeat = tmp_path / "hb.json"
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", heartbeat)
         tick_with_cache(tmp_path, monkeypatch, client, cache)
-        # surplus_w = -(grid_w + batt_w); batt_w read raw is -100 (charging), P1 grid_w=300
         assert cache.get("p1_result") == (True, "OK")
+        # surplus_w = -(grid_w + batt_w); batt_w read raw (signed) is -100 (charging),
+        # P1 grid_w=300 -> -(300 + -100) = -200. If REG_GRID_POWER's 9999 leaked through
+        # instead of the P1 value, this would be wildly different (and likely None, since
+        # 9999 W trips the implausible-reading guard).
+        payload = json.loads(heartbeat.read_text())
+        assert payload["surplus_w"] == -200.0
 
     def test_p1_fetch_failure_falls_back_to_no_surplus(self, tmp_path, monkeypatch):
         monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
@@ -452,8 +459,12 @@ class TestP1GridSource:
         regs = measurement_registers()
         client = ScriptedClient(regs)
         cache: dict = {"released": False}
+        heartbeat = tmp_path / "hb.json"
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", heartbeat)
         tick_with_cache(tmp_path, monkeypatch, client, cache)
-        assert cache.get("p1_result") == (False, "no route to host")
+        assert cache.get("p1_result") == (False, "OSError: no route to host")
+        payload = json.loads(heartbeat.read_text())
+        assert payload["surplus_w"] is None
 
     def test_p1_malformed_response_falls_back_the_same_way(self, tmp_path, monkeypatch):
         monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
@@ -465,8 +476,12 @@ class TestP1GridSource:
         regs = measurement_registers()
         client = ScriptedClient(regs)
         cache: dict = {"released": False}
+        heartbeat = tmp_path / "hb.json"
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", heartbeat)
         tick_with_cache(tmp_path, monkeypatch, client, cache)
         assert cache.get("p1_result")[0] is False
+        payload = json.loads(heartbeat.read_text())
+        assert payload["surplus_w"] is None
 
     def test_grid_source_inverter_default_never_calls_fetch_p1_grid_w(
             self, tmp_path, monkeypatch):

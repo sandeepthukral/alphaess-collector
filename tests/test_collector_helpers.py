@@ -226,12 +226,14 @@ def test_fetch_p1_data_forwards_custom_timeout(monkeypatch):
 
 
 def test_parse_fields_with_p1_data_but_missing_battery():
-    """When p1_data overrides grid but battery is missing, load_power_w isn't recomputed."""
+    """When p1_data overrides grid but battery is missing, load_power_w can't be recomputed
+    from the identity -- it must be dropped, not left holding AlphaESS's own stale (and
+    known-wrong, single-phase) `pload` figure."""
     fields = parse_fields(
-        {"ppv": 1500, "pgrid": -9999, "soc": 87.5},
+        {"ppv": 1500, "pgrid": -9999, "pload": 1800, "soc": 87.5},
         p1_data={"active_power_w": 200},
     )
     assert fields["grid_power_w"] == 200.0
-    assert "load_power_w" not in fields  # not recomputed because battery_power_w is missing
+    assert "load_power_w" not in fields  # dropped, not recomputed and not left stale
     assert fields["pv_power_w"] == 1500.0
     assert "battery_power_w" not in fields

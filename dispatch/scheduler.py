@@ -681,7 +681,7 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # GRID_SOURCE=p1 replaces the register read with a fetch to a P1 monitor -- see
     # docs/superpowers/specs/2026-09-23-p1-grid-source-design.md. p1_result records the
     # fetch's own outcome (independent of the implausible-value check below) for the
-    # p1-reachable Kuma monitor in monitor_pings() (Task 4).
+    # p1-reachable Kuma monitor in monitor_pings().
     p1_result: tuple[bool, str] | None = None
     try:
         if GRID_SOURCE == "p1":
@@ -703,7 +703,7 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
             batt_w = None
     except (OSError, ValueError, KeyError, TypeError) as e:
         if GRID_SOURCE == "p1" and p1_result is None:
-            p1_result = (False, str(e)[:200])
+            p1_result = (False, f"{type(e).__name__}: {e}"[:200])
         log.warning("surplus read failed: %s -- a met charge target will hold, not release", e)
         surplus_w, batt_w = None, None
     cache["p1_result"] = p1_result
@@ -1298,6 +1298,9 @@ def main():
     configure_logging(a.log_retention_days, a.verbose)
     if not a.ip:
         p.error("--ip is required unless --alive")
+    if GRID_SOURCE == "p1" and not P1_MONITOR_URL:
+        p.error("P1_MONITOR_URL is required when GRID_SOURCE=p1 -- without it, every tick's "
+                 "fetch_p1_grid_w call fails and the surplus rule freezes silently forever")
     if AsyncModbusTcpClient is None:
         sys.exit("pymodbus is not installed: pip install -r dispatch/requirements.txt")
 

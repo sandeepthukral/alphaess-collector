@@ -308,6 +308,12 @@ These are the ones that need a human and a NAS. **The app one is the real gate.*
         comparing them
   - [x] **Do NOT create a TCP port monitor on `192.168.68.151:502`.** It would steal the
         inverter's single Modbus connection from the dispatcher — §6.2. None was created
+  - [ ] **Added later (2026-09-23), not part of the original seven above:** #10
+        `p1-reachable` — pinged every tick, but ONLY when `GRID_SOURCE=p1` is in use. Blank/
+        unset is correct under `GRID_SOURCE=inverter`, the same "no monitor, no ping" rule the
+        other seven follow when their URL is unset. Create and confirm green before switching
+        a deployment to `GRID_SOURCE=p1`; irrelevant otherwise. See
+        `docs/superpowers/specs/2026-09-23-p1-grid-source-design.md`.
 
       **Creating the monitors is not deploying them.** The push URLs go into `.env`, and the
       running container never re-reads `.env` — so all seven sat receiving nothing until

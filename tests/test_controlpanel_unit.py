@@ -375,14 +375,15 @@ def test_set_dispatch_live_proceeds_once_placeholders_are_replaced(tmp_path):
     with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
          patch.object(docker_actions, "OVERRIDE_FILE", str(tmp_path / "override.yml")), \
          patch.object(docker_actions, "_run") as run:
-        # Called twice when going live: once by _heartbeat_regression_reason()'s own
-        # `docker inspect` (empty stdout here, so it finds nothing to compare and allows
-        # the toggle through), once for the actual compose recreate.
+        # Called three times when going live: once each by _heartbeat_regression_reason()'s
+        # and _grid_source_regression_reason()'s own `docker inspect` (empty stdout here, so
+        # each finds nothing to compare and allows the toggle through), once for the actual
+        # compose recreate.
         run.return_value = docker_actions.ActionResult(ok=True, stdout="", stderr="",
                                                          returncode=0)
         result = docker_actions.set_dispatch_live(True)
     assert result.ok
-    assert run.call_count == 2
+    assert run.call_count == 3
 
 
 def test_set_dispatch_live_refuses_a_heartbeat_url_regression(tmp_path):
@@ -403,6 +404,57 @@ def test_set_dispatch_live_refuses_a_heartbeat_url_regression(tmp_path):
          patch.object(docker_actions, "_run", return_value=inspect_result), \
          pytest.raises(docker_actions.EnvUnconfigured, match="SOC_FLOOR_HEARTBEAT_URL"):
         docker_actions.set_dispatch_live(True)
+
+
+def test_set_dispatch_live_refuses_a_grid_source_regression(tmp_path):
+    """The running container is live in P1 mode (GRID_SOURCE=p1); the env file about to be
+    used for the recreate doesn't carry that forward -- must be refused, not silently
+    applied, since that would revert live dispatch to the inverter's known-wrong grid
+    reading while the collector stays on P1."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+    )
+    inspect_result = docker_actions.ActionResult(
+        ok=True, stdout=json.dumps([{
+            "Config": {"Env": ["GRID_SOURCE=p1", "P1_MONITOR_URL=http://192.168.1.50/api/v1/live"]},
+        }]), stderr="", returncode=0)
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "_run", return_value=inspect_result), \
+         pytest.raises(docker_actions.EnvUnconfigured, match="GRID_SOURCE"):
+        docker_actions.set_dispatch_live(True)
+
+
+def test_set_dispatch_live_allows_grid_source_p1_carried_forward(tmp_path):
+    """The running container is in P1 mode and the new env file keeps it in P1 mode -- not
+    a regression, must proceed."""
+    env_file = tmp_path / "controlpanel.env"
+    env_file.write_text(
+        "ALPHAESS_SYS_SN=ES500123456789\n"
+        "INFLUX_TOKEN_DISPATCH=a-real-per-install-token\n"
+        "GRID_SOURCE=p1\n"
+        "P1_MONITOR_URL=http://192.168.1.50/api/v1/live\n"
+    )
+    inspect_result = docker_actions.ActionResult(
+        ok=True, stdout=json.dumps([{
+            "Config": {"Env": ["GRID_SOURCE=p1", "P1_MONITOR_URL=http://192.168.1.50/api/v1/live"]},
+        }]), stderr="", returncode=0)
+    with patch.object(docker_actions, "CONTROLPANEL_ENV_FILE", str(env_file)), \
+         patch.object(docker_actions, "OVERRIDE_FILE", str(tmp_path / "override.yml")), \
+         patch.object(docker_actions, "_run") as run:
+        run.side_effect = [inspect_result, inspect_result,
+                            docker_actions.ActionResult(ok=True, stdout="", stderr="",
+                                                         returncode=0)]
+        result = docker_actions.set_dispatch_live(True)
+    assert result.ok
+
+
+def test_grid_source_regression_reason_is_none_when_no_container_running():
+    with patch.object(docker_actions, "_run") as run:
+        run.return_value = docker_actions.ActionResult(ok=False, stdout="", stderr="no such",
+                                                         returncode=1)
+        assert docker_actions._grid_source_regression_reason() is None
 
 
 def test_parse_env_file_strips_whitespace_and_quotes():

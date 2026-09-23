@@ -309,9 +309,14 @@ def fetch_p1_data(url: str, timeout: float = 10) -> dict:
     try:
         resp = requests.get(url, timeout=timeout)
         resp.raise_for_status()
+        body = resp.json()
     except requests.exceptions.RequestException as e:
         raise RuntimeError(f"P1 fetch failed: {error_summary(e)}") from e
-    body = resp.json()
+    except ValueError as e:
+        # resp.json() raises a json.JSONDecodeError (a ValueError subclass) on a non-JSON
+        # body -- wrapped here too, so every transport/parsing failure is a RuntimeError,
+        # matching this function's documented contract.
+        raise RuntimeError(f"P1 response was not valid JSON: {e}") from e
     if "active_power_w" not in body:
         raise RuntimeError(f"P1 response missing active_power_w: {body}")
     return body
@@ -543,6 +548,11 @@ def parse_fields(data: dict, p1_data: dict | None = None) -> dict:
         if "pv_power_w" in fields and "battery_power_w" in fields:
             fields["load_power_w"] = (
                 fields["pv_power_w"] + fields["grid_power_w"] + fields["battery_power_w"])
+        else:
+            # Can't recompute the identity without both pv and battery -- keeping
+            # AlphaESS's own `pload` here would silently record its known-wrong,
+            # single-phase figure. A missing field is the honest gap, not a guess.
+            fields.pop("load_power_w", None)
     return fields
 
 
