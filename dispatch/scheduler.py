@@ -754,24 +754,34 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     shorted = False
     if not inv.dry_run and actual_battery_w is not None:
         prev_cmd = cache.get("last_written")
-        # Mode 1 is scored too: under GRID_SOURCE=p1 the P1-sized harvest is a Mode 1 charge
-        # whose delivery is UNVERIFIED -- the inverter's own CT can read import while P1 reads
-        # export, and a PV-only mode may then find nothing to charge from. The registers would
-        # still read back exactly as written, so this is the only thing that can flag it.
-        if prev_cmd is not None \
-                and prev_cmd.mode in (R.DispatchMode.SOC_TARGET, R.DispatchMode.PV_CHARGE) \
-                and prev_cmd.power_w != 0:
-            shortfall_w = abs(prev_cmd.power_w) - abs(actual_battery_w)
+        expected_w = None
+        if prev_cmd is not None and prev_cmd.power_w != 0:
+            if prev_cmd.mode == R.DispatchMode.SOC_TARGET:
+                expected_w = abs(prev_cmd.power_w)
+            elif prev_cmd.mode == R.DispatchMode.PV_CHARGE and surplus_w is not None \
+                    and not (live_soc is not None and prev_cmd.target_soc_pct is not None
+                             and live_soc >= prev_cmd.target_soc_pct - S.SOC_DEADBAND_PCT):
+                # Mode 1 is PV-only, so it is scored against what PV can supply NOW, not the
+                # setpoint: it was sized to the previous tick's surplus, and delivering less
+                # when a cloud drops that surplus is correct (DESIGN-dispatch.md 9.1). What
+                # this is here to catch is the P1 harvest delivering NOTHING while surplus
+                # remains, because the inverter's one-phase CT sees no export -- registers
+                # read back as written, so nothing else would flag it. `surplus_w` is
+                # invariant to battery action, so it is a fair ceiling. A battery at its
+                # target (full) is skipped: 0 W there is right, not a shortfall.
+                expected_w = min(abs(prev_cmd.power_w), surplus_w)
+        if expected_w is not None and expected_w > 0:
+            shortfall_w = expected_w - abs(actual_battery_w)
             shorted = (shortfall_w >= S.SHORTFALL_MIN_W
-                       and shortfall_w / abs(prev_cmd.power_w) >= S.SHORTFALL_PCT)
+                       and shortfall_w / expected_w >= S.SHORTFALL_PCT)
 
     was_shorted = cache.get("shorted", False)
     if shorted and not was_shorted:
         log.warning(
-            "magnitude shortfall: commanded %+dW, battery delivering %+.0fW (%.0f%% short) -- "
-            "registers verified, so this is the inverter under-delivering, not an unlanded "
-            "write", prev_cmd.power_w, actual_battery_w,
-            100 * shortfall_w / abs(prev_cmd.power_w))
+            "magnitude shortfall: commanded %+dW (expected %.0fW), battery delivering %+.0fW "
+            "(%.0f%% short) -- registers verified, so this is the inverter under-delivering, "
+            "not an unlanded write", prev_cmd.power_w, expected_w, actual_battery_w,
+            100 * shortfall_w / expected_w)
     elif was_shorted and not shorted:
         log.info("magnitude shortfall cleared")
     cache["shorted"] = shorted
