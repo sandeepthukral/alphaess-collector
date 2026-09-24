@@ -323,6 +323,56 @@ class TestAMetChargeTargetHarvestsRatherThanFreezes:
         assert d.command.mode == DispatchMode.FOLLOW
 
 
+class TestP1SurplusIsHarvestedByCommand:
+    """With `GRID_SOURCE=p1` the surplus is measured on a meter the inverter cannot see (its
+    own CT reads one phase of three), so releasing to its self-consumption absorbs nothing.
+    MEASURED 2026-09-24 at 10.8 % SoC: P1 surplus 300-520 W, released every tick, battery 0 W,
+    the inverter's app reporting 84 W importing. The override must command the charge."""
+
+    HOLD = TestAPlanHoldHarvestsRatherThanFreezes.HOLD
+    CHARGE = TestAMetChargeTargetHarvestsRatherThanFreezes.CHARGE
+
+    def test_a_plan_hold_with_surplus_commands_a_pv_only_charge(self):
+        d = S.decide(self.HOLD, T0, 10.8, surplus_w=433.4, harvest_by_command=True)
+        assert d.kind == "command"
+        assert d.command.mode == DispatchMode.PV_CHARGE
+        assert d.command.power_w == 433
+        assert d.command.target_soc_pct == 100.0
+        assert d.command.duration_s == S.DISPATCH_DURATION_S
+        assert "433 W" in d.reason
+
+    def test_a_met_charge_target_with_surplus_commands_a_pv_only_charge(self):
+        d = S.decide(self.CHARGE, T0, 62.0, surplus_w=2600.0, harvest_by_command=True)
+        assert d.kind == "command"
+        assert d.command.mode == DispatchMode.PV_CHARGE
+        assert d.command.power_w == 2600
+
+    def test_the_command_is_clamped_like_any_charge(self):
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=7000.0, harvest_by_command=True)
+        cmd, warn = S.clamp(d.command, None, None)
+        assert cmd.power_w == S.HARD_MAX_POWER_W
+        assert cmd.mode == DispatchMode.PV_CHARGE
+        assert warn
+
+    def test_no_surplus_still_holds(self):
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=-400.0, harvest_by_command=True)
+        assert d.command.mode == DispatchMode.FOLLOW
+        assert d.command.power_w == 0
+
+    def test_a_trickle_below_the_threshold_still_holds(self):
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=150.0, harvest_by_command=True)
+        assert d.command.mode == DispatchMode.FOLLOW
+
+    def test_an_unreadable_power_register_still_holds(self):
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=None, harvest_by_command=True)
+        assert d.command.mode == DispatchMode.FOLLOW
+
+    def test_the_default_is_still_a_release(self):
+        """The inverter's own CT is the surplus source when GRID_SOURCE=inverter, so its
+        self-consumption CAN see it and a release is right."""
+        assert S.decide(self.HOLD, T0, 50.0, surplus_w=2600.0).kind == "release"
+
+
 class TestClamp:
     """The ceiling is the LOWER of what the inverter reports (0x012C/0x012D) and
     `HARD_MAX_POWER_W`. The hardware overstates itself -- 15,015 W charge / 13,728 W discharge,

@@ -771,7 +771,10 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         log.info("magnitude shortfall cleared")
     cache["shorted"] = shorted
 
-    decision = S.decide(cache.get("doc"), now, live_soc, cache.get("error", ""), surplus_w)
+    # With P1 the surplus is measured on a meter the inverter cannot see, so releasing to its
+    # own self-consumption would not absorb it -- see `slots._harvest`.
+    decision = S.decide(cache.get("doc"), now, live_soc, cache.get("error", ""), surplus_w,
+                        harvest_by_command=GRID_SOURCE == "p1")
 
     # 5. Hijack check, before we overwrite the evidence.
     #

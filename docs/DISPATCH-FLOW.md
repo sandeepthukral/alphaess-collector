@@ -44,10 +44,10 @@ flowchart TD
 
     G -- self --> SELF[self-consume] --> REL1((RELEASE))
     G -- hold --> H{surplus_w &gt; 200W?}
-    H -- yes --> REL2(("RELEASE<br/>PV-spill override"))
+    H -- yes --> REL2(("PV-spill override<br/>GRID_SOURCE=inverter: RELEASE<br/>GRID_SOURCE=p1: Mode 1 charge<br/>+surplus_w · 100% · 300s"))
     H -- no --> HOLD1["HOLD · 0W"]
     G -- charge --> I{"target ≤ live_soc + 0.4%?"}
-    I -- yes --> J["target reached:<br/>release if surplus, else hold"]
+    I -- yes --> J["target reached:<br/>soak up surplus (as PV-spill override), else hold"]
     I -- no --> CHG["Command +power_w<br/>SOC_TARGET · 300s"]
     G -- discharge --> K{"target ≥ live_soc − 0.4%?"}
     K -- yes --> HOLD2["HOLD · target reached"]
@@ -86,6 +86,17 @@ flowchart TD
 
 `dispatch/slots.py:231-323` (decide) and `:326-367` (clamp). The charge/discharge "target
 reached" outcomes release if `surplus_w > 0`, else hold.
+
+**How the PV-spill override soaks up surplus depends on `GRID_SOURCE`** (`slots._harvest`,
+`decide(harvest_by_command=...)`, passed by `tick()` as `GRID_SOURCE == "p1"`). With `inverter`
+it releases: the inverter's own CT measured the surplus, so its self-consumption can see it.
+With `p1` it commands instead, a Mode 1 (PV-only charge) at `+surplus_w`, target 100%, 300s,
+clamped like any charge. A release there is a no-op, because the inverter's CT reads one phase
+of three and sees no export while P1 shows several hundred watts (measured 2026-09-24: P1
+surplus 300-520 W, battery 0 W, inverter app showing 84 W importing). Mode 1 is used because
+it is the measured setpoint-honouring, never-importing charge (`DESIGN-dispatch.md` 9.1). The
+surplus identity is invariant to battery action, so the command does not oscillate. Not
+changed: a plan `self` slot still releases under P1.
 
 `GRID_SOURCE` (env var, default `inverter`) swaps where `grid_w` for the surplus calc comes
 from: the inverter's own `REG_GRID_POWER` register, or (`GRID_SOURCE=p1`) a P1 energy monitor's
