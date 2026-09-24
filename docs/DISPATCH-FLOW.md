@@ -103,6 +103,14 @@ changed: a plan `self` slot still releases under P1. A failed P1 fetch sets `sur
 command's 100% target overrides the plan's own ceiling: a plan that stopped at 62% now keeps
 charging from PV.
 
+**Magnitude shortfall check** (`tick()`, before `decide()`; logs and publishes, never decides).
+Live only. It scores the PREVIOUS tick's command against the battery power read this tick.
+Mode 2 (`SOC_TARGET`) is scored against its setpoint. Mode 1 (`PV_CHARGE`, the P1 harvest) is
+scored against `min(setpoint, surplus_w)` of THIS tick, because it is PV-only and a cloud dip
+legitimately lowers it. Mode 1 is not scored when `surplus_w` is None, or once live SoC is
+within the 0.4% deadband of its target (a full battery delivering 0 W is correct). A shortfall is
+flagged at `>= 200 W` and `>= 5%` short, logged once on entry and once on clearing.
+
 `GRID_SOURCE` (env var, default `inverter`) swaps where `grid_w` for the surplus calc comes
 from: the inverter's own `REG_GRID_POWER` register, or (`GRID_SOURCE=p1`) a P1 energy monitor's
 local API via `scheduler.fetch_p1_grid_w()`. `tick()` still `await`s this call before reading
