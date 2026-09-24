@@ -20,7 +20,7 @@ flowchart LR
 
 ## Live decision: `decide()`
 
-Runs on every 60s tick (`dispatch/slots.py:231-323`, driven by `dispatch/scheduler.py:310-579`).
+Runs on every 60s tick (`slots.decide()`, driven by `scheduler.tick()`).
 Re-validates the plan's chosen action against the *live* state of charge before anything reaches
 the inverter — a planned charge/discharge is downgraded to hold once the target is within a
 0.4% deadband of live SoC.
@@ -44,10 +44,10 @@ flowchart TD
 
     G -- self --> SELF[self-consume] --> REL1((RELEASE))
     G -- hold --> H{surplus_w &gt; 200W?}
-    H -- yes --> REL2(("RELEASE<br/>PV-spill override"))
+    H -- yes --> REL2(("PV-spill override<br/>GRID_SOURCE=inverter: RELEASE<br/>GRID_SOURCE=p1: Mode 2 charge<br/>min(surplus_w, inverter PV) − 200W · 100% · 300s<br/>PV unreadable or ≤ 200W → HOLD"))
     H -- no --> HOLD1["HOLD · 0W"]
     G -- charge --> I{"target ≤ live_soc + 0.4%?"}
-    I -- yes --> J["target reached:<br/>release if surplus, else hold"]
+    I -- yes --> J["target reached:<br/>soak up surplus (as PV-spill override), else hold"]
     I -- no --> CHG["Command +power_w<br/>SOC_TARGET · 300s"]
     G -- discharge --> K{"target ≥ live_soc − 0.4%?"}
     K -- yes --> HOLD2["HOLD · target reached"]
@@ -84,8 +84,38 @@ flowchart TD
     class IDLE1,IDLE2,IDLE3,SKIP idle;
 ```
 
-`dispatch/slots.py:231-323` (decide) and `:326-367` (clamp). The charge/discharge "target
-reached" outcomes release if `surplus_w > 0`, else hold.
+`slots.decide()` and `slots.clamp()`. A charge slot whose target is
+already reached soaks up surplus when `surplus_w > SURPLUS_HARVEST_W` (200 W, strictly greater),
+else holds. A discharge slot whose target is already reached always holds: surplus does not
+rescue it.
+
+**How the PV-spill override soaks up surplus depends on `GRID_SOURCE`** (`slots._harvest`,
+`decide(harvest_by_command=...)`, passed by `tick()` as `GRID_SOURCE == "p1"`). With `inverter`
+it releases: the inverter's own CT measured the surplus, so its self-consumption can see it.
+With `p1` it commands instead, a Mode 2 (`SOC_TARGET`) charge at `surplus_w - HARVEST_MARGIN_W`
+(200 W), target 100%, 300s, clamped like any charge. A release there is a no-op, because the
+inverter's CT reads one phase of three and sees no export while P1 shows several hundred watts
+(measured 2026-09-24: P1 surplus 300-520 W, battery 0 W, inverter app showing 84 W importing).
+Mode 1 (PV-only) was tried first and also delivered 0 W, because it judges PV by the same blind
+CT (measured 2026-09-24 11:29Z). Mode 2 delivers regardless, so it CAN import: a PV drop inside
+a tick is bought from the grid until the next tick re-sizes it, and the 200 W margin absorbs
+ordinary ripple. The setpoint is capped at the inverter's own PV meter (`REG_PV_METER`, read
+only under P1): because the surplus is invariant to battery action, a frozen or misdirected P1
+reading would otherwise re-arm a grid-fed charge every tick, night included, with the loop alive
+so the dead man's switch never fires. An unreadable or implausible PV reading, or a cap that
+leaves no setpoint above 0 W, holds. The surplus identity is invariant to battery action, so the command does not
+oscillate. Not changed: a plan `self` slot still releases under P1. A failed P1 fetch sets `surplus_w = None`
+(no fallback to the inverter's grid register), which holds. In the met-charge-target case the
+command's 100% target overrides the plan's own ceiling: a plan that stopped at 62% now keeps
+charging from PV.
+
+**Magnitude shortfall check** (`tick()`, before `decide()`; logs and publishes, never decides).
+Live only. It scores the PREVIOUS tick's command against the battery power read this tick.
+Only Mode 2 (`SOC_TARGET`) commands are scored, against their setpoint; that includes the P1
+harvest, so a harvest delivering nothing is flagged. Not scored once live SoC is within the 0.4%
+deadband of the command's target (the inverter stops at the ENCODED target, 0.4% steps, a tick
+before the deadband hands the slot over), nor when live SoC is unreadable. A shortfall is
+flagged at `>= 200 W` and `>= 5%` short, logged once on entry and once on clearing.
 
 `GRID_SOURCE` (env var, default `inverter`) swaps where `grid_w` for the surplus calc comes
 from: the inverter's own `REG_GRID_POWER` register, or (`GRID_SOURCE=p1`) a P1 energy monitor's
