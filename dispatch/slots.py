@@ -234,6 +234,10 @@ def _harvest(reason: str, surplus_w: float, slot: dict, by_command: bool,
     pointing at another device -- and a live loop re-arms the command every tick, so the dead
     man's switch never fires. At night that would be a grid-fed charge to 100 %. Surplus can
     never exceed generation, so the cap only binds when P1 is wrong; no PV reading, no harvest.
+
+    A refused harvest HOLDS, even in a `self` slot. Under P1 a release while the house exports
+    is not a harmless no-op: the one-phase CT can misread the load and discharge the battery at
+    full power into that export.
     """
     if not by_command:
         return Decision("release", reason, slot=slot)
@@ -319,6 +323,19 @@ def decide(
         # Plain self-consumption is what the plan wants here, and that is the absence of a
         # command rather than a mode. Released promptly rather than left to expire: the plan
         # asked for it now, not in up to five minutes.
+        #
+        # EXCEPT SURPLUS UNDER GRID_SOURCE=p1, where the release does not absorb it, for the
+        # reason in `_harvest`. MEASURED 2026-09-24 14:55Z: released every tick while the house
+        # exported at full PV, SoC FALLING 97.2 -> 96.8 % -- the blind CT had the battery
+        # discharging into the export. Self-consumption would have charged from that surplus,
+        # so commanding the charge is carrying out the plan, not overriding it. No SoC gate:
+        # the gauge reads 100 % while the pack still takes kWh. With no surplus it still
+        # releases, and the battery covers the house.
+        if harvest_by_command and surplus_w is not None and surplus_w > SURPLUS_HARVEST_W:
+            return _harvest(
+                f"plan wants self-consumption, {surplus_w:.0f} W of surplus generation is "
+                f"going to the meter -- soaking it up",
+                surplus_w, slot, harvest_by_command, pv_w)
         return Decision("release", "plan wants self-consumption", slot=slot)
 
     if action == "hold":

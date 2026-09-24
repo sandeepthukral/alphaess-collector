@@ -42,7 +42,9 @@ flowchart TD
     F -- no --> IDLE3[IDLE · no slot / gap]
     F -- yes --> G{slot.action}
 
-    G -- self --> SELF[self-consume] --> REL1((RELEASE))
+    G -- self --> SELF{"GRID_SOURCE=p1 and<br/>surplus_w &gt; 200W?"}
+    SELF -- no --> REL1((RELEASE))
+    SELF -- yes --> REL3(("P1 self harvest<br/>Mode 2 charge as PV-spill override · no SoC gate<br/>PV unreadable or ≤ 200W → HOLD"))
     G -- hold --> H{surplus_w &gt; 200W?}
     H -- yes --> REL2(("PV-spill override<br/>GRID_SOURCE=inverter: RELEASE<br/>GRID_SOURCE=p1: Mode 2 charge<br/>min(surplus_w, inverter PV) − 200W · 100% · 300s<br/>PV unreadable or ≤ 200W → HOLD"))
     H -- no --> HOLD1["HOLD · 0W"]
@@ -55,6 +57,7 @@ flowchart TD
 
     REL1 --> CLAMP
     REL2 --> CLAMP
+    REL3 --> CLAMP
     HOLD1 --> CLAMP
     J --> CLAMP
     CHG --> CLAMP
@@ -77,7 +80,7 @@ flowchart TD
     classDef charge fill:#faefdd,stroke:#b8790f,color:#8a5a0a;
     classDef discharge fill:#eceafc,stroke:#5b52c9,color:#4038a0;
     classDef idle fill:#faeaeb,stroke:#c14350,color:#a3323d;
-    class REL1,REL2 release;
+    class REL1,REL2,REL3 release;
     class HOLD1,HOLD2,J hold;
     class CHG charge;
     class DIS discharge;
@@ -104,8 +107,15 @@ only under P1): because the surplus is invariant to battery action, a frozen or 
 reading would otherwise re-arm a grid-fed charge every tick, night included, with the loop alive
 so the dead man's switch never fires. An unreadable or implausible PV reading, or a cap that
 leaves no setpoint above 0 W, holds. The surplus identity is invariant to battery action, so the command does not
-oscillate. Not changed: a plan `self` slot still releases under P1. A failed P1 fetch sets `surplus_w = None`
-(no fallback to the inverter's grid register), which holds. In the met-charge-target case the
+oscillate. A plan `self` slot takes the same Mode 2 harvest under P1 when `surplus_w > 200 W`:
+its release absorbed nothing and worse, the blind CT had the battery discharging into the export
+(measured 2026-09-24 14:55Z: exporting at full PV, SoC falling 97.2 → 96.8%). Self-consumption
+would have charged from that surplus, so this carries out the plan rather than overriding it.
+There is no SoC gate, because the gauge reads 100% while the pack still takes kWh. A refused
+harvest there (PV unreadable or too low) holds, like the other two, because a release during an
+export is exactly the discharge risk. With no surplus a `self` slot still releases, so the
+battery can cover the house. A failed P1 fetch sets `surplus_w = None`
+(no fallback to the inverter's grid register), which holds (a `self` slot releases). In the met-charge-target case the
 command's 100% target overrides the plan's own ceiling: a plan that stopped at 62% now keeps
 charging from PV.
 

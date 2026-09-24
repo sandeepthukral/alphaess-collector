@@ -417,6 +417,71 @@ class TestP1SurplusIsHarvestedByCommand:
         assert S.decide(self.HOLD, T0, 50.0, surplus_w=2600.0).kind == "release"
 
 
+class TestAP1SelfSlotHarvestsByCommand:
+    """A plan `self` slot releases, and under `GRID_SOURCE=p1` a release absorbs nothing for
+    the same reason the hold override's did. MEASURED 2026-09-24 16:55 local:
+    `release | plan wants self-consumption` every tick while the house exported at full PV and
+    SoC fell 97.2 -> 96.8 %.
+    Self-consumption would have charged from that surplus, so commanding it is what the plan
+    asked for, not an override of it."""
+
+    SELF = doc(slots=[{"start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:15:00Z",
+                       "action": "self"}])
+    P1 = TestP1SurplusIsHarvestedByCommand.P1
+
+    def test_surplus_commands_a_charge_below_the_surplus(self):
+        d = S.decide(self.SELF, T0, 97.2, surplus_w=2600.0, **self.P1)
+        assert d.kind == "command"
+        assert d.command.mode == DispatchMode.SOC_TARGET
+        assert d.command.power_w == 2400
+        assert d.command.target_soc_pct == 100.0
+        assert "2600 W" in d.reason
+
+    def test_the_harvest_is_capped_at_the_inverters_own_pv_meter(self):
+        d = S.decide(self.SELF, T0, 50.0, surplus_w=2600.0, harvest_by_command=True,
+                     pv_w=1000.0)
+        assert d.command.power_w == 800
+
+    def test_no_surplus_still_releases(self):
+        """Evening: the plan wants the battery covering the house, which a hold would stop."""
+        assert S.decide(self.SELF, T0, 50.0, surplus_w=-400.0, **self.P1).kind == "release"
+
+    def test_a_trickle_below_the_threshold_still_releases(self):
+        assert S.decide(self.SELF, T0, 50.0, surplus_w=150.0, **self.P1).kind == "release"
+
+    def test_an_unreadable_power_register_still_releases(self):
+        assert S.decide(self.SELF, T0, 50.0, surplus_w=None, **self.P1).kind == "release"
+
+    def test_surplus_exactly_at_the_threshold_still_releases(self):
+        d = S.decide(self.SELF, T0, 50.0, surplus_w=S.SURPLUS_HARVEST_W, **self.P1)
+        assert d.kind == "release"
+
+    def test_a_high_soc_still_harvests(self):
+        """No SoC gate: the gauge reads 100 % while the pack still takes kWh, and a release
+        during an export can discharge at full power under P1 (the one-phase CT misreads)."""
+        d = S.decide(self.SELF, T0, 100.0, surplus_w=2600.0, **self.P1)
+        assert d.command.mode == DispatchMode.SOC_TARGET
+
+    def test_no_pv_holds_rather_than_releases(self):
+        """Surplus is being exported, and under P1 a release then can discharge the battery
+        at full power into that export. So a harvest the PV cap refuses holds, as it does for
+        a plan hold."""
+        d = S.decide(self.SELF, T0, 50.0, surplus_w=2600.0, harvest_by_command=True, pv_w=0.0)
+        assert d.command.mode == DispatchMode.FOLLOW
+        assert d.command.power_w == 0
+        assert "PV meter reads 0 W" in d.reason
+
+    def test_an_unreadable_pv_meter_holds(self):
+        d = S.decide(self.SELF, T0, 50.0, surplus_w=2600.0, harvest_by_command=True)
+        assert d.command.mode == DispatchMode.FOLLOW
+        assert "nothing readable" in d.reason
+
+    def test_the_default_is_still_a_plain_release(self):
+        d = S.decide(self.SELF, T0, 50.0, surplus_w=2600.0)
+        assert d.kind == "release"
+        assert d.reason == "plan wants self-consumption"
+
+
 class TestClamp:
     """The ceiling is the LOWER of what the inverter reports (0x012C/0x012D) and
     `HARD_MAX_POWER_W`. The hardware overstates itself -- 15,015 W charge / 13,728 W discharge,
