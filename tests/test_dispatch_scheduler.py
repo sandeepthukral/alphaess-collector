@@ -432,13 +432,14 @@ class TestP1SurplusIsCommandedNotReleased:
     HOLD = doc(slots=[{"start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:15:00Z",
                        "action": "hold"}])
 
-    def _decide(self, tmp_path, monkeypatch, source):
+    def _decide(self, tmp_path, monkeypatch, source, pv_w=892):
         monkeypatch.setattr(scheduler, "GRID_SOURCE", source)
         # P1 reports 433 W exported, battery idle -> surplus 433 W. The inverter register is
         # seeded to import 84 W, as the inverter's own single-phase CT did on 2026-09-24.
         monkeypatch.setattr(scheduler, "fetch_p1_grid_w", lambda url, timeout=5: -433.0)
         regs = measurement_registers()
         regs[R.REG_GRID_POWER + 1] = 84
+        regs[R.REG_PV_METER + 1] = pv_w
         client = ScriptedClient(regs, latch_writes=True)
         return tick_with_cache(tmp_path, monkeypatch, client,
                                {"released": False, "publisher": RecordingPublisher()},
@@ -449,6 +450,13 @@ class TestP1SurplusIsCommandedNotReleased:
         assert d.kind == "command"
         assert d.command.mode == R.DispatchMode.SOC_TARGET
         assert d.command.power_w == 433 - scheduler.S.HARVEST_MARGIN_W
+
+    def test_p1_with_the_pv_meter_at_zero_holds(self, tmp_path, monkeypatch):
+        """P1 frozen on a daytime export after dark: the inverter's own PV meter vetoes a
+        grid-fed charge."""
+        d = self._decide(tmp_path, monkeypatch, "p1", pv_w=0)
+        assert d.command.mode == R.DispatchMode.FOLLOW
+        assert d.command.power_w == 0
 
     def test_inverter_source_still_releases(self, tmp_path, monkeypatch):
         """The inverter's own reading is 84 W importing here, so no surplus and a hold; the
@@ -1602,6 +1610,7 @@ class TestMagnitudeShortfall:
         slots_path.write_text(json.dumps(self.HOLD))
         monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
         regs = measurement_registers(live_soc_pct=soc_pct, battery_power_w=0)
+        regs[R.REG_PV_METER + 1] = 5000
         client = ScriptedClient(regs)
         inv = scheduler.Inverter(client, 0x55, dry_run=False)
         cache: dict = {"released": False, "publisher": RecordingPublisher()}

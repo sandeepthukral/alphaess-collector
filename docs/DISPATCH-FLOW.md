@@ -20,7 +20,7 @@ flowchart LR
 
 ## Live decision: `decide()`
 
-Runs on every 60s tick (`dispatch/slots.py:263-357`, driven by `dispatch/scheduler.py:640-1178`).
+Runs on every 60s tick (`slots.decide()`, driven by `scheduler.tick()`).
 Re-validates the plan's chosen action against the *live* state of charge before anything reaches
 the inverter — a planned charge/discharge is downgraded to hold once the target is within a
 0.4% deadband of live SoC.
@@ -44,7 +44,7 @@ flowchart TD
 
     G -- self --> SELF[self-consume] --> REL1((RELEASE))
     G -- hold --> H{surplus_w &gt; 200W?}
-    H -- yes --> REL2(("PV-spill override<br/>GRID_SOURCE=inverter: RELEASE<br/>GRID_SOURCE=p1: Mode 2 charge<br/>surplus_w − 200W · 100% · 300s"))
+    H -- yes --> REL2(("PV-spill override<br/>GRID_SOURCE=inverter: RELEASE<br/>GRID_SOURCE=p1: Mode 2 charge<br/>min(surplus_w, inverter PV) − 200W · 100% · 300s<br/>PV unreadable or ≤ 200W → HOLD"))
     H -- no --> HOLD1["HOLD · 0W"]
     G -- charge --> I{"target ≤ live_soc + 0.4%?"}
     I -- yes --> J["target reached:<br/>soak up surplus (as PV-spill override), else hold"]
@@ -84,7 +84,7 @@ flowchart TD
     class IDLE1,IDLE2,IDLE3,SKIP idle;
 ```
 
-`dispatch/slots.py:263-357` (decide) and `:360-402` (clamp). A charge slot whose target is
+`slots.decide()` and `slots.clamp()`. A charge slot whose target is
 already reached soaks up surplus when `surplus_w > SURPLUS_HARVEST_W` (200 W, strictly greater),
 else holds. A discharge slot whose target is already reached always holds: surplus does not
 rescue it.
@@ -99,7 +99,11 @@ inverter's CT reads one phase of three and sees no export while P1 shows several
 Mode 1 (PV-only) was tried first and also delivered 0 W, because it judges PV by the same blind
 CT (measured 2026-09-24 11:29Z). Mode 2 delivers regardless, so it CAN import: a PV drop inside
 a tick is bought from the grid until the next tick re-sizes it, and the 200 W margin absorbs
-ordinary ripple. The surplus identity is invariant to battery action, so the command does not
+ordinary ripple. The setpoint is capped at the inverter's own PV meter (`REG_PV_METER`, read
+only under P1): because the surplus is invariant to battery action, a frozen or misdirected P1
+reading would otherwise re-arm a grid-fed charge every tick, night included, with the loop alive
+so the dead man's switch never fires. An unreadable or implausible PV reading, or a cap that
+leaves no setpoint above 0 W, holds. The surplus identity is invariant to battery action, so the command does not
 oscillate. Not changed: a plan `self` slot still releases under P1. A failed P1 fetch sets `surplus_w = None`
 (no fallback to the inverter's grid register), which holds. In the met-charge-target case the
 command's 100% target overrides the plan's own ceiling: a plan that stopped at 62% now keeps

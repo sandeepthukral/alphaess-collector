@@ -206,7 +206,8 @@ def find_slot(doc: dict, now: dt.datetime) -> dict | None:
     return None
 
 
-def _harvest(reason: str, surplus_w: float, slot: dict, by_command: bool) -> Decision:
+def _harvest(reason: str, surplus_w: float, slot: dict, by_command: bool,
+             pv_w: float | None = None) -> Decision:
     """Soak up measured surplus: a release normally, a Mode 2 charge when `by_command`.
 
     A release hands the battery to the inverter's own self-consumption, which balances the
@@ -227,18 +228,31 @@ def _harvest(reason: str, surplus_w: float, slot: dict, by_command: bool) -> Dec
     importing. `surplus_w` is invariant to what the battery does (see SURPLUS_HARVEST_W), so the
     command does not oscillate against itself. The target is 100 %: this is soaking up free
     generation, so it overrides a met charge slot's lower ceiling.
+
+    CAPPED AT THE INVERTER'S OWN PV METER (`pv_w`). That same invariance means nothing in the
+    loop can notice a WRONG P1 reading -- frozen after losing its meter telegram, or the URL
+    pointing at another device -- and a live loop re-arms the command every tick, so the dead
+    man's switch never fires. At night that would be a grid-fed charge to 100 %. Surplus can
+    never exceed generation, so the cap only binds when P1 is wrong; no PV reading, no harvest.
     """
     if not by_command:
         return Decision("release", reason, slot=slot)
+    setpoint = (None if pv_w is None
+                else round(min(surplus_w, pv_w) - HARVEST_MARGIN_W))
+    if setpoint is None or setpoint <= 0:
+        pv = "nothing readable" if pv_w is None else f"{pv_w:.0f} W"
+        return Decision(
+            "command", f"{reason} -- but the inverter's PV meter reads {pv}, holding instead",
+            command=Command(DispatchMode.FOLLOW, 0, None, DISPATCH_DURATION_S), slot=slot)
     return Decision(
         "command", reason,
-        command=Command(DispatchMode.SOC_TARGET, round(surplus_w - HARVEST_MARGIN_W), 100.0,
-                        DISPATCH_DURATION_S),
+        command=Command(DispatchMode.SOC_TARGET, setpoint, 100.0, DISPATCH_DURATION_S),
         slot=slot)
 
 
 def _charge_target_reached(slot: dict, target: float, live_soc_pct: float,
-                           surplus_w: float | None, by_command: bool = False) -> Decision:
+                           surplus_w: float | None, by_command: bool = False,
+                           pv_w: float | None = None) -> Decision:
     """A charge slot whose target the battery has already reached.
 
     THE OLD ANSWER WAS A 0 W HOLD, AND IT GAVE AWAY SOLAR. A hold is Mode 3 at zero, which
@@ -252,6 +266,8 @@ def _charge_target_reached(slot: dict, target: float, live_soc_pct: float,
     same judgement `translator._can_harvest` makes on the plan: the battery absorbing free
     solar is never the wrong answer on an interval the plan wanted CHARGED, and unlike a Mode 2
     command it cannot be a no-op, because self-consumption has no target to have arrived at.
+    UNDER `GRID_SOURCE=p1` NEITHER HOLDS: the release is a no-op there and is replaced by a
+    Mode 2 command that can import -- see `_harvest`.
 
     With no surplus -- night, or a house eating everything it makes -- hold is still right, and
     is still what an unreadable power register falls back to. Releasing there would let the
@@ -262,7 +278,7 @@ def _charge_target_reached(slot: dict, target: float, live_soc_pct: float,
     if surplus_w is not None and surplus_w > SURPLUS_HARVEST_W:
         return _harvest(
             f"{reason} -- soaking up {surplus_w:.0f} W of surplus generation",
-            surplus_w, slot, by_command)
+            surplus_w, slot, by_command, pv_w)
     return Decision(
         "command", f"{reason} -- holding instead",
         command=Command(DispatchMode.FOLLOW, 0, None, DISPATCH_DURATION_S), slot=slot)
@@ -275,6 +291,7 @@ def decide(
     load_error: str = "",
     surplus_w: float | None = None,
     harvest_by_command: bool = False,
+    pv_w: float | None = None,
 ) -> Decision:
     """Sections 5.2-5.6, as one pure function.
 
@@ -282,7 +299,8 @@ def decide(
     `live_soc_pct` is None when the SoC register could not be read this tick.
     `surplus_w` is generation beyond the house load, `-(grid_w + battery_w)`, or None when
     either register could not be read -- see SURPLUS_HARVEST_W. `harvest_by_command` turns the
-    surplus override's release into a Mode 1 charge -- see `_harvest`.
+    surplus override's release into a Mode 2 charge capped at `pv_w`, the inverter's own PV
+    meter -- see `_harvest`.
     """
     if doc is None:
         return Decision("idle", load_error or "no slots loaded", fresh=False)
@@ -324,6 +342,9 @@ def decide(
         # once in 45 days (the energy tax floors it), while the raw market price went negative
         # in 137 quarter-hours, i.e. intervals where exporting COSTS money and absorbing is
         # more right rather than less.
+        #
+        # That argument is the RELEASE's. Under GRID_SOURCE=p1 the override is a Mode 2
+        # command instead, which can import on a PV dip -- see `_harvest` for its bounds.
         if surplus_w is not None and surplus_w > SURPLUS_HARVEST_W:
             # If the sun goes behind a cloud a second after this, self-consumption covers the
             # house from the battery until the next tick reverts to the freeze. That is one
@@ -331,7 +352,7 @@ def decide(
             return _harvest(
                 f"plan wants a hold, but {surplus_w:.0f} W of surplus generation is going to "
                 f"the meter -- soaking it up",
-                surplus_w, slot, harvest_by_command)
+                surplus_w, slot, harvest_by_command, pv_w)
         return Decision(
             "command", "hold at 0 W",
             command=Command(DispatchMode.FOLLOW, 0, None, DISPATCH_DURATION_S), slot=slot)
@@ -348,7 +369,7 @@ def decide(
     if action == "charge":
         if target <= live_soc_pct + SOC_DEADBAND_PCT:
             return _charge_target_reached(slot, target, live_soc_pct, surplus_w,
-                                          harvest_by_command)
+                                          harvest_by_command, pv_w)
         power = int(slot["power_w"])            # charging-positive
     else:
         if target >= live_soc_pct - SOC_DEADBAND_PCT:

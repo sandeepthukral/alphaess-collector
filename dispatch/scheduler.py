@@ -785,8 +785,20 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
 
     # With P1 the surplus is measured on a meter the inverter cannot see, so releasing to its
     # own self-consumption would not absorb it -- see `slots._harvest`.
+    # The inverter's own PV meter bounds that command: a frozen or misdirected P1 reading would
+    # otherwise re-arm a grid-fed charge every tick, night included, with nothing in the loop
+    # able to notice. Only read under P1; `None` on failure or implausibility, which holds.
+    pv_w = None
+    if GRID_SOURCE == "p1":
+        try:
+            pv_w = await inv.read(R.REG_PV_METER, 2, signed=True)
+            if abs(pv_w) > IMPLAUSIBLE_POWER_W:
+                log.warning("implausible PV meter reading %+dW -- no P1 harvest this tick", pv_w)
+                pv_w = None
+        except OSError as e:
+            log.warning("PV meter read failed: %s -- no P1 harvest this tick", e)
     decision = S.decide(cache.get("doc"), now, live_soc, cache.get("error", ""), surplus_w,
-                        harvest_by_command=GRID_SOURCE == "p1")
+                        harvest_by_command=GRID_SOURCE == "p1", pv_w=pv_w)
 
     # 5. Hijack check, before we overwrite the evidence.
     #

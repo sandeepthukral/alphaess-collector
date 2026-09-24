@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from typing import ClassVar
 
 import pytest
 
@@ -330,11 +331,13 @@ class TestP1SurplusIsHarvestedByCommand:
     the inverter's app reporting 84 W importing. The override must command the charge, and
     in Mode 2: Mode 1 judges PV by the same blind CT and delivered 0 W (measured 2026-09-24)."""
 
+    # A PV meter reading well above any surplus below, so the cap does not bind.
+    P1: ClassVar[dict] = {"harvest_by_command": True, "pv_w": 10_000.0}
     HOLD = TestAPlanHoldHarvestsRatherThanFreezes.HOLD
     CHARGE = TestAMetChargeTargetHarvestsRatherThanFreezes.CHARGE
 
     def test_a_plan_hold_with_surplus_commands_a_charge_below_the_surplus(self):
-        d = S.decide(self.HOLD, T0, 10.8, surplus_w=433.4, harvest_by_command=True)
+        d = S.decide(self.HOLD, T0, 10.8, surplus_w=433.4, **self.P1)
         assert d.kind == "command"
         assert d.command.mode == DispatchMode.SOC_TARGET
         assert d.command.power_w == round(433.4 - S.HARVEST_MARGIN_W)
@@ -343,50 +346,70 @@ class TestP1SurplusIsHarvestedByCommand:
         assert "433 W" in d.reason
 
     def test_a_met_charge_target_with_surplus_commands_a_charge_below_the_surplus(self):
-        d = S.decide(self.CHARGE, T0, 62.0, surplus_w=2600.0, harvest_by_command=True)
+        d = S.decide(self.CHARGE, T0, 62.0, surplus_w=2600.0, **self.P1)
         assert d.kind == "command"
         assert d.command.mode == DispatchMode.SOC_TARGET
         assert d.command.power_w == 2400
         assert d.command.target_soc_pct == 100.0
 
     def test_the_command_is_clamped_like_any_charge(self):
-        d = S.decide(self.HOLD, T0, 50.0, surplus_w=7000.0, harvest_by_command=True)
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=7000.0, **self.P1)
         cmd, warn = S.clamp(d.command, None, None)
         assert cmd.power_w == S.HARD_MAX_POWER_W
         assert cmd.mode == DispatchMode.SOC_TARGET
         assert warn
 
     def test_no_surplus_still_holds(self):
-        d = S.decide(self.HOLD, T0, 50.0, surplus_w=-400.0, harvest_by_command=True)
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=-400.0, **self.P1)
         assert d.command.mode == DispatchMode.FOLLOW
         assert d.command.power_w == 0
 
     def test_a_trickle_below_the_threshold_still_holds(self):
-        d = S.decide(self.HOLD, T0, 50.0, surplus_w=150.0, harvest_by_command=True)
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=150.0, **self.P1)
         assert d.command.mode == DispatchMode.FOLLOW
 
     def test_an_unreadable_power_register_still_holds(self):
-        d = S.decide(self.HOLD, T0, 50.0, surplus_w=None, harvest_by_command=True)
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=None, **self.P1)
         assert d.command.mode == DispatchMode.FOLLOW
 
     def test_the_smallest_harvest_still_has_a_positive_setpoint(self):
         d = S.decide(self.HOLD, T0, 50.0, surplus_w=S.SURPLUS_HARVEST_W + 1,
-                     harvest_by_command=True)
+                     **self.P1)
         assert d.command.mode == DispatchMode.SOC_TARGET
         assert d.command.power_w > 0
 
     def test_surplus_exactly_at_the_threshold_still_holds(self):
-        d = S.decide(self.HOLD, T0, 50.0, surplus_w=S.SURPLUS_HARVEST_W, harvest_by_command=True)
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=S.SURPLUS_HARVEST_W, **self.P1)
         assert d.command.mode == DispatchMode.FOLLOW
 
     def test_the_surplus_is_rounded_not_truncated(self):
-        d = S.decide(self.HOLD, T0, 50.0, surplus_w=433.9, harvest_by_command=True)
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=433.9, **self.P1)
         assert d.command.power_w == 234
 
     def test_surplus_does_not_rescue_a_discharge_target_already_met(self):
-        d = S.decide(doc(), T0, 19.0, surplus_w=2600.0, harvest_by_command=True)
+        d = S.decide(doc(), T0, 19.0, surplus_w=2600.0, **self.P1)
         assert d.command.mode == DispatchMode.FOLLOW
         assert d.command.power_w == 0
+
+    def test_the_harvest_is_capped_at_the_inverters_own_pv_meter(self):
+        """A frozen or misdirected P1 reading re-arms every tick and nothing in the loop can
+        see it; the inverter's own PV meter is the bound."""
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=2600.0, harvest_by_command=True,
+                     pv_w=1000.0)
+        assert d.command.mode == DispatchMode.SOC_TARGET
+        assert d.command.power_w == 800
+
+    def test_a_p1_surplus_with_no_pv_holds(self):
+        """Night, P1 still reporting a daytime export: no grid-fed charge."""
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=2600.0, harvest_by_command=True, pv_w=0.0)
+        assert d.command.mode == DispatchMode.FOLLOW
+        assert d.command.power_w == 0
+        assert "PV meter reads 0 W" in d.reason
+
+    def test_an_unreadable_pv_meter_holds(self):
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=2600.0, harvest_by_command=True)
+        assert d.command.mode == DispatchMode.FOLLOW
+        assert "nothing readable" in d.reason
 
     def test_the_default_is_still_a_release(self):
         """The inverter's own CT is the surplus source when GRID_SOURCE=inverter, so its
