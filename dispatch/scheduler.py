@@ -755,21 +755,18 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     if not inv.dry_run and actual_battery_w is not None:
         prev_cmd = cache.get("last_written")
         expected_w = None
-        if prev_cmd is not None and prev_cmd.power_w != 0:
-            if prev_cmd.mode == R.DispatchMode.SOC_TARGET:
-                expected_w = abs(prev_cmd.power_w)
-            elif prev_cmd.mode == R.DispatchMode.PV_CHARGE and surplus_w is not None \
-                    and not (live_soc is not None and prev_cmd.target_soc_pct is not None
-                             and live_soc >= prev_cmd.target_soc_pct - S.SOC_DEADBAND_PCT):
-                # Mode 1 is PV-only, so it is scored against what PV can supply NOW, not the
-                # setpoint: it was sized to the previous tick's surplus, and delivering less
-                # when a cloud drops that surplus is correct (DESIGN-dispatch.md 9.1). What
-                # this is here to catch is the P1 harvest delivering NOTHING while surplus
-                # remains, because the inverter's one-phase CT sees no export -- registers
-                # read back as written, so nothing else would flag it. `surplus_w` is
-                # invariant to battery action, so it is a fair ceiling. A battery at its
-                # target (full) is skipped: 0 W there is right, not a shortfall.
-                expected_w = min(abs(prev_cmd.power_w), surplus_w)
+        # A command whose SoC target the battery has reached delivers 0 W by design, and the
+        # inverter stops at the ENCODED target (0.4 % steps) a tick before the deadband hands
+        # the slot over -- MEASURED 2026-09-24 11:12Z, 52.1 % written as 52.0 %, a false 100 %
+        # shortfall. So a command at its target is not scored, nor one whose target cannot be
+        # checked because SoC was unreadable.
+        at_target = live_soc is None or (
+            prev_cmd is not None and prev_cmd.target_soc_pct is not None and (
+                live_soc >= prev_cmd.target_soc_pct - S.SOC_DEADBAND_PCT if prev_cmd.power_w > 0
+                else live_soc <= prev_cmd.target_soc_pct + S.SOC_DEADBAND_PCT))
+        if prev_cmd is not None and prev_cmd.mode == R.DispatchMode.SOC_TARGET \
+                and prev_cmd.power_w != 0 and not at_target:
+            expected_w = abs(prev_cmd.power_w)
         if expected_w is not None and expected_w > 0:
             shortfall_w = expected_w - abs(actual_battery_w)
             shorted = (shortfall_w >= S.SHORTFALL_MIN_W

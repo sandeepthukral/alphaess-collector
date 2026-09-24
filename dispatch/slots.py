@@ -69,6 +69,11 @@ SOC_DEADBAND_PCT = 0.4
 # battery 0 gives 2,628 W; charging, grid +2,371 W and battery -4,823 W gives 2,452 W.
 SURPLUS_HARVEST_W = 200.0
 
+# How far below the measured P1 surplus a commanded harvest is set, so a PV dip inside a tick
+# is absorbed by the margin rather than imported. See `_harvest`. Always leaves a positive
+# setpoint, since a harvest needs surplus_w > SURPLUS_HARVEST_W >= HARVEST_MARGIN_W.
+HARVEST_MARGIN_W = 200.0
+
 # The ceiling `clamp()` will not exceed whatever the inverter says about itself.
 #
 # MEASURED 2026-08-16, first containerised dry run: the inverter reports 0x012C = 15,015 W
@@ -202,7 +207,7 @@ def find_slot(doc: dict, now: dt.datetime) -> dict | None:
 
 
 def _harvest(reason: str, surplus_w: float, slot: dict, by_command: bool) -> Decision:
-    """Soak up measured surplus: a release normally, a Mode 1 charge when `by_command`.
+    """Soak up measured surplus: a release normally, a Mode 2 charge when `by_command`.
 
     A release hands the battery to the inverter's own self-consumption, which balances the
     grid CT the INVERTER sees. With `GRID_SOURCE=p1` the surplus was measured on a different
@@ -211,21 +216,24 @@ def _harvest(reason: str, surplus_w: float, slot: dict, by_command: bool) -> Dec
     2026-09-24 09:30-09:49Z at 10.8 % SoC: P1 surplus 300-520 W every tick, released every
     tick, battery 0 W throughout, the inverter's own app showing 84 W IMPORTING.
 
-    So in that mode the charge is commanded. Mode 1 (PV-only charge) is the primitive because
-    it is the one measured to honour a setpoint AND never import (DESIGN-dispatch.md section
-    9.1: 4,786 W commanded into a ~2,790 W surplus, median grid +8 W), so sizing it at the
-    measured surplus can only absorb generation that exists. `surplus_w` is invariant to what
-    the battery does (see SURPLUS_HARVEST_W), so the command does not oscillate against itself.
+    NOT MODE 1. Mode 1 (PV-only charge) never imports, which made it the obvious choice, but it
+    judges "PV" by the same one-phase CT and so finds nothing to charge from. MEASURED
+    2026-09-24 11:29Z: Mode 1 at +2,342 W with ~2.3 kW of P1 surplus, battery 0 W a tick later,
+    registers verified; Mode 2 at 4,848 W either side of it delivered ~4,780 W.
 
-    The SoC target is written as 100 % rather than left alone: whether Mode 1 honours its
-    target is untested, and an unwritten register would leave a stale value from an earlier
-    command to be obeyed instead.
+    Mode 2 delivers its setpoint whatever the CT sees, so it can import: if PV drops inside a
+    tick, the difference comes from the grid until the next tick re-sizes it (60 s; 300 s if the
+    loop dies). HARVEST_MARGIN_W below the measured surplus absorbs ordinary PV ripple without
+    importing. `surplus_w` is invariant to what the battery does (see SURPLUS_HARVEST_W), so the
+    command does not oscillate against itself. The target is 100 %: this is soaking up free
+    generation, so it overrides a met charge slot's lower ceiling.
     """
     if not by_command:
         return Decision("release", reason, slot=slot)
     return Decision(
         "command", reason,
-        command=Command(DispatchMode.PV_CHARGE, round(surplus_w), 100.0, DISPATCH_DURATION_S),
+        command=Command(DispatchMode.SOC_TARGET, round(surplus_w - HARVEST_MARGIN_W), 100.0,
+                        DISPATCH_DURATION_S),
         slot=slot)
 
 

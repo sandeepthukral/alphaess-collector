@@ -444,11 +444,11 @@ class TestP1SurplusIsCommandedNotReleased:
                                {"released": False, "publisher": RecordingPublisher()},
                                dry_run=True, slots_doc=self.HOLD)
 
-    def test_p1_commands_a_pv_charge(self, tmp_path, monkeypatch):
+    def test_p1_commands_a_charge(self, tmp_path, monkeypatch):
         d = self._decide(tmp_path, monkeypatch, "p1")
         assert d.kind == "command"
-        assert d.command.mode == R.DispatchMode.PV_CHARGE
-        assert d.command.power_w == 433
+        assert d.command.mode == R.DispatchMode.SOC_TARGET
+        assert d.command.power_w == 433 - scheduler.S.HARVEST_MARGIN_W
 
     def test_inverter_source_still_releases(self, tmp_path, monkeypatch):
         """The inverter's own reading is 84 W importing here, so no surplus and a hold; the
@@ -1591,13 +1591,12 @@ class TestMagnitudeShortfall:
     HOLD = doc(slots=[{"start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:15:00Z",
                        "action": "hold"}])
 
-    def _pv_charge_ticks(self, tmp_path, monkeypatch, surplus_1, surplus_2, battery_w,
-                         soc_pct=50.0):
-        """Tick 1 commands a Mode 1 harvest sized to `surplus_1`; tick 2 scores it with P1
-        now reporting `surplus_2` and the battery charging `battery_w`."""
+    def _harvest_ticks(self, tmp_path, monkeypatch, surplus_w, battery_w, soc_pct=50.0):
+        """Tick 1 commands a P1 harvest sized to `surplus_w`; tick 2 scores it with P1 still
+        reporting `surplus_w` and the battery charging `battery_w`."""
         monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
         # grid_w = -(surplus + batt_raw); batt_raw is discharge-positive, so charging is -.
-        p1 = iter([-surplus_1, -(surplus_2 - battery_w)])
+        p1 = iter([-surplus_w, -(surplus_w - battery_w)])
         monkeypatch.setattr(scheduler, "fetch_p1_grid_w", lambda url, timeout=5: next(p1))
         slots_path = tmp_path / "slots.json"
         slots_path.write_text(json.dumps(self.HOLD))
@@ -1607,29 +1606,46 @@ class TestMagnitudeShortfall:
         inv = scheduler.Inverter(client, 0x55, dry_run=False)
         cache: dict = {"released": False, "publisher": RecordingPublisher()}
         asyncio.run(scheduler.tick(inv, slots_path, cache, T0))
-        assert cache["last_written"].mode == R.DispatchMode.PV_CHARGE
-        regs[R.REG_BATTERY_POWER] = int(-battery_w) & 0xFFFF
+        assert cache["last_written"].mode == R.DispatchMode.SOC_TARGET
+        # The client holds its own copy of the registers.
+        client.registers[R.REG_BATTERY_POWER] = int(-battery_w) & 0xFFFF
         asyncio.run(scheduler.tick(inv, slots_path, cache, T0 + dt.timedelta(seconds=60)))
         return cache
 
-    def test_a_pv_charge_harvest_that_delivers_nothing_is_flagged(
-            self, tmp_path, monkeypatch, caplog):
-        """Registers read back as written, so a battery still at 0 W under a 433 W harvest
-        with the surplus still there must surface here or nothing flags it."""
+    def test_a_harvest_that_delivers_nothing_is_flagged(self, tmp_path, monkeypatch, caplog):
+        """Registers read back as written, so a battery at 0 W under a harvest must surface
+        here -- it is how the Mode 1 version was caught failing on 2026-09-24."""
         with caplog.at_level("WARNING", logger="dispatch"):
-            cache = self._pv_charge_ticks(tmp_path, monkeypatch, 433, 433, battery_w=0)
+            cache = self._harvest_ticks(tmp_path, monkeypatch, 2600, battery_w=0)
         assert cache["shorted"] is True
         assert any("magnitude shortfall" in r.message for r in caplog.records)
 
-    def test_a_pv_charge_tracking_a_cloud_dip_is_not_flagged(self, tmp_path, monkeypatch):
-        """+520 W commanded, surplus falls to 300 W, battery takes 300 W: Mode 1 doing its
-        job, not the inverter under-delivering."""
-        cache = self._pv_charge_ticks(tmp_path, monkeypatch, 520, 300, battery_w=300)
+    def test_a_harvest_delivering_its_setpoint_is_not_flagged(self, tmp_path, monkeypatch):
+        cache = self._harvest_ticks(tmp_path, monkeypatch, 2600, battery_w=2400)
         assert cache["shorted"] is False
 
-    def test_a_full_battery_under_a_pv_charge_is_not_flagged(self, tmp_path, monkeypatch):
-        cache = self._pv_charge_ticks(tmp_path, monkeypatch, 2600, 2600, battery_w=0,
-                                      soc_pct=100.0)
+    def test_a_full_battery_under_a_harvest_is_not_flagged(self, tmp_path, monkeypatch):
+        cache = self._harvest_ticks(tmp_path, monkeypatch, 2600, battery_w=0, soc_pct=100.0)
+        assert cache["shorted"] is False
+
+    def test_a_charge_stopped_at_its_encoded_target_is_not_flagged(self, tmp_path, monkeypatch):
+        """MEASURED 2026-09-24 11:12Z: 4,848 W to 52.1 %, written as 52.0 % (0.4 % steps), so
+        the inverter stopped at 52.0 % a tick before the deadband took over -- 0 W delivered,
+        reported as a 100 % shortfall."""
+        charge = doc(slots=[{"start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:15:00Z",
+                             "action": "charge", "power_w": 4848, "target_soc": 52.1}])
+        slots_path = tmp_path / "slots.json"
+        slots_path.write_text(json.dumps(charge))
+        monkeypatch.setattr(scheduler, "HEARTBEAT_PATH", tmp_path / "hb.json")
+        regs = measurement_registers(live_soc_pct=51.6, battery_power_w=-4800)
+        client = ScriptedClient(regs)
+        inv = scheduler.Inverter(client, 0x55, dry_run=False)
+        cache: dict = {"released": False, "publisher": RecordingPublisher()}
+        asyncio.run(scheduler.tick(inv, slots_path, cache, T0))
+        assert cache["last_written"].power_w == 4848
+        client.registers[R.REG_BATTERY_SOC] = 520
+        client.registers[R.REG_BATTERY_POWER] = 0
+        asyncio.run(scheduler.tick(inv, slots_path, cache, T0 + dt.timedelta(seconds=60)))
         assert cache["shorted"] is False
 
     def test_dry_run_never_flags_a_shortfall(self, tmp_path, monkeypatch, caplog):

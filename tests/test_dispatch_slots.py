@@ -327,31 +327,33 @@ class TestP1SurplusIsHarvestedByCommand:
     """With `GRID_SOURCE=p1` the surplus is measured on a meter the inverter cannot see (its
     own CT reads one phase of three), so releasing to its self-consumption absorbs nothing.
     MEASURED 2026-09-24 at 10.8 % SoC: P1 surplus 300-520 W, released every tick, battery 0 W,
-    the inverter's app reporting 84 W importing. The override must command the charge."""
+    the inverter's app reporting 84 W importing. The override must command the charge, and
+    in Mode 2: Mode 1 judges PV by the same blind CT and delivered 0 W (measured 2026-09-24)."""
 
     HOLD = TestAPlanHoldHarvestsRatherThanFreezes.HOLD
     CHARGE = TestAMetChargeTargetHarvestsRatherThanFreezes.CHARGE
 
-    def test_a_plan_hold_with_surplus_commands_a_pv_only_charge(self):
+    def test_a_plan_hold_with_surplus_commands_a_charge_below_the_surplus(self):
         d = S.decide(self.HOLD, T0, 10.8, surplus_w=433.4, harvest_by_command=True)
         assert d.kind == "command"
-        assert d.command.mode == DispatchMode.PV_CHARGE
-        assert d.command.power_w == 433
+        assert d.command.mode == DispatchMode.SOC_TARGET
+        assert d.command.power_w == round(433.4 - S.HARVEST_MARGIN_W)
         assert d.command.target_soc_pct == 100.0
         assert d.command.duration_s == S.DISPATCH_DURATION_S
         assert "433 W" in d.reason
 
-    def test_a_met_charge_target_with_surplus_commands_a_pv_only_charge(self):
+    def test_a_met_charge_target_with_surplus_commands_a_charge_below_the_surplus(self):
         d = S.decide(self.CHARGE, T0, 62.0, surplus_w=2600.0, harvest_by_command=True)
         assert d.kind == "command"
-        assert d.command.mode == DispatchMode.PV_CHARGE
-        assert d.command.power_w == 2600
+        assert d.command.mode == DispatchMode.SOC_TARGET
+        assert d.command.power_w == 2400
+        assert d.command.target_soc_pct == 100.0
 
     def test_the_command_is_clamped_like_any_charge(self):
         d = S.decide(self.HOLD, T0, 50.0, surplus_w=7000.0, harvest_by_command=True)
         cmd, warn = S.clamp(d.command, None, None)
         assert cmd.power_w == S.HARD_MAX_POWER_W
-        assert cmd.mode == DispatchMode.PV_CHARGE
+        assert cmd.mode == DispatchMode.SOC_TARGET
         assert warn
 
     def test_no_surplus_still_holds(self):
@@ -367,13 +369,19 @@ class TestP1SurplusIsHarvestedByCommand:
         d = S.decide(self.HOLD, T0, 50.0, surplus_w=None, harvest_by_command=True)
         assert d.command.mode == DispatchMode.FOLLOW
 
+    def test_the_smallest_harvest_still_has_a_positive_setpoint(self):
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=S.SURPLUS_HARVEST_W + 1,
+                     harvest_by_command=True)
+        assert d.command.mode == DispatchMode.SOC_TARGET
+        assert d.command.power_w > 0
+
     def test_surplus_exactly_at_the_threshold_still_holds(self):
         d = S.decide(self.HOLD, T0, 50.0, surplus_w=S.SURPLUS_HARVEST_W, harvest_by_command=True)
         assert d.command.mode == DispatchMode.FOLLOW
 
     def test_the_surplus_is_rounded_not_truncated(self):
         d = S.decide(self.HOLD, T0, 50.0, surplus_w=433.9, harvest_by_command=True)
-        assert d.command.power_w == 434
+        assert d.command.power_w == 234
 
     def test_surplus_does_not_rescue_a_discharge_target_already_met(self):
         d = S.decide(doc(), T0, 19.0, surplus_w=2600.0, harvest_by_command=True)
