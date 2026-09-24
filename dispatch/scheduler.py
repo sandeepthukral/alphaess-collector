@@ -754,7 +754,12 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     shorted = False
     if not inv.dry_run and actual_battery_w is not None:
         prev_cmd = cache.get("last_written")
-        if prev_cmd is not None and prev_cmd.mode == R.DispatchMode.SOC_TARGET \
+        # Mode 1 is scored too: under GRID_SOURCE=p1 the P1-sized harvest is a Mode 1 charge
+        # whose delivery is UNVERIFIED -- the inverter's own CT can read import while P1 reads
+        # export, and a PV-only mode may then find nothing to charge from. The registers would
+        # still read back exactly as written, so this is the only thing that can flag it.
+        if prev_cmd is not None \
+                and prev_cmd.mode in (R.DispatchMode.SOC_TARGET, R.DispatchMode.PV_CHARGE) \
                 and prev_cmd.power_w != 0:
             shortfall_w = abs(prev_cmd.power_w) - abs(actual_battery_w)
             shorted = (shortfall_w >= S.SHORTFALL_MIN_W
