@@ -367,6 +367,19 @@ class TestP1SurplusIsHarvestedByCommand:
         d = S.decide(self.HOLD, T0, 50.0, surplus_w=None, harvest_by_command=True)
         assert d.command.mode == DispatchMode.FOLLOW
 
+    def test_surplus_exactly_at_the_threshold_still_holds(self):
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=S.SURPLUS_HARVEST_W, harvest_by_command=True)
+        assert d.command.mode == DispatchMode.FOLLOW
+
+    def test_the_surplus_is_rounded_not_truncated(self):
+        d = S.decide(self.HOLD, T0, 50.0, surplus_w=433.9, harvest_by_command=True)
+        assert d.command.power_w == 434
+
+    def test_surplus_does_not_rescue_a_discharge_target_already_met(self):
+        d = S.decide(doc(), T0, 19.0, surplus_w=2600.0, harvest_by_command=True)
+        assert d.command.mode == DispatchMode.FOLLOW
+        assert d.command.power_w == 0
+
     def test_the_default_is_still_a_release(self):
         """The inverter's own CT is the surplus source when GRID_SOURCE=inverter, so its
         self-consumption CAN see it and a release is right."""

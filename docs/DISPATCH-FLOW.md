@@ -20,7 +20,7 @@ flowchart LR
 
 ## Live decision: `decide()`
 
-Runs on every 60s tick (`dispatch/slots.py:231-323`, driven by `dispatch/scheduler.py:310-579`).
+Runs on every 60s tick (`dispatch/slots.py:263-357`, driven by `dispatch/scheduler.py:640-1178`).
 Re-validates the plan's chosen action against the *live* state of charge before anything reaches
 the inverter — a planned charge/discharge is downgraded to hold once the target is within a
 0.4% deadband of live SoC.
@@ -84,8 +84,10 @@ flowchart TD
     class IDLE1,IDLE2,IDLE3,SKIP idle;
 ```
 
-`dispatch/slots.py:231-323` (decide) and `:326-367` (clamp). The charge/discharge "target
-reached" outcomes release if `surplus_w > 0`, else hold.
+`dispatch/slots.py:263-357` (decide) and `:360-402` (clamp). A charge slot whose target is
+already reached soaks up surplus when `surplus_w > SURPLUS_HARVEST_W` (200 W, strictly greater),
+else holds. A discharge slot whose target is already reached always holds: surplus does not
+rescue it.
 
 **How the PV-spill override soaks up surplus depends on `GRID_SOURCE`** (`slots._harvest`,
 `decide(harvest_by_command=...)`, passed by `tick()` as `GRID_SOURCE == "p1"`). With `inverter`
@@ -96,7 +98,10 @@ of three and sees no export while P1 shows several hundred watts (measured 2026-
 surplus 300-520 W, battery 0 W, inverter app showing 84 W importing). Mode 1 is used because
 it is the measured setpoint-honouring, never-importing charge (`DESIGN-dispatch.md` 9.1). The
 surplus identity is invariant to battery action, so the command does not oscillate. Not
-changed: a plan `self` slot still releases under P1.
+changed: a plan `self` slot still releases under P1. A failed P1 fetch sets `surplus_w = None`
+(no fallback to the inverter's grid register), which holds. In the met-charge-target case the
+command's 100% target overrides the plan's own ceiling: a plan that stopped at 62% now keeps
+charging from PV.
 
 `GRID_SOURCE` (env var, default `inverter`) swaps where `grid_w` for the surplus calc comes
 from: the inverter's own `REG_GRID_POWER` register, or (`GRID_SOURCE=p1`) a P1 energy monitor's

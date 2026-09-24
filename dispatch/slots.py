@@ -225,7 +225,7 @@ def _harvest(reason: str, surplus_w: float, slot: dict, by_command: bool) -> Dec
         return Decision("release", reason, slot=slot)
     return Decision(
         "command", reason,
-        command=Command(DispatchMode.PV_CHARGE, int(surplus_w), 100.0, DISPATCH_DURATION_S),
+        command=Command(DispatchMode.PV_CHARGE, round(surplus_w), 100.0, DISPATCH_DURATION_S),
         slot=slot)
 
 

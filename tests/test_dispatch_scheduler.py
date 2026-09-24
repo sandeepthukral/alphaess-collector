@@ -425,6 +425,63 @@ class TestDegradedFields:
         assert set(fields) & pivoted
 
 
+class TestP1SurplusIsCommandedNotReleased:
+    """`tick()` must pass `harvest_by_command` from GRID_SOURCE. Every slots.py test stays green
+    if the kwarg is dropped from scheduler.py, so the wiring is pinned here."""
+
+    HOLD = doc(slots=[{"start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:15:00Z",
+                       "action": "hold"}])
+
+    def _decide(self, tmp_path, monkeypatch, source):
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", source)
+        # P1 reports 433 W exported, battery idle -> surplus 433 W. The inverter register is
+        # seeded to import 84 W, as the inverter's own single-phase CT did on 2026-09-24.
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", lambda url, timeout=5: -433.0)
+        regs = measurement_registers()
+        regs[R.REG_GRID_POWER + 1] = 84
+        client = ScriptedClient(regs, latch_writes=True)
+        return tick_with_cache(tmp_path, monkeypatch, client,
+                               {"released": False, "publisher": RecordingPublisher()},
+                               dry_run=True, slots_doc=self.HOLD)
+
+    def test_p1_commands_a_pv_charge(self, tmp_path, monkeypatch):
+        d = self._decide(tmp_path, monkeypatch, "p1")
+        assert d.kind == "command"
+        assert d.command.mode == R.DispatchMode.PV_CHARGE
+        assert d.command.power_w == 433
+
+    def test_inverter_source_still_releases(self, tmp_path, monkeypatch):
+        """The inverter's own reading is 84 W importing here, so no surplus and a hold; the
+        point is that the flag is not set, checked via a surplus the register does report."""
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "inverter")
+        regs = measurement_registers()
+        regs[R.REG_GRID_POWER] = 0xFFFF
+        regs[R.REG_GRID_POWER + 1] = (-433) & 0xFFFF
+        client = ScriptedClient(regs, latch_writes=True)
+        d = tick_with_cache(tmp_path, monkeypatch, client,
+                            {"released": False, "publisher": RecordingPublisher()},
+                            dry_run=True, slots_doc=self.HOLD)
+        assert d.kind == "release"
+
+    def test_a_failed_p1_fetch_holds_and_does_not_fall_back_to_the_inverter(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "p1")
+
+        def boom(url, timeout=5):
+            raise OSError("no route to host")
+
+        monkeypatch.setattr(scheduler, "fetch_p1_grid_w", boom)
+        regs = measurement_registers()
+        regs[R.REG_GRID_POWER] = 0xFFFF
+        regs[R.REG_GRID_POWER + 1] = (-433) & 0xFFFF
+        client = ScriptedClient(regs, latch_writes=True)
+        d = tick_with_cache(tmp_path, monkeypatch, client,
+                            {"released": False, "publisher": RecordingPublisher()},
+                            dry_run=True, slots_doc=self.HOLD)
+        assert d.command.mode == R.DispatchMode.FOLLOW
+        assert d.command.power_w == 0
+
+
 class TestP1GridSource:
     """GRID_SOURCE=p1 sources grid_w from the P1 monitor instead of REG_GRID_POWER, with
     the same surplus_w=None/batt_w=None fallback a bad Modbus read already has."""
