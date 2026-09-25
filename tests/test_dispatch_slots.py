@@ -423,7 +423,8 @@ class TestAP1SelfSlotHarvestsByCommand:
     `release | plan wants self-consumption` every tick while the house exported at full PV and
     SoC fell 97.2 -> 96.8 %.
     Self-consumption would have charged from that surplus, so commanding it is what the plan
-    asked for, not an override of it."""
+    asked for, not an override of it. Without surplus it holds: under P1 no `self` tick
+    releases."""
 
     SELF = doc(slots=[{"start": "2026-08-01T12:00:00Z", "end": "2026-08-01T12:15:00Z",
                        "action": "self"}])
@@ -442,18 +443,32 @@ class TestAP1SelfSlotHarvestsByCommand:
                      pv_w=1000.0)
         assert d.command.power_w == 800
 
-    def test_no_surplus_still_releases(self):
-        """Evening: the plan wants the battery covering the house, which a hold would stop."""
-        assert S.decide(self.SELF, T0, 50.0, surplus_w=-400.0, **self.P1).kind == "release"
+    @staticmethod
+    def assert_held(d):
+        assert d.kind == "command"
+        assert d.command.mode == DispatchMode.FOLLOW
+        assert d.command.power_w == 0
+        assert "holding at 0 W" in d.reason
 
-    def test_a_trickle_below_the_threshold_still_releases(self):
-        assert S.decide(self.SELF, T0, 50.0, surplus_w=150.0, **self.P1).kind == "release"
+    def test_no_surplus_holds_rather_than_releases(self):
+        """MEASURED 2026-09-25: a release with the house importing let the blind CT charge the
+        battery from the grid at 4.8 kW. Holding costs the house load; releasing can cost a
+        full-power charge or discharge."""
+        self.assert_held(S.decide(self.SELF, T0, 50.0, surplus_w=-400.0, **self.P1))
 
-    def test_an_unreadable_power_register_still_releases(self):
-        assert S.decide(self.SELF, T0, 50.0, surplus_w=None, **self.P1).kind == "release"
+    def test_a_trickle_below_the_threshold_holds(self):
+        self.assert_held(S.decide(self.SELF, T0, 50.0, surplus_w=150.0, **self.P1))
 
-    def test_surplus_exactly_at_the_threshold_still_releases(self):
-        d = S.decide(self.SELF, T0, 50.0, surplus_w=S.SURPLUS_HARVEST_W, **self.P1)
+    def test_an_unreadable_power_register_holds(self):
+        self.assert_held(S.decide(self.SELF, T0, 50.0, surplus_w=None, **self.P1))
+
+    def test_surplus_exactly_at_the_threshold_holds(self):
+        self.assert_held(S.decide(self.SELF, T0, 50.0, surplus_w=S.SURPLUS_HARVEST_W,
+                                  **self.P1))
+
+    def test_no_surplus_without_p1_still_releases(self):
+        """GRID_SOURCE=inverter: the CT is the meter there, so self-consumption is sound."""
+        d = S.decide(self.SELF, T0, 50.0, surplus_w=-400.0)
         assert d.kind == "release"
 
     def test_a_high_soc_still_harvests(self):

@@ -42,8 +42,10 @@ flowchart TD
     F -- no --> IDLE3[IDLE · no slot / gap]
     F -- yes --> G{slot.action}
 
-    G -- self --> SELF{"GRID_SOURCE=p1 and<br/>surplus_w &gt; 200W?"}
-    SELF -- no --> REL1((RELEASE))
+    G -- self --> SELFP1{GRID_SOURCE=p1?}
+    SELFP1 -- no --> REL1((RELEASE))
+    SELFP1 -- yes --> SELF{surplus_w &gt; 200W?}
+    SELF -- no --> HOLD3["HOLD · 0W<br/>never release under P1:<br/>the CT cannot steer the battery"]
     SELF -- yes --> REL3(("P1 self harvest<br/>Mode 2 charge as PV-spill override · no SoC gate<br/>PV unreadable or ≤ 200W → HOLD"))
     G -- hold --> H{surplus_w &gt; 200W?}
     H -- yes --> REL2(("PV-spill override<br/>GRID_SOURCE=inverter: RELEASE<br/>GRID_SOURCE=p1: Mode 2 charge<br/>min(surplus_w, inverter PV) − 200W · 100% · 300s<br/>PV unreadable or ≤ 200W → HOLD"))
@@ -58,6 +60,7 @@ flowchart TD
     REL1 --> CLAMP
     REL2 --> CLAMP
     REL3 --> CLAMP
+    HOLD3 --> CLAMP
     HOLD1 --> CLAMP
     J --> CLAMP
     CHG --> CLAMP
@@ -81,7 +84,7 @@ flowchart TD
     classDef discharge fill:#eceafc,stroke:#5b52c9,color:#4038a0;
     classDef idle fill:#faeaeb,stroke:#c14350,color:#a3323d;
     class REL1,REL2,REL3 release;
-    class HOLD1,HOLD2,J hold;
+    class HOLD1,HOLD2,HOLD3,J hold;
     class CHG charge;
     class DIS discharge;
     class IDLE1,IDLE2,IDLE3,SKIP idle;
@@ -113,9 +116,14 @@ its release absorbed nothing and worse, the blind CT had the battery discharging
 would have charged from that surplus, so this carries out the plan rather than overriding it.
 There is no SoC gate, because the gauge reads 100% while the pack still takes kWh. A refused
 harvest there (PV unreadable or too low) holds, like the other two, because a release during an
-export is exactly the discharge risk. With no surplus a `self` slot still releases, so the
-battery can cover the house. A failed P1 fetch sets `surplus_w = None`
-(no fallback to the inverter's grid register), which holds (a `self` slot releases). In the met-charge-target case the
+export is exactly the discharge risk. **With no surplus a `self` slot under P1 holds at 0 W
+too, so no P1 path releases.** The inverter's CT does not see the inverter's own power, so its
+self-consumption loop never closes and runs the battery at full power in whichever direction the
+CT leans (measured 2026-09-25, inverter left to itself before sunrise: battery charging at
+4.8 kW, P1 importing 5.05 kW, the CT a flat −80 W "export"). The hold costs the house load from
+the grid; the release it replaces could cost a full-power grid charge or discharge. With
+`GRID_SOURCE=inverter` a `self` slot still releases. A failed P1 fetch sets `surplus_w = None`
+(no fallback to the inverter's grid register), which holds. In the met-charge-target case the
 command's 100% target overrides the plan's own ceiling: a plan that stopped at 62% now keeps
 charging from PV.
 

@@ -235,9 +235,10 @@ def _harvest(reason: str, surplus_w: float, slot: dict, by_command: bool,
     man's switch never fires. At night that would be a grid-fed charge to 100 %. Surplus can
     never exceed generation, so the cap only binds when P1 is wrong; no PV reading, no harvest.
 
-    A refused harvest HOLDS, even in a `self` slot. Under P1 a release while the house exports
-    is not a harmless no-op: the one-phase CT can misread the load and discharge the battery at
-    full power into that export.
+    A refused harvest HOLDS, even in a `self` slot. Under P1 a release is never a harmless
+    no-op: the CT does not see the inverter's own power, so self-consumption runs the battery
+    at full power in whichever direction that CT leans -- discharging into an export
+    (2026-09-24), charging from the grid (2026-09-25). See the `self` branch of `decide()`.
     """
     if not by_command:
         return Decision("release", reason, slot=slot)
@@ -329,13 +330,26 @@ def decide(
         # exported at full PV, SoC FALLING 97.2 -> 96.8 % -- the blind CT had the battery
         # discharging into the export. Self-consumption would have charged from that surplus,
         # so commanding the charge is carrying out the plan, not overriding it. No SoC gate:
-        # the gauge reads 100 % while the pack still takes kWh. With no surplus it still
-        # releases, and the battery covers the house.
-        if harvest_by_command and surplus_w is not None and surplus_w > SURPLUS_HARVEST_W:
-            return _harvest(
-                f"plan wants self-consumption, {surplus_w:.0f} W of surplus generation is "
-                f"going to the meter -- soaking it up",
-                surplus_w, slot, harvest_by_command, pv_w)
+        # the gauge reads 100 % while the pack still takes kWh.
+        #
+        # AND WITHOUT SURPLUS UNDER P1 IT HOLDS -- NEVER A RELEASE. The inverter's CT does not
+        # see the inverter's own power at all, so its self-consumption loop never closes: it
+        # runs the battery at full power in whichever direction the CT happens to lean.
+        # MEASURED 2026-09-25 (dispatch stopped, inverter left to itself, before sunrise):
+        # battery -4.8 kW charging, P1 +5.05 kW IMPORTING, the CT a flat -80 W "export"
+        # throughout. Earlier that morning the same self slot had released every tick with
+        # SoC rising 45 -> 48 % from the grid ahead of a planned discharge. A hold costs the
+        # house load from the grid; a release can cost a full-power charge or discharge.
+        if harvest_by_command:
+            if surplus_w is not None and surplus_w > SURPLUS_HARVEST_W:
+                return _harvest(
+                    f"plan wants self-consumption, {surplus_w:.0f} W of surplus generation is "
+                    f"going to the meter -- soaking it up",
+                    surplus_w, slot, harvest_by_command, pv_w)
+            return Decision(
+                "command", "plan wants self-consumption -- but under P1 the inverter's CT "
+                "cannot steer it, holding at 0 W instead",
+                command=Command(DispatchMode.FOLLOW, 0, None, DISPATCH_DURATION_S), slot=slot)
         return Decision("release", "plan wants self-consumption", slot=slot)
 
     if action == "hold":
