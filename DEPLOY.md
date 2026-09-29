@@ -960,6 +960,33 @@ waiting out. Diagnose with `--check-alignment` for that date.
 Nothing schedules this and nothing alerts on it; it is a twice-yearly manual
 check, and the gate is what protects the data in the meantime.
 
+## Monitoring that prices are held
+
+`refresh-prices.sh` can run cleanly and still leave the planner without prices: Frank
+changes its API, or the task fires before day-ahead publication and nothing retries. The
+"Which job is late" panel shows it, and `alphaess-prices-missing.yml` alerts in Grafana,
+but the alert only reaches you if a Grafana contact point is set up. The Kuma monitor
+below is the one that lands where the others do.
+
+Same shape as the efficiency and savings freshness monitors:
+
+- Monitor Type: **HTTP(s) - Keyword**, Keyword: `HELD`, Heartbeat Interval `900`
+- **Retries**: `8`, **Heartbeat Retry Interval**: `900` -- two hours of misses, the same
+  grace as the Grafana rule's `for: 2h`, so the routine 15:00 gap before the afternoon
+  refresh does not page
+- Method: `POST`, URL: `http://<nas-host>:8086/api/v2/query?org=home`
+- **Body Encoding**: JSON; headers exactly as the efficiency monitor
+- Body:
+
+  ```json
+  {"query": "import \"date\"\nimport \"timezone\"\n\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\n// Local calendar arithmetic, not \"+ N * 3600\": the day of a spring-forward change is 23h\n// long, so adding real hours to local midnight lands an hour late on it (and an hour\n// early on the autumn day). \"Through 23:00 local of the needed day\" = the midnight\n// after it, less one real hour.\ndayStart = date.truncate(t: now(), unit: 1d)\ndaysAhead = if date.hour(t: now()) >= 15 then 2d else 1d\nneededS = float(v: int(v: date.add(d: -1h, to: date.add(d: daysAhead, to: dayStart)))) / 1000000000.0\n\nfrom(bucket: \"alphaess\")\n  |> range(start: -7d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"market_price\" and r._field == \"market_price\")\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> last()\n  |> map(fn: (r) => ({\n       _time: now(),\n       _value: if (neededS - float(v: int(v: r._time)) / 1000000000.0) / 3600.0 > 0.0 then \"MISSING\" else \"HELD\"\n     }))\n  |> keep(columns: [\"_value\"])\n  |> yield(name: \"prices\")", "type": "flux"}
+  ```
+
+It answers "does `market_price` cover today (before 15:00 local) or tomorrow (from 15:00)
+through 23:00", not "how old is the newest row"; the panel description explains why that
+difference is the whole point. Keep the 15:00 switch and the through-23:00-local horizon in step with
+the panel and the Grafana rule.
+
 ## Monitoring the nightly savings job
 
 `daily-savings.sh` produces the money figure, and it fails the same four ways
