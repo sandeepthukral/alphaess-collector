@@ -103,7 +103,8 @@ def published_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z",
         reason="discharge 4500 W to 20.0%", live=True, live_soc_pct=41.2,
-        write_verified=True, actual_battery_w=-4300.0, voltages=VOLTAGES, temps=TEMPS,
+        write_verified=True, actual_battery_w=-4300.0, actual_grid_w=-433.0,
+        actual_pv_w=2100.0, actual_load_w=2233.0, voltages=VOLTAGES, temps=TEMPS,
         faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
         inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG,
         daily_battery=DAILY_BATTERY, daily_inverter=DAILY_INVERTER, daily_pv=DAILY_PV)
@@ -126,7 +127,8 @@ def degraded_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z", read_error="timed out",
         decision_kind="idle", reason="live SoC unreadable", live=True,
-        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0, voltages=VOLTAGES,
+        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0,
+        actual_grid_w=-433.0, actual_pv_w=2100.0, actual_load_w=2233.0, voltages=VOLTAGES,
         temps=TEMPS, faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
         inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG,
         daily_battery=DAILY_BATTERY, daily_inverter=DAILY_INVERTER, daily_pv=DAILY_PV)
@@ -155,8 +157,22 @@ def conditional_fields() -> set[str]:
     return published_fields() - released
 
 
+def _dispatch_pipelines(query: str) -> str:
+    """Only the `from(...)` pipelines of `query` that read `dispatch_state`.
+
+    A live tile unions the collector's `power_readings` with the dispatcher's own reading
+    (`generate-battery-plan.py`, `live_reading`), and every guard in this file is about the
+    second: the collector's fields are not ours to publish, and its hour-long `last()` window
+    is right for a 30 s poller whose silence the collector alerts already cover. Split at each
+    `from(bucket`, so whatever follows a pipeline -- a union, a pivot -- stays with it.
+    """
+    parts = re.split(r"(?=\bfrom\(bucket)", query)
+    return "".join(p for p in parts if MEASUREMENT in p)
+
+
 def dispatch_queries() -> list[tuple[str, str, str]]:
-    """(dashboard, panel title, query) for every query touching `dispatch_state`."""
+    """(dashboard, panel title, query) for every query touching `dispatch_state`, cut down to
+    its `dispatch_state` pipelines -- see `_dispatch_pipelines`."""
     out = []
     for path in sorted(DASHBOARDS.glob("*.json")):
         panels = json.loads(path.read_text()).get("panels", [])
@@ -164,7 +180,7 @@ def dispatch_queries() -> list[tuple[str, str, str]]:
             for t in panel.get("targets", []):
                 q = t.get("query", "")
                 if MEASUREMENT in q:
-                    out.append((path.name, panel.get("title", "?"), q))
+                    out.append((path.name, panel.get("title", "?"), _dispatch_pipelines(q)))
     return out
 
 
@@ -314,6 +330,7 @@ class TestConditionalFields:
         assert conditional_fields() == (
             {"expires_at", "slot_start", "slot_action", "plan_run",
              "verified", "soc_pct", "actual_battery_w",
+             "actual_grid_w", "actual_pv_w", "actual_load_w",
              "min_cell_voltage_v", "min_cell_voltage_pack",
              "max_cell_voltage_v", "max_cell_voltage_pack",
              "min_cell_temp_c", "min_cell_temp_pack",

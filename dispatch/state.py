@@ -56,6 +56,9 @@ def _decision_fields(
     daily_battery: dict | None = None,
     daily_inverter: dict | None = None,
     daily_pv: dict | None = None,
+    actual_grid_w: float | None = None,
+    actual_pv_w: float | None = None,
+    actual_load_w: float | None = None,
 ) -> dict[str, int | float | str]:
     """What the DISPATCHER knows about this tick, as opposed to what the inverter said.
 
@@ -100,6 +103,16 @@ def _decision_fields(
     # the two can be compared on the same point without a sign flip or a cross-series join.
     if actual_battery_w is not None:
         fields["actual_battery_w"] = float(actual_battery_w)
+    # The rest of what the cloud's `power_readings` carried, from this process's own reads, so
+    # a cloud outage does not blind the dashboard and the planner. NOT the collector's sign
+    # conventions throughout: grid is import-positive like `grid_power_w`, PV and load are
+    # plain magnitudes, but battery above stays charging-positive. Each gated the same way.
+    if actual_grid_w is not None:
+        fields["actual_grid_w"] = float(actual_grid_w)
+    if actual_pv_w is not None:
+        fields["actual_pv_w"] = float(actual_pv_w)
+    if actual_load_w is not None:
+        fields["actual_load_w"] = float(actual_load_w)
     # `registers.VOLTAGE_BLOCK`, read alongside temps at the same point in the tick and gated
     # the same way -- absent means the block could not be read or decoded to a plausible
     # voltage. Same MIN/MAX-across-all-packs shape as temps, cell IDs decoded but not published.
@@ -219,6 +232,9 @@ def build_fields(
     live_soc_pct: float | None = None,
     write_verified: bool | None = None,
     actual_battery_w: float | None = None,
+    actual_grid_w: float | None = None,
+    actual_pv_w: float | None = None,
+    actual_load_w: float | None = None,
     voltages: dict | None = None,
     temps: dict | None = None,
     faults: dict | None = None,
@@ -258,7 +274,7 @@ def build_fields(
         **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
                           actual_battery_w, voltages, temps, faults, limits_hourly, firmware,
                           inverter_fw, system_config, daily_battery, daily_inverter,
-                          daily_pv),
+                          daily_pv, actual_grid_w, actual_pv_w, actual_load_w),
     }
 
     # `expires_at` is when the dead man's switch runs out if nothing is written again. It is
@@ -295,6 +311,9 @@ def build_degraded_fields(
     live_soc_pct: float | None = None,
     write_verified: bool | None = None,
     actual_battery_w: float | None = None,
+    actual_grid_w: float | None = None,
+    actual_pv_w: float | None = None,
+    actual_load_w: float | None = None,
     voltages: dict | None = None,
     temps: dict | None = None,
     faults: dict | None = None,
@@ -341,7 +360,7 @@ def build_degraded_fields(
         **_decision_fields(decision_kind, reason, live, live_soc_pct, write_verified,
                           actual_battery_w, voltages, temps, faults, limits_hourly, firmware,
                           inverter_fw, system_config, daily_battery, daily_inverter,
-                          daily_pv),
+                          daily_pv, actual_grid_w, actual_pv_w, actual_load_w),
     }
     if slot:
         fields["slot_start"] = int(

@@ -230,6 +230,27 @@ class TestWhatTheDispatcherKnows:
         f = build_degraded_fields(read_error="block read failed", actual_battery_w=-312.0)
         assert f["actual_battery_w"] == -312.0
 
+    def test_grid_pv_and_load_are_carried(self):
+        """What lets the dashboard and the planner outlive a cloud outage: the rest of the
+        collector's `power_readings`, from this process's own reads."""
+        s, words = state_of()
+        f = build_fields(s, words, NOW, actual_grid_w=-433.0, actual_pv_w=2100.0,
+                         actual_load_w=560.0)
+        assert (f["actual_grid_w"], f["actual_pv_w"], f["actual_load_w"]) \
+            == (-433.0, 2100.0, 560.0)
+
+    def test_unread_grid_pv_and_load_publish_no_field_at_all(self):
+        s, words = state_of()
+        f = build_fields(s, words, NOW)
+        assert not {"actual_grid_w", "actual_pv_w", "actual_load_w"} & set(f)
+
+    def test_a_degraded_point_still_carries_grid_pv_and_load(self):
+        """Separate registers from the dispatch block, same argument as the battery reading."""
+        f = build_degraded_fields(read_error="block read failed", actual_grid_w=120.0,
+                                  actual_pv_w=0.0, actual_load_w=432.0)
+        assert (f["actual_grid_w"], f["actual_pv_w"], f["actual_load_w"]) \
+            == (120.0, 0.0, 432.0)
+
     def test_the_cell_temperatures_are_carried(self):
         """`registers.TEMP_BLOCK`, decoded before the block read and published on the same
         point. Pack IDs travel with the temperatures: a hot cell is only actionable once you

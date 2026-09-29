@@ -100,7 +100,7 @@ Mode 1 (PV-only) was tried first and also delivered 0 W, because it judges PV by
 CT (measured 2026-09-24 11:29Z). Mode 2 delivers regardless, so it CAN import: a PV drop inside
 a tick is bought from the grid until the next tick re-sizes it, and the 200 W margin absorbs
 ordinary ripple. The setpoint is capped at the inverter's own PV meter (`REG_PV_METER`, read
-only under P1): because the surplus is invariant to battery action, a frozen or misdirected P1
+every tick for publishing but only handed to the decision under P1): because the surplus is invariant to battery action, a frozen or misdirected P1
 reading would otherwise re-arm a grid-fed charge every tick, night included, with the loop alive
 so the dead man's switch never fires. An unreadable or implausible PV reading, or a cap that
 leaves no setpoint above 0 W, holds. The surplus identity is invariant to battery action, so the command does not

@@ -644,7 +644,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"soc_percent\")\n  |> last()\n",
+          "query": "// The newest of the cloud reading and the dispatcher's Modbus reading, so an\n// AlphaESS API outage does not blank this tile while the inverter is still\n// being read every minute. Same shape as the live tiles on the Battery plan\n// dashboard (generate-battery-plan.py, live_reading).\ncloud = from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"soc_percent\")\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time, _value: r._value }))\nmodbus = from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"soc_pct\")\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time, _value: r._value }))\nunion(tables: [cloud, modbus])\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> last()\n",
           "refId": "A"
         }
       ],

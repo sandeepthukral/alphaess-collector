@@ -795,6 +795,68 @@ class TestActualBatteryReading:
         assert "read_error" in point
 
 
+class TestLivePowerReadings:
+    """Grid, PV and derived load on `dispatch_state`, so a cloud outage does not blind the
+    dashboard and the planner. Measured 2026-09-29: AlphaESS's API down, `power_readings`
+    empty, and this loop still reading all three every tick without publishing them."""
+
+    def _point(self, tmp_path, monkeypatch, source, grid_w=300, pv_w=1500, battery_w=-1000,
+               p1_w=None):
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", source)
+        if p1_w is not None:
+            monkeypatch.setattr(scheduler, "fetch_p1_grid_w", lambda url, timeout=5: p1_w)
+        regs = measurement_registers(battery_power_w=battery_w)
+        regs[R.REG_GRID_POWER] = 0xFFFF if grid_w < 0 else 0
+        regs[R.REG_GRID_POWER + 1] = grid_w & 0xFFFF
+        regs[R.REG_PV_METER + 1] = pv_w
+        pub = RecordingPublisher()
+        run_scripted_tick(tmp_path, monkeypatch, ScriptedClient(regs), dry_run=True,
+                          publisher=pub)
+        return pub.points[0]
+
+    def test_inverter_source_publishes_the_ct_the_pv_meter_and_the_load(
+            self, tmp_path, monkeypatch):
+        # 1,500 W PV + 300 W import, battery charging 1,000 W (register: -1000) -> 800 W house.
+        p = self._point(tmp_path, monkeypatch, "inverter")
+        assert p["actual_grid_w"] == 300.0
+        assert p["actual_pv_w"] == 1500.0
+        assert p["actual_battery_w"] == 1000.0
+        assert p["actual_load_w"] == 800.0
+
+    def test_p1_source_publishes_the_p1_reading_not_the_ct(self, tmp_path, monkeypatch):
+        """Grid is what this tick decided on -- the published series and the surplus rule
+        must not disagree about it."""
+        p = self._point(tmp_path, monkeypatch, "p1", grid_w=84, p1_w=-433.0)
+        assert p["actual_grid_w"] == -433.0
+        assert p["actual_load_w"] == 1500.0 - 433.0 - 1000.0
+
+    def test_a_failed_pv_read_drops_pv_and_load_but_keeps_grid(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(scheduler, "GRID_SOURCE", "inverter")
+        regs = measurement_registers()
+        regs[R.REG_GRID_POWER + 1] = 250
+        pub = RecordingPublisher()
+        run_scripted_tick(tmp_path, monkeypatch,
+                          ScriptedClient(regs, fail_addrs=frozenset({R.REG_PV_METER})),
+                          dry_run=True, publisher=pub)
+        p = pub.points[0]
+        assert p["actual_grid_w"] == 250.0
+        assert "actual_pv_w" not in p
+        assert "actual_load_w" not in p
+
+    def test_inverter_source_still_hands_decide_no_pv(self, tmp_path, monkeypatch):
+        """PV is now read every tick for publishing, but only DECIDED on under P1 -- the
+        decision's inputs outside P1 are exactly what they were."""
+        seen = {}
+        real = scheduler.S.decide
+
+        def spy(*a, **kw):
+            seen["pv_w"] = kw.get("pv_w")
+            return real(*a, **kw)
+        monkeypatch.setattr(scheduler.S, "decide", spy)
+        self._point(tmp_path, monkeypatch, "inverter")
+        assert seen["pv_w"] is None
+
+
 class TestCellVoltage:
     """The wiring, mirroring `TestCellTemperature` immediately below -- same shape, a
     separate read and a separate error variable (see step 8b's comment for why)."""

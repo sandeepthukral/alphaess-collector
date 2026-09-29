@@ -1284,3 +1284,27 @@ def test_prices_alert_panel_and_kuma_body_share_the_needed_horizon():
             assert line in query, f"{name} is missing: {line}"
         assert "nowS" not in query.split("from(bucket")[0] or name in ("panel", "tile"), (
             f"{name}: nowS is unused in a prices-only query")
+
+
+# The live tiles that must survive an AlphaESS cloud outage: each reads the collector's
+# `power_readings` AND the dispatcher's own Modbus reading on `dispatch_state`, newest wins.
+# MEASURED 2026-09-29: the cloud API down, all of these read `No data` while the dispatcher
+# was still commanding the battery against a SoC it read every minute.
+LIVE_TILES = [
+    ("alphaess-battery-plan.json", "Battery Power now", "battery_power_w", "actual_battery_w"),
+    ("alphaess-battery-plan.json", "Grid Power now", "grid_power_w", "actual_grid_w"),
+    ("alphaess-battery-plan.json", "Current SoC", "soc_percent", "soc_pct"),
+    ("alphaess-dashboard.json", "Battery SoC now", "soc_percent", "soc_pct"),
+]
+
+
+@pytest.mark.parametrize("name,title,cloud_field,dispatch_field", LIVE_TILES)
+def test_live_tiles_fall_back_to_the_dispatchers_modbus_reading(
+        name, title, cloud_field, dispatch_field):
+    _dash, panels = _panels_by_title(name)
+    query = panels[title]["targets"][0]["query"]
+    assert f'r._measurement == "power_readings" and r._field == "{cloud_field}"' in query
+    assert f'r._measurement == "dispatch_state" and r._field == "{dispatch_field}"' in query
+    # Newest wins: a union regrouped into one table and reduced to its last row by time.
+    assert "union(tables: [cloud, modbus])" in query
+    assert re.search(r'group\(\)\s*\|> sort\(columns: \["_time"\]\)\s*\|> last\(\)', query)
