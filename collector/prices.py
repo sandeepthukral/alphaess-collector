@@ -5,15 +5,24 @@ writes them to the `market_price` measurement, for use by pricing.py (the
 battery-savings analysis). See DESIGN-battery-savings.md.
 
 The API returns one row per Frank billing interval -- hourly through
-2026-07-31, 15-minute from 2026-08-01 under the new settlement contract --
-each with the price broken into components that already include BTW. Slot
-length is read from each row's own from/till, never assumed, so this needs no
-code change across the cutover:
+2026-07-31, 15-minute from 2026-08-01 under the new settlement contract. The
+`resolution` argument picks the interval, and it is chosen per day (PT60M
+before the cutover, PT15M from it) because PT15M also answers for July with
+synthetic quarter-hours. Slot length is read from each row's own from/till,
+never assumed.
 
-    total = marketPrice + marketPriceTax + sourcingMarkupPrice + energyTaxPrice
+Frank's public API (frankenergie.nl/graphql, since 2026-09) no longer returns
+the four components; it returns three cumulative prices, all including BTW:
 
-`from`/`till` are UTC instants; the query's startDate is an Amsterdam *local*
-date, so one call returns that local day's rows -- 23/24/25 hourly through
+    marketPrice      wholesale
+    marketPricePlus  marketPrice + BTW on it + sourcing markup
+    allInPrice       marketPricePlus + energy tax
+
+so the components are derived: tax = BTW_RATE x marketPrice, markup =
+marketPricePlus - marketPrice - tax, energy_tax = allInPrice - marketPricePlus.
+That keeps the stored fields and `total` (= allInPrice) unchanged for
+pricing.py. `from`/`till` are UTC instants; the query's `date` is an
+Amsterdam *local* date, so one call returns that local day's rows -- 23/24/25 hourly through
 2026-07-31, 92/96/100 quarter-hourly from 2026-08-01, across DST. No
 authentication is required for market prices.
 
@@ -42,9 +51,7 @@ import requests
 from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 
-FRANK_URL = os.environ.get(
-    "FRANK_GRAPHQL_URL", "https://frank-graphql-prod.graphcdn.app/"
-)
+FRANK_URL = os.environ.get("FRANK_GRAPHQL_URL", "https://www.frankenergie.nl/graphql")
 ENERGYZERO_URL = os.environ.get(
     "ENERGYZERO_URL", "https://public.api.energyzero.nl/public/v1/prices"
 )
@@ -52,19 +59,12 @@ NL_TZ = ZoneInfo("Europe/Amsterdam")
 MEASUREMENT = "market_price"
 CUTOVER_DATE = dt.date(2026, 8, 1)
 
-# Component fields as returned by the API -> our InfluxDB field names.
-COMPONENTS = {
-    "marketPrice": "market_price",
-    "marketPriceTax": "market_price_tax",
-    "sourcingMarkupPrice": "sourcing_markup",
-    "energyTaxPrice": "energy_tax",
-}
+BTW_RATE = 0.21  # Dutch VAT; Frank's own marketPriceTax was exactly this share of marketPrice
 
 _QUERY = (
-    "query MarketPrices($startDate: Date!, $endDate: Date!) {"
-    " marketPricesElectricity(startDate: $startDate, endDate: $endDate) {"
-    " from till marketPrice marketPriceTax sourcingMarkupPrice"
-    " energyTaxPrice perUnit } }"
+    "query MarketPrices($date: String!, $resolution: PriceResolution!) {"
+    " marketPrices(date: $date, resolution: $resolution) {"
+    " electricityPrices { from till marketPrice marketPricePlus allInPrice perUnit } } }"
 )
 
 log = logging.getLogger("frank-prices")
@@ -83,6 +83,24 @@ def _parse_instant(value: str) -> dt.datetime:
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _components(r: dict) -> dict[str, float]:
+    """Split one API row's cumulative prices back into the four stored components.
+
+    Raises KeyError/TypeError/ValueError on a row missing a price. energy_tax is
+    the remainder to allInPrice, so the four always re-sum to allInPrice.
+    """
+    market = float(r["marketPrice"])
+    plus = float(r["marketPricePlus"])
+    all_in = float(r["allInPrice"])
+    tax = round(market * BTW_RATE, 6)
+    return {
+        "market_price": market,
+        "market_price_tax": tax,
+        "sourcing_markup": round(plus - market - tax, 6),
+        "energy_tax": round(all_in - plus, 6),
+    }
+
+
 def fetch_prices_for_day(local_date: dt.date) -> list[dict]:
     """Fetch one Amsterdam local day's per-slot prices (hourly through
     2026-07-31, 15-minute from 2026-08-01).
@@ -92,8 +110,8 @@ def fetch_prices_for_day(local_date: dt.date) -> list[dict]:
     for that day (e.g. a future day before day-ahead publication).
     """
     variables = {
-        "startDate": local_date.isoformat(),
-        "endDate": (local_date + dt.timedelta(days=1)).isoformat(),
+        "date": local_date.isoformat(),
+        "resolution": "PT15M" if local_date >= CUTOVER_DATE else "PT60M",
     }
     resp = requests.post(
         FRANK_URL,
@@ -111,7 +129,7 @@ def fetch_prices_for_day(local_date: dt.date) -> list[dict]:
             log.info("No prices published yet for %s", local_date)
             return []
         raise RuntimeError(f"GraphQL error for {local_date}: {body['errors']}")
-    raw = (body.get("data") or {}).get("marketPricesElectricity") or []
+    raw = ((body.get("data") or {}).get("marketPrices") or {}).get("electricityPrices") or []
 
     rows: list[dict] = []
     for r in raw:
@@ -119,7 +137,7 @@ def fetch_prices_for_day(local_date: dt.date) -> list[dict]:
             log.warning("Unexpected perUnit=%s for %s, skipping row", r["perUnit"], local_date)
             continue
         try:
-            comps = {out: float(r[api]) for api, out in COMPONENTS.items()}
+            comps = _components(r)
         except (KeyError, TypeError, ValueError):
             log.warning("Row missing/invalid price components for %s: %s", local_date, r)
             continue
