@@ -436,9 +436,9 @@ panels.append(stat(
 # Both fields are read as the last point in the past hour rather than over the dashboard's
 # range, because the dashboard's range runs into the future - the plan's horizon - and
 # `last()` over that would still be the newest reading, but a range starting days back is a
-# needlessly wide scan for one point. An empty panel therefore means BOTH the collector and
-# the dispatcher have been silent for an hour (see `live_reading`), which is worth seeing as
-# blank rather than as an hours-old number.
+# needlessly wide scan for one point. An empty panel therefore means the collector has been
+# silent for an hour AND the dispatcher for five minutes (see `live_reading`), which is worth
+# seeing as blank rather than as an hours-old number.
 panels.append(stat(
     9, "Battery Power now",
     "Positive is charging, negative is discharging - the same sign convention as the main "

@@ -743,7 +743,7 @@ read once more per tick, after the write, purely so it can be published (see bel
 | `verified` | int 0/1 | did the write land | **only when something was commanded** | `1` |
 | `actual_battery_w` | float, signed | `REG_BATTERY_POWER`, **sign-flipped** | **only when that read worked** | `−4400` |
 | `actual_grid_w` | float, signed | P1 under `GRID_SOURCE=p1`, else `REG_GRID_POWER`; import-positive | **only when that read worked and was plausible** | `−433` |
-| `actual_pv_w` | float | `REG_PV_METER` (`0x00A1`) | **only when that read worked and was plausible** | `2100` |
+| `actual_pv_w` | float, ≥ 0 | `REG_PV_METER` (`0x00A1`); standby draw down to −`PV_STANDBY_W` clamped to 0 | **only when that read worked and was plausible** | `2100` |
 | `actual_load_w` | float | `pv + grid − actual_battery_w`, the same identity the collector's `load_power_w` is | **only when all three were read** | `560` |
 | `min_cell_temp_c` / `max_cell_temp_c` | float, signed | `0x010D` / `0x0110`, `raw × 0.1` | **only when that read worked and decoded plausibly** | `18.4` |
 | `min_cell_temp_pack` / `max_cell_temp_pack` | int | `0x010B` / `0x010E` | **same** | `3` |
@@ -760,7 +760,12 @@ the inverter takes one Modbus connection, which this loop holds. So when the clo
 (2026-09-29) this was the only process that could still see the house. It already read grid
 and battery every tick for the surplus rule, and PV under P1; outside P1 it now also reads PV,
 at step 8a -- after the write, because the value is only published and a timeout there must
-not delay the command, and not at all on a tick where the inverter has already failed a read.
+not delay the command, and not at all on a tick where the inverter has already failed a read
+(SoC, grid/battery, the dispatch block or the verify). Outside P1 the three terms of the load
+are therefore seconds apart -- grid and battery before the write, PV after it -- which is
+noise at a 60 s cadence and the price of keeping reads out of the command's way. PV a few
+watts below zero is micro-inverter standby draw and is published as 0 W, like the cloud's
+`pv_power_w`; more than `PV_STANDBY_W` below zero is a fault and is published as nothing.
 Grid is whatever the tick decided on, so the published series and the surplus rule never
 disagree. The live dashboard tiles show the newer of the two sources. The battery-planning
 repo reads `soc_pct` as its fallback SoC, so renaming it breaks planning during a cloud outage.

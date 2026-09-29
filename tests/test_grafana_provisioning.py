@@ -1308,3 +1308,21 @@ def test_live_tiles_fall_back_to_the_dispatchers_modbus_reading(
     # Newest wins: a union regrouped into one table and reduced to its last row by time.
     assert "union(tables: [cloud, modbus])" in query
     assert re.search(r'group\(\)\s*\|> sort\(columns: \["_time"\]\)\s*\|> last\(\)', query)
+
+
+
+def test_the_overview_soc_tile_is_the_generators_live_reading():
+    """alphaess-dashboard.json has no generator, so its SoC tile is a hand copy of
+    `live_reading("soc_percent", "soc_pct", ...)` from generate-battery-plan.py. Compared
+    statement for statement, comments and the yield aside, so an edit to either side that
+    the other does not get fails here rather than leaving two tiles that disagree."""
+    def body(query):
+        lines = [line for line in query.splitlines()
+                 if line.strip() and not line.lstrip().startswith("//")
+                 and "yield(" not in line]
+        return "\n".join(lines)
+
+    _d, overview = _panels_by_title("alphaess-dashboard.json")
+    _d, plan = _panels_by_title("alphaess-battery-plan.json")
+    assert body(overview["Battery SoC now"]["targets"][0]["query"]) \
+        == body(plan["Current SoC"]["targets"][0]["query"])

@@ -637,31 +637,57 @@ async def _read_weekly_block(cache: dict, now: dt.datetime, name: str, read_word
     return decoded
 
 
+def _note_read_state(cache: dict, key: str, kind: str, error: str, consequence: str,
+                     recovered: str) -> None:
+    """Log a published-only read's failure ONCE PER TRANSITION, not once per tick.
+
+    A block this firmware does not support does not fail intermittently, it fails at 60 s
+    intervals forever -- 1,440 identical WARNINGs a day burying the lines that mean something.
+    Same trade `StatePublisher._failing` and the magnitude-shortfall line already make. The
+    repeats stay at debug rather than being dropped, so `--log-level DEBUG` still answers "is
+    it still failing right now".
+
+    `kind` is "" (read fine), "failed" or "implausible", and a CHANGE of kind warns again: a
+    register that stops timing out and starts returning a value wrong by a factor is a decode
+    or scale bug surfacing, which is exactly the news a debug line would bury.
+    """
+    was = cache.get(key, "")
+    if kind and kind != was:
+        log.warning("%s -- %s (further failures at debug)", error, consequence)
+    elif kind:
+        log.debug("%s -- %s", error, consequence)
+    elif was:
+        log.info("%s", recovered)
+    cache[key] = kind
+
+
+# Below zero by this much, the AC PV meter is read as standby draw and published as 0 W; further
+# below, as implausible. Micro-inverters draw a few watts from the grid at night, and the
+# cloud's `pv_power_w` is never negative, so publishing -4 W would pull `actual_load_w` down by
+# the same 4 W for nothing. Far below it is not standby, it is a sign or decode fault.
+PV_STANDBY_W = 50
+
+
 async def _read_pv(inv: Inverter, cache: dict) -> int | None:
     """The inverter's AC PV meter, or None when the read failed or looked implausible.
 
-    ONE WARNING PER TRANSITION, as for the cell voltages and temperatures: outside P1 this is
-    read every tick for publishing alone, so a register that stops answering would otherwise
-    log 1,440 identical WARNINGs a day. What the failure COSTS is said per source -- under P1
-    it vetoes a harvest this tick, otherwise the PV and load fields go unpublished.
+    Logged once per transition (`_note_read_state`): outside P1 this is read every tick for
+    publishing alone. What the failure COSTS is said per source -- under P1 it vetoes a harvest
+    this tick, otherwise the PV and load fields go unpublished.
+
+    RAW, standby draw included: this is also the decision input under P1, where a small
+    negative caps a harvest at "nothing" exactly as 0 W would. The standby clamp is applied
+    only to the published value, at step 8a.
     """
     cost = "no P1 harvest this tick" if GRID_SOURCE == "p1" else "publishing no PV or load"
-    pv_w, error = None, ""
+    pv_w, kind, error = None, "", ""
     try:
         pv_w = await inv.read(R.REG_PV_METER, 2, signed=True)
         if abs(pv_w) > IMPLAUSIBLE_POWER_W:
-            pv_w, error = None, f"implausible PV meter reading {pv_w:+d}W"
+            pv_w, kind, error = None, "implausible", f"implausible PV meter reading {pv_w:+d}W"
     except OSError as e:
-        error = f"PV meter read failed: {e}"
-
-    was_failing = cache.get("pv_error", "")
-    if error and not was_failing:
-        log.warning("%s -- %s (further failures at debug)", error, cost)
-    elif error:
-        log.debug("%s -- %s", error, cost)
-    elif was_failing:
-        log.info("PV meter readings recovered")
-    cache["pv_error"] = error
+        kind, error = "failed", f"PV meter read failed: {e}"
+    _note_read_state(cache, "pv_error", kind, error, cost, "PV meter readings recovered")
     return pv_w
 
 
@@ -730,7 +756,17 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
             p1_failed = True
     cache["p1_result"] = p1_result
 
+    # One try for both, so a grid timeout does not go on to spend a second ~12 s retry ladder
+    # on the battery in front of the write. But a grid value that WAS read survives a battery
+    # read failing after it: `grid_w` is only ever assigned by a read that returned, so there
+    # is nothing to reset, and throwing a good reading away would publish "not read" for a
+    # value that was.
+    #
+    # `surplus_read_failed` is not folded into `read_error`: that one decides whether this
+    # tick's point is the degraded shape, and the dispatch block can be perfectly readable
+    # while this register is not. Step 8a keys on both.
     batt_w = None
+    surplus_read_failed = False
     try:
         if GRID_SOURCE != "p1":
             grid_w = await inv.read(R.REG_GRID_POWER, 2, signed=True)
@@ -738,9 +774,7 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     except OSError as e:
         log.warning("surplus read failed: %s -- a met charge target will hold, not "
                     "release", e)
-        batt_w = None
-        if GRID_SOURCE != "p1":
-            grid_w = None
+        surplus_read_failed = True
 
     if p1_failed:
         log.warning("P1 fetch failed: %s -- a met charge target will hold, not release",
@@ -949,20 +983,33 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # Published, not decided on, so read AFTER the write -- the argument step 8b makes at
     # length: a Modbus timeout costs the client's full ~12 s retry ladder, and spent in front of
     # the write it delays the command. Under P1 the read already happened at step 4, where it
-    # IS a decision input. Skipped when the inverter has already failed a read this tick, as
-    # the slow tiers below are: a dead inverter would otherwise add another full ladder to a
-    # tick that is already late.
-    if GRID_SOURCE != "p1" and not read_error:
+    # IS a decision input. Skipped when this tick has already seen the inverter fail a read --
+    # SoC, the surplus pair, the dispatch block or the verify: a dead inverter would otherwise
+    # add another full ladder to a tick that is already late.
+    #
+    # THE THREE TERMS OF THE LOAD ARE SECONDS APART outside P1: grid and battery from step 4,
+    # PV from here, after the write and the verify -- a few seconds normally, more on a slow
+    # verify. Accepted: at a 60 s cadence that skew is noise beside the minute each point
+    # stands for, and closing it would put the read back in front of the command, which is the
+    # trade this step exists to refuse. Under P1 all three come from step 4.
+    if GRID_SOURCE != "p1" and not read_error and not surplus_read_failed:
         pv_w = await _read_pv(inv, cache)
 
     # With the AlphaESS cloud down this process is the only thing that can see the house: the
     # inverter takes one Modbus connection and this loop holds it. Grid is whatever this tick
     # decided on (P1 under GRID_SOURCE=p1, the inverter's CT otherwise), so the published
-    # series and the surplus rule never disagree about it. Dropped when implausible, like the
-    # battery reading: step 4's guard cannot say which of the two was wrong, so it drops both.
+    # series and the surplus rule never disagree about it.
+    #
+    # Grid is dropped only when GRID ITSELF is implausible. Step 4's guard nulls the battery
+    # and the surplus when either reading is out of range, because it cannot tell which one
+    # was wrong -- but a grid that is in range on its own is still published; only a load,
+    # which needs the battery too, is lost.
     actual_grid_w = (float(grid_w) if grid_w is not None and abs(grid_w) <= IMPLAUSIBLE_POWER_W
                      else None)
-    actual_pv_w = float(pv_w) if pv_w is not None else None
+    # Standby draw (a few watts negative at night) published as 0 W, like the cloud's
+    # `pv_power_w`; further below that is a fault, and published as nothing. See PV_STANDBY_W.
+    actual_pv_w = (None if pv_w is None or pv_w < -PV_STANDBY_W
+                   else float(max(pv_w, 0)))
     # House load from the identity `load = pv + grid + battery` (battery discharge-positive),
     # which is all the cloud's `pload` ever was -- see `collector.parse_fields`. Only when all
     # three were read this tick: a missing term is a gap, not a zero.
@@ -998,45 +1045,27 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # `registers.TEMP_PLAUSIBLE_C`/`VOLTAGE_PLAUSIBLE_V`, and they degrade exactly as the
     # implausible power reading above does: publish nothing rather than a number that is wrong
     # by a factor, or a zero-filled block's freezing/dead-cell battery.
-    voltage_error = ""
+    voltage_error, voltage_kind = "", ""
     try:
         voltages = R.decode_voltage_block(await inv.read_voltage_block())
         if not R.voltage_plausible(voltages):
-            voltage_error, voltages = f"implausible cell voltages {voltages}", None
+            voltage_kind, voltage_error = "implausible", f"implausible cell voltages {voltages}"
+            voltages = None
     except (OSError, ValueError) as e:
-        voltage_error, voltages = f"voltage block read failed: {e}", None
+        voltage_kind, voltage_error, voltages = "failed", f"voltage block read failed: {e}", None
+    _note_read_state(cache, "voltage_error", voltage_kind, voltage_error,
+                     "publishing no voltage", "cell voltage readings recovered")
 
-    was_voltage_failing = cache.get("voltage_error", "")
-    if voltage_error and not was_voltage_failing:
-        log.warning("%s -- publishing no voltage (further failures at debug)", voltage_error)
-    elif voltage_error:
-        log.debug("%s", voltage_error)
-    elif was_voltage_failing:
-        log.info("cell voltage readings recovered")
-    cache["voltage_error"] = voltage_error
-
-    temp_error = ""
+    temp_error, temp_kind = "", ""
     try:
         temps = R.decode_temp_block(await inv.read_temp_block())
         if not R.temps_plausible(temps):
-            temp_error, temps = f"implausible cell temperatures {temps}", None
+            temp_kind, temp_error = "implausible", f"implausible cell temperatures {temps}"
+            temps = None
     except (OSError, ValueError) as e:
-        temp_error, temps = f"temp block read failed: {e}", None
-
-    # ONE WARNING PER TRANSITION, not one per tick, and this is the failure that most needs it:
-    # a block this firmware does not support does not fail intermittently, it fails at 60 s
-    # intervals forever -- 1,440 identical WARNINGs a day burying the lines that mean
-    # something. Same trade `StatePublisher._failing` and the magnitude-shortfall line already
-    # make. The repeats stay at debug rather than being dropped, so `--log-level DEBUG` still
-    # answers "is it still failing right now".
-    was_failing = cache.get("temp_error", "")
-    if temp_error and not was_failing:
-        log.warning("%s -- publishing no temperature (further failures at debug)", temp_error)
-    elif temp_error:
-        log.debug("%s", temp_error)
-    elif was_failing:
-        log.info("cell temperature readings recovered")
-    cache["temp_error"] = temp_error
+        temp_kind, temp_error, temps = "failed", f"temp block read failed: {e}", None
+    _note_read_state(cache, "temp_error", temp_kind, temp_error,
+                     "publishing no temperature", "cell temperature readings recovered")
 
     # 8c. Hourly health tier: fault/warning words, and the inverter's own power limits
     # republished under the health-dashboard's field names.
@@ -1191,8 +1220,9 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         # Read at step 4, from a register the dispatch block does not touch -- present even on
         # a tick that could not read the block at all, same argument as `live_soc_pct` above.
         "actual_battery_w": actual_battery_w,
-        # Read at step 4 like the battery, and derived from the three -- see there. Absent
-        # means not read (or implausible) this tick, never zero.
+        # Grid at step 4 like the battery; PV at step 4 under P1 and at step 8a otherwise;
+        # load derived from the three at 8a -- see there. Absent means not read (or
+        # implausible) this tick, never zero.
         "actual_grid_w": actual_grid_w,
         "actual_pv_w": actual_pv_w,
         "actual_load_w": actual_load_w,
@@ -1200,8 +1230,9 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         # looked implausible -- so an absent voltage/temperature field means "not read", never
         # "dead cell"/"cold".
         #
-        # DELIBERATELY THE LAST READS OF THE TICK, unlike the two above: nothing decides on
-        # them, so they belong behind the write rather than in front of it. See step 8b.
+        # DELIBERATELY BEHIND THE WRITE, unlike SoC and the battery above: nothing decides on
+        # them, so they do not get to delay a command. Same for PV outside P1 (step 8a) and
+        # the health tiers below. See step 8b.
         "voltages": voltages,
         "temps": temps,
         # Read at steps 8c/8d, each `None` whenever its gate had not elapsed this tick or its

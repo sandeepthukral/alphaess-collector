@@ -65,7 +65,7 @@ flowchart TD
     M -- yes --> SKIP[SKIP · log only]
     M -- no --> N["apply via Modbus (Command) / release() /<br/>idle → release once then go silent"]
     N --> O["verify via register readback<br/>publish verified=0 on a mismatch,<br/>but alarm only on 2 consecutive ticks"]
-    O --> LIVE["GRID_SOURCE=inverter and no failed read this tick:<br/>read PV meter (under P1 it was read before deciding)<br/>derive grid/PV/load for publishing · implausible → NO field<br/>published only, never decides"]
+    O --> LIVE["only if GRID_SOURCE=inverter and no read failed this tick:<br/>read PV meter (under P1 it was read before deciding)<br/>always: derive grid/PV/load for publishing<br/>PV standby draw → 0 W · implausible → NO field<br/>published only, never decides"]
     LIVE --> TEMP["read min/max cell voltage & temp<br/>published only, never decides"]
     TEMP --> HEALTH["hourly/weekly health gates<br/>fault block (24 words + fault/warning popcounts)<br/>+ firmware/config · published only, never decides"]
     HEALTH --> DAILY["daily health gate<br/>SoH + lifetime charge/discharge/grid-charge, lifetime PV, heatsink<br/>3 independent gates · implausible read publishes NO field<br/>published only, never decides"]

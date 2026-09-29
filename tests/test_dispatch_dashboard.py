@@ -181,6 +181,12 @@ def _dispatch_pipelines(query: str) -> str:
         if "from(bucket" in part:
             other = re.search(r'r\._measurement\s*==\s*"([^"]+)"', part)
             assert other, f"a pipeline naming no measurement was dropped unchecked:\n{part}"
+            # The split keeps whatever FOLLOWS a pipeline with it, so a union written after a
+            # non-dispatch pipeline would be dropped with that pipeline -- and anything read
+            # from the combined rows with it. Put the `dispatch_state` pipeline last.
+            assert not re.search(r"\b(union|join)\s*\(", part), (
+                f"a union/join trails a non-dispatch pipeline and would be dropped unchecked; "
+                f"define the dispatch_state pipeline last:\n{part}")
         else:
             code = "\n".join(line.split("//")[0] for line in part.splitlines())
             assert not re.search(r"\br\.[A-Za-z_]", code), (
@@ -215,6 +221,18 @@ union(tables: [cloud, modbus])
     def test_refuses_to_drop_a_preamble_that_reads_a_row_field(self):
         q = "f = (r) => r.setpoint_w * 2\n" + self.MIXED
         with pytest.raises(AssertionError, match="preamble reading a row field"):
+            _dispatch_pipelines(q)
+
+    def test_refuses_to_drop_a_union_that_trails_a_non_dispatch_pipeline(self):
+        """The order the round-2 review found: dispatch first, cloud last, so the union and
+        anything reading its rows would travel with the dropped cloud pipeline."""
+        q = ('''modbus = from(bucket: "alphaess")
+  |> filter(fn: (r) => r._measurement == "dispatch_state" and r._field == "soc_pct")
+cloud = from(bucket: "alphaess")
+  |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "soc_percent")
+union(tables: [modbus, cloud]) |> map(fn: (r) => ({ r with _value: r.soc_pct }))
+''')
+        with pytest.raises(AssertionError, match="union/join trails"):
             _dispatch_pipelines(q)
 
     def test_a_comment_mentioning_a_field_is_not_a_read(self):
