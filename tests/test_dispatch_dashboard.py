@@ -16,6 +16,8 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 import registers as R
 from state import build_degraded_fields, build_fields
 
@@ -103,7 +105,8 @@ def published_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z",
         reason="discharge 4500 W to 20.0%", live=True, live_soc_pct=41.2,
-        write_verified=True, actual_battery_w=-4300.0, voltages=VOLTAGES, temps=TEMPS,
+        write_verified=True, actual_battery_w=-4300.0, actual_grid_w=-433.0,
+        actual_pv_w=2100.0, actual_load_w=2233.0, voltages=VOLTAGES, temps=TEMPS,
         faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
         inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG,
         daily_battery=DAILY_BATTERY, daily_inverter=DAILY_INVERTER, daily_pv=DAILY_PV)
@@ -126,7 +129,8 @@ def degraded_field_values() -> dict:
         slot={"start": "2026-08-15T18:15:00Z", "action": "discharge"},
         plan_run="2026-08-15T15:00:00Z", read_error="timed out",
         decision_kind="idle", reason="live SoC unreadable", live=True,
-        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0, voltages=VOLTAGES,
+        live_soc_pct=41.2, write_verified=False, actual_battery_w=-4300.0,
+        actual_grid_w=-433.0, actual_pv_w=2100.0, actual_load_w=2233.0, voltages=VOLTAGES,
         temps=TEMPS, faults=FAULTS, limits_hourly=LIMITS_HOURLY, firmware=FIRMWARE,
         inverter_fw=INVERTER_FW, system_config=SYSTEM_CONFIG,
         daily_battery=DAILY_BATTERY, daily_inverter=DAILY_INVERTER, daily_pv=DAILY_PV)
@@ -155,8 +159,88 @@ def conditional_fields() -> set[str]:
     return published_fields() - released
 
 
+def _dispatch_pipelines(query: str) -> str:
+    """Only the `from(...)` pipelines of `query` that read `dispatch_state`.
+
+    A live tile unions the collector's `power_readings` with the dispatcher's own reading
+    (`generate-battery-plan.py`, `live_reading`), and every guard in this file is about the
+    second: the collector's fields are not ours to publish, and its hour-long `last()` window
+    is right for a 30 s poller whose silence the collector alerts already cover. Split at each
+    `from(bucket`, so whatever follows a pipeline -- a union, a pivot -- stays with it.
+
+    Dropping is only safe for what can be ACCOUNTED FOR, so anything else fails here rather
+    than slipping past the guards: a pipeline must name the other measurement it reads, and a
+    preamble (imports, helper lambdas, comments) must not read a row field. A `from(` that
+    reached `dispatch_state` through a variable, or a helper reading `r.some_field`, would
+    otherwise leave every contract in this file green without having checked it.
+    """
+    parts = re.split(r"(?=\bfrom\(bucket)", query)
+    for part in parts:
+        if MEASUREMENT in part:
+            continue
+        if "from(bucket" in part:
+            other = re.search(r'r\._measurement\s*==\s*"([^"]+)"', part)
+            assert other, f"a pipeline naming no measurement was dropped unchecked:\n{part}"
+            # The split keeps whatever FOLLOWS a pipeline with it, so a union written after a
+            # non-dispatch pipeline would be dropped with that pipeline -- and anything read
+            # from the combined rows with it. Put the `dispatch_state` pipeline last.
+            assert not re.search(r"\b(union|join)\s*\(", part), (
+                f"a union/join trails a non-dispatch pipeline and would be dropped unchecked; "
+                f"define the dispatch_state pipeline last:\n{part}")
+        else:
+            code = "\n".join(line.split("//")[0] for line in part.splitlines())
+            assert not re.search(r"\br\.[A-Za-z_]", code), (
+                f"a preamble reading a row field was dropped unchecked:\n{part}")
+    return "".join(p for p in parts if MEASUREMENT in p)
+
+
+
+class TestDispatchPipelines:
+    """The cut-down `dispatch_queries` hands every guard in this file. Keeping too little is
+    how a guard goes quiet, so the refusals are pinned, not just the happy path."""
+
+    MIXED = ('''import "strings"
+cloud = from(bucket: "alphaess")
+  |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "soc_percent")
+  |> map(fn: (r) => ({ _time: r._time, _value: r._value }))
+modbus = from(bucket: "alphaess")
+  |> filter(fn: (r) => r._measurement == "dispatch_state" and r._field == "soc_pct")
+union(tables: [cloud, modbus])
+''')
+
+    def test_keeps_the_dispatch_pipeline_and_what_follows_it(self):
+        kept = _dispatch_pipelines(self.MIXED)
+        assert '"soc_pct"' in kept and "union(" in kept
+        assert "power_readings" not in kept
+
+    def test_refuses_to_drop_a_pipeline_naming_no_measurement(self):
+        q = 'x = from(bucket: "alphaess") |> filter(fn: (r) => r._field == m)\n' + self.MIXED
+        with pytest.raises(AssertionError, match="naming no measurement"):
+            _dispatch_pipelines(q)
+
+    def test_refuses_to_drop_a_preamble_that_reads_a_row_field(self):
+        q = "f = (r) => r.setpoint_w * 2\n" + self.MIXED
+        with pytest.raises(AssertionError, match="preamble reading a row field"):
+            _dispatch_pipelines(q)
+
+    def test_refuses_to_drop_a_union_that_trails_a_non_dispatch_pipeline(self):
+        """The order the round-2 review found: dispatch first, cloud last, so the union and
+        anything reading its rows would travel with the dropped cloud pipeline."""
+        q = ('''modbus = from(bucket: "alphaess")
+  |> filter(fn: (r) => r._measurement == "dispatch_state" and r._field == "soc_pct")
+cloud = from(bucket: "alphaess")
+  |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "soc_percent")
+union(tables: [modbus, cloud]) |> map(fn: (r) => ({ r with _value: r.soc_pct }))
+''')
+        with pytest.raises(AssertionError, match="union/join trails"):
+            _dispatch_pipelines(q)
+
+    def test_a_comment_mentioning_a_field_is_not_a_read(self):
+        _dispatch_pipelines("// r.setpoint_w is charging-positive\n" + self.MIXED)
+
 def dispatch_queries() -> list[tuple[str, str, str]]:
-    """(dashboard, panel title, query) for every query touching `dispatch_state`."""
+    """(dashboard, panel title, query) for every query touching `dispatch_state`, cut down to
+    its `dispatch_state` pipelines -- see `_dispatch_pipelines`."""
     out = []
     for path in sorted(DASHBOARDS.glob("*.json")):
         panels = json.loads(path.read_text()).get("panels", [])
@@ -164,7 +248,7 @@ def dispatch_queries() -> list[tuple[str, str, str]]:
             for t in panel.get("targets", []):
                 q = t.get("query", "")
                 if MEASUREMENT in q:
-                    out.append((path.name, panel.get("title", "?"), q))
+                    out.append((path.name, panel.get("title", "?"), _dispatch_pipelines(q)))
     return out
 
 
@@ -314,6 +398,7 @@ class TestConditionalFields:
         assert conditional_fields() == (
             {"expires_at", "slot_start", "slot_action", "plan_run",
              "verified", "soc_pct", "actual_battery_w",
+             "actual_grid_w", "actual_pv_w", "actual_load_w",
              "min_cell_voltage_v", "min_cell_voltage_pack",
              "max_cell_voltage_v", "max_cell_voltage_pack",
              "min_cell_temp_c", "min_cell_temp_pack",

@@ -54,6 +54,39 @@ on 2026-09-03 still holding `192.168.2.105`, meaning the NAS had already moved o
 `192.168.68.0/24` per `router-migration.md` while the documentation here still named the old
 subnet. Check what each monitor actually points at before trusting any address written down.
 
+**19. A cloud that answers with a frozen reading looks fresh.** Found in review, 2026-09-29.
+`collector.py` writes each `power_readings` point with no `.time()`, so InfluxDB stamps it
+with the moment the POLL returned, not the moment AlphaESS measured it. If the Open API stays
+up but keeps serving the same `getLastPowerData` body -- a stuck upstream cache, an inverter
+that stopped reporting to the cloud while its Modbus side kept working -- every poll writes a
+point stamped "now" carrying an hours-old SoC, and everything downstream believes it:
+
+- battery-planning `influx_source.latestSocPercent()` takes the cloud SoC outright while it is
+  at most `CLOUD_SOC_FRESH_MINUTES` (5) old. A frozen value is always 30 s old by that clock,
+  so it beats the dispatcher's genuinely live `dispatch_state.soc_pct` and the plan starts
+  from the wrong charge -- the exact outage the fallback was built for, in its quiet form.
+- The live tiles (`generate-battery-plan.py` `live_reading`, the Overview "Battery SoC now")
+  pick the newest of the two sources by `_time`, so they show the frozen number too.
+- `alphaess-collector-stale` and the "Collector" health tiles key on the age of the newest
+  sample, so they stay green.
+
+Not a regression -- before the fallback existed the planner read the same frozen value with
+no alternative at all. Fix, in order:
+
+1. Run `python collector/collector.py --once` and check whether the raw `getLastPowerData`
+   body carries its own measurement timestamp (a field like `uploadTime`/`time` -- unverified,
+   no current code reads one). If it does, write the point with `.time(<that>)` so `_time`
+   means "measured at", and the 5-minute rule and the tiles work unchanged. Mind the
+   collector-stale alert and the gap-baseline query (105-114 samples/hour): a stuck upstream
+   would then show as a real gap, which is the point, but check nothing dedupes on `_time`.
+2. If it does not, detect staleness from the values: a SoC and battery power identical across
+   N consecutive polls while `dispatch_state.actual_battery_w` is non-zero is frozen. Cheapest
+   place is the planner -- compare the two sources' SoC and prefer the dispatcher when they
+   disagree by more than a few points -- but that only protects the planner, not the tiles.
+3. Either way, add a test in battery-planning for "cloud fresh by `_time` but disagreeing with
+   the dispatcher", and record which source the plan started from (`app_setting`), deferred
+   from the same review.
+
 ---
 
 ## Dispatch

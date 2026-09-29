@@ -197,7 +197,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> last()\n  |> map(fn: (r) => ({ r with _value: -r._value }))\n  |> yield(name: \"battery now\")\n",
+          "query": "cloud = from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"battery_power_w\")\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time, _value: -r._value }))\nmodbus = from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"actual_battery_w\")\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time, _value: r._value }))\nunion(tables: [cloud, modbus])\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> last()\n  |> yield(name: \"battery now\")\n",
           "refId": "A"
         }
       ],
@@ -261,7 +261,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> last()\n  |> yield(name: \"grid now\")\n",
+          "query": "cloud = from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"grid_power_w\")\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time, _value: r._value }))\nmodbus = from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"actual_grid_w\")\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time, _value: r._value }))\nunion(tables: [cloud, modbus])\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> last()\n  |> yield(name: \"grid now\")\n",
           "refId": "A"
         }
       ],
@@ -776,7 +776,7 @@
             "type": "influxdb",
             "uid": "${DS_ALPHAESS}"
           },
-          "query": "from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"soc_percent\")\n  |> last()\n  |> yield(name: \"soc now\")\n",
+          "query": "cloud = from(bucket: \"alphaess\")\n  |> range(start: -1h)\n  |> filter(fn: (r) => r._measurement == \"power_readings\" and r._field == \"soc_percent\")\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time, _value: r._value }))\nmodbus = from(bucket: \"alphaess\")\n  |> range(start: -5m)\n  |> filter(fn: (r) => r._measurement == \"dispatch_state\" and r._field == \"soc_pct\")\n  |> last()\n  |> map(fn: (r) => ({ _time: r._time, _value: r._value }))\nunion(tables: [cloud, modbus])\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> last()\n  |> yield(name: \"soc now\")\n",
           "refId": "A"
         }
       ],

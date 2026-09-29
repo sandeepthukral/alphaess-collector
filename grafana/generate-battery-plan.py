@@ -186,6 +186,42 @@ union(tables: [past, future])
 #
 # What is left here is a read. `exact` says whether the number does what it claims; when it
 # does not, `extra_intervals` counts the trades that go against the plan.
+
+def live_reading(cloud_field, dispatch_field, name, negate_cloud=False):
+    """The newest of the collector's cloud reading and the dispatcher's Modbus reading.
+
+    Two sources for one number because either can go quiet on its own. The collector polls
+    the AlphaESS cloud, and on 2026-09-29 that API went down and every live tile here read
+    `No data` while the dispatcher was still reading the same inverter every minute over
+    Modbus -- and commanding it. `dispatch_state` now carries those readings too, so the tile
+    shows whichever arrived last rather than going blank with one source still healthy.
+
+    The Modbus side looks back five minutes, not an hour: `dispatch_state` is written every
+    tick, and a dead dispatcher leaves its last point standing forever, so a wider window
+    would show a minutes-old reading as current (`TestStalenessGuards`). The cloud side keeps
+    the hour it always had.
+
+    `negate_cloud` flips `battery_power_w` (discharge-positive) into the dashboard's
+    charging-positive convention; the dispatcher already publishes charging-positive.
+    """
+    flip = "-r._value" if negate_cloud else "r._value"
+    return f'''cloud = from(bucket: "alphaess")
+  |> range(start: -1h)
+  |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "{cloud_field}")
+  |> last()
+  |> map(fn: (r) => ({{ _time: r._time, _value: {flip} }}))
+modbus = from(bucket: "alphaess")
+  |> range(start: -5m)
+  |> filter(fn: (r) => r._measurement == "dispatch_state" and r._field == "{dispatch_field}")
+  |> last()
+  |> map(fn: (r) => ({{ _time: r._time, _value: r._value }}))
+union(tables: [cloud, modbus])
+  |> group()
+  |> sort(columns: ["_time"])
+  |> last()
+  |> yield(name: "{name}")
+'''
+
 def threshold_line(action, series):
     """A stepped dashed line: each session's threshold, drawn across that session only.
 
@@ -401,31 +437,22 @@ panels.append(stat(
 # range, because the dashboard's range runs into the future - the plan's horizon - and
 # `last()` over that would still be the newest reading, but a range starting days back is a
 # needlessly wide scan for one point. An empty panel therefore means the collector has been
-# silent for an hour, which is worth seeing as blank rather than as an hours-old number.
+# silent for an hour AND the dispatcher for five minutes (see `live_reading`), which is worth
+# seeing as blank rather than as an hours-old number.
 panels.append(stat(
     9, "Battery Power now",
     "Positive is charging, negative is discharging - the same sign convention as the main "
     "AlphaESS dashboard, and the opposite of the raw `battery_power_w` field, which counts "
     "discharge as positive. Green is charging, red is discharging.",
-    '''from(bucket: "alphaess")
-  |> range(start: -1h)
-  |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "battery_power_w")
-  |> last()
-  |> map(fn: (r) => ({ r with _value: -r._value }))
-  |> yield(name: "battery now")
-''', "watt", None, 4, 4,
+    live_reading("battery_power_w", "actual_battery_w", "battery now", negate_cloud=True),
+    "watt", None, 4, 4,
     [{"color": "red", "value": None}, {"color": "green", "value": 0}]))
 
 panels.append(stat(
     10, "Grid Power now",
     "Positive is drawing from the grid, negative is returning to it. Around zero means the "
     "house is running off solar and battery.",
-    '''from(bucket: "alphaess")
-  |> range(start: -1h)
-  |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "grid_power_w")
-  |> last()
-  |> yield(name: "grid now")
-''', "watt", None, 8, 4,
+    live_reading("grid_power_w", "actual_grid_w", "grid now"), "watt", None, 8, 4,
     [{"color": "text", "value": None}]))
 
 panels.append(stat(
@@ -621,12 +648,7 @@ panels.append(stat(
     26, "Current SoC",
     "The battery's actual state of charge right now, read straight from the inverter. Sits "
     "beside Commanded target SoC so the two can be compared at a glance.",
-    '''from(bucket: "alphaess")
-  |> range(start: -1h)
-  |> filter(fn: (r) => r._measurement == "power_readings" and r._field == "soc_percent")
-  |> last()
-  |> yield(name: "soc now")
-''', "percent", 0, 12, 4,
+    live_reading("soc_percent", "soc_pct", "soc now"), "percent", 0, 12, 4,
     [{"color": "text", "value": None}],
     y=4))
 

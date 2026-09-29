@@ -65,7 +65,8 @@ flowchart TD
     M -- yes --> SKIP[SKIP · log only]
     M -- no --> N["apply via Modbus (Command) / release() /<br/>idle → release once then go silent"]
     N --> O["verify via register readback<br/>publish verified=0 on a mismatch,<br/>but alarm only on 2 consecutive ticks"]
-    O --> TEMP["read min/max cell voltage & temp<br/>published only, never decides"]
+    O --> LIVE["only if GRID_SOURCE=inverter and no read failed this tick:<br/>read PV meter (under P1 it was read before deciding)<br/>always: derive grid/PV/load for publishing<br/>PV standby draw → 0 W · implausible → NO field<br/>published only, never decides"]
+    LIVE --> TEMP["read min/max cell voltage & temp<br/>published only, never decides"]
     TEMP --> HEALTH["hourly/weekly health gates<br/>fault block (24 words + fault/warning popcounts)<br/>+ firmware/config · published only, never decides"]
     HEALTH --> DAILY["daily health gate<br/>SoH + lifetime charge/discharge/grid-charge, lifetime PV, heatsink<br/>3 independent gates · implausible read publishes NO field<br/>published only, never decides"]
     DAILY --> PUB["publish dispatch_state → InfluxDB<br/>heartbeat → Kuma"]
@@ -100,7 +101,7 @@ Mode 1 (PV-only) was tried first and also delivered 0 W, because it judges PV by
 CT (measured 2026-09-24 11:29Z). Mode 2 delivers regardless, so it CAN import: a PV drop inside
 a tick is bought from the grid until the next tick re-sizes it, and the 200 W margin absorbs
 ordinary ripple. The setpoint is capped at the inverter's own PV meter (`REG_PV_METER`, read
-only under P1): because the surplus is invariant to battery action, a frozen or misdirected P1
+here only under P1; outside P1 it is read after the write, at step 8a, for publishing only): because the surplus is invariant to battery action, a frozen or misdirected P1
 reading would otherwise re-arm a grid-fed charge every tick, night included, with the loop alive
 so the dead man's switch never fires. An unreadable or implausible PV reading, or a cap that
 leaves no setpoint above 0 W, holds. The surplus identity is invariant to battery action, so the command does not
