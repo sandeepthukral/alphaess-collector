@@ -979,12 +979,12 @@ Same shape as the efficiency and savings freshness monitors:
 - Body:
 
   ```json
-  {"query": "import \"date\"\nimport \"timezone\"\n\noption location = timezone.location(name: \"Europe/Amsterdam\")\ndayStartS = float(v: int(v: date.truncate(t: now(), unit: 1d))) / 1000000000.0\nneededH = if date.hour(t: now()) >= 15 then 47.0 else 23.0\nneededS = dayStartS + neededH * 3600.0\n\nfrom(bucket: \"alphaess\")\n  |> range(start: -7d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"market_price\" and r._field == \"market_price\")\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> last()\n  |> map(fn: (r) => ({\n       _time: now(),\n       _value: if (neededS - float(v: int(v: r._time)) / 1000000000.0) / 3600.0 > 0.0 then \"MISSING\" else \"HELD\"\n     }))\n  |> keep(columns: [\"_value\"])\n  |> yield(name: \"prices\")", "type": "flux"}
+  {"query": "import \"date\"\nimport \"timezone\"\n\noption location = timezone.location(name: \"Europe/Amsterdam\")\n\n// Local calendar arithmetic, not \"+ N * 3600\": the day of a spring-forward change is 23h\n// long, so adding real hours to local midnight lands an hour late on it (and an hour\n// early on the autumn day). \"Through 23:00 local of the needed day\" = the midnight\n// after it, less one real hour.\ndayStart = date.truncate(t: now(), unit: 1d)\ndaysAhead = if date.hour(t: now()) >= 15 then 2d else 1d\nneededS = float(v: int(v: date.add(d: -1h, to: date.add(d: daysAhead, to: dayStart)))) / 1000000000.0\n\nfrom(bucket: \"alphaess\")\n  |> range(start: -7d, stop: 72h)\n  |> filter(fn: (r) => r._measurement == \"market_price\" and r._field == \"market_price\")\n  |> group()\n  |> sort(columns: [\"_time\"])\n  |> last()\n  |> map(fn: (r) => ({\n       _time: now(),\n       _value: if (neededS - float(v: int(v: r._time)) / 1000000000.0) / 3600.0 > 0.0 then \"MISSING\" else \"HELD\"\n     }))\n  |> keep(columns: [\"_value\"])\n  |> yield(name: \"prices\")", "type": "flux"}
   ```
 
 It answers "does `market_price` cover today (before 15:00 local) or tomorrow (from 15:00)
 through 23:00", not "how old is the newest row"; the panel description explains why that
-difference is the whole point. Keep the 15:00 switch and the 23h/47h horizons in step with
+difference is the whole point. Keep the 15:00 switch and the through-23:00-local horizon in step with
 the panel and the Grafana rule.
 
 ## Monitoring the nightly savings job

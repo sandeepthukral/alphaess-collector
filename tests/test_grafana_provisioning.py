@@ -885,7 +885,9 @@ def test_the_prices_row_asks_for_coverage_not_an_age():
             f"{title}: the day boundary is local -- UTC would shift the cutoff by an hour "
             "in summer and move it across midnight")
         assert "date.hour(t: now()) >= 15" in query, f"{title}: publication grace is gone"
-        assert "then 47.0 else 23.0" in query, f"{title}: day-coverage requirement changed"
+        assert "then 2d else 1d" in query and "date.add(d: -1h" in query, (
+            f"{title}: day-coverage requirement changed (through 23:00 local, by calendar "
+            "days -- adding real hours to local midnight is wrong on a DST day)")
         assert "neededS - float(v: int(v: r._time))" in query, (
             f"{title}: prices is measured against now again, not against the day it must "
             "cover")
@@ -1253,24 +1255,32 @@ def test_there_are_string_valued_stat_panels_to_check():
     assert len(list(_string_valued_stat_panels())) >= 8
 
 
-def test_prices_alert_and_panel_share_the_needed_horizon():
+def test_prices_alert_panel_and_kuma_body_share_the_needed_horizon():
     """The prices alert is the 'prices' row of the 'Which job is late' panel as an alert.
 
-    Both decide what 'the planner holds enough prices' means from the same three numbers --
-    the 15:00 switch and the 23h / 47h horizons. If they drift, the row reads green while the
-    alert fires, or the reverse.
+    Three copies decide what 'the planner holds enough prices' means: the panel, the Grafana
+    rule, and the Kuma monitor body in DEPLOY.md -- the last being the one that reaches the
+    phone. They share the 15:00 switch and the through-23:00-local horizon, computed by
+    calendar days because adding real hours to local midnight is an hour wrong on a DST day.
+    If they drift, the row reads green while the alert fires, or the reverse.
     """
-    panel_query = None
-    stack = list(json.loads((REPO / "grafana" / "alphaess-dashboard.json").read_text("utf-8"))["panels"])
-    while stack:
-        panel = stack.pop()
-        stack.extend(panel.get("panels", []))
-        if panel.get("title") == "Which job is late":
-            panel_query = panel["targets"][0]["query"]
-    assert panel_query, "panel not found"
+    panel_query = _nightly_jobs_queries()["Which job is late"]
+    tile_query = _nightly_jobs_queries()["Nightly jobs"]
     rule = yaml.safe_load(
         (PROVISIONING / "alerting" / "alphaess-prices-missing.yml").read_text("utf-8")
     )["groups"][0]["rules"][0]
-    alert_query = rule["data"][0]["model"]["query"]
-    line = "neededH = if date.hour(t: now()) >= 15 then 47.0 else 23.0"
-    assert line in panel_query and line in alert_query
+    deploy = (REPO / "DEPLOY.md").read_text("utf-8")
+    section = deploy[deploy.index("## Monitoring that prices are held"):]
+    kuma_body = json.loads(re.search(r"```json\n\s*(\{.*\})\n\s*```", section).group(1))["query"]
+
+    pinned = [
+        "dayStart = date.truncate(t: now(), unit: 1d)",
+        "daysAhead = if date.hour(t: now()) >= 15 then 2d else 1d",
+        "neededS = float(v: int(v: date.add(d: -1h, to: date.add(d: daysAhead, to: dayStart)))) / 1000000000.0",
+    ]
+    for name, query in (("panel", panel_query), ("tile", tile_query), ("rule", rule["data"][0]["model"]["query"]),
+                        ("kuma body", kuma_body)):
+        for line in pinned:
+            assert line in query, f"{name} is missing: {line}"
+        assert "nowS" not in query.split("from(bucket")[0] or name in ("panel", "tile"), (
+            f"{name}: nowS is unused in a prices-only query")

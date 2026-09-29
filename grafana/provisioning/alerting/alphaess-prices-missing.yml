@@ -7,8 +7,8 @@
 #
 # Same test as that panel, deliberately: from 15:00 local tomorrow's prices must be held
 # (through 23:00 tomorrow), before 15:00 today's must be (through 23:00 today). The value
-# is hours SHORT of that; positive means missing. Keep the 15:00 switch and the 23h/47h
-# horizons in step with the panel query in grafana/alphaess-dashboard.json.
+# is hours SHORT of that; positive means missing. Keep the 15:00 switch and the
+# through-23:00-local horizon in step with the panel query in grafana/alphaess-dashboard.json.
 #
 # It is an age-free check on purpose -- see the panel's description for why "how old is
 # the newest price" cannot see this failure.
@@ -65,10 +65,13 @@ groups:
 
                 option location = timezone.location(name: "Europe/Amsterdam")
 
-                nowS = float(v: int(v: now())) / 1000000000.0
-                dayStartS = float(v: int(v: date.truncate(t: now(), unit: 1d))) / 1000000000.0
-                neededH = if date.hour(t: now()) >= 15 then 47.0 else 23.0
-                neededS = dayStartS + neededH * 3600.0
+                // Local calendar arithmetic, not "+ N * 3600": the day of a spring-forward change is 23h
+                // long, so adding real hours to local midnight lands an hour late on it (and an hour
+                // early on the autumn day). "Through 23:00 local of the needed day" = the midnight
+                // after it, less one real hour.
+                dayStart = date.truncate(t: now(), unit: 1d)
+                daysAhead = if date.hour(t: now()) >= 15 then 2d else 1d
+                neededS = float(v: int(v: date.add(d: -1h, to: date.add(d: daysAhead, to: dayStart)))) / 1000000000.0
 
                 from(bucket: "alphaess")
                   |> range(start: -7d, stop: 72h)
@@ -88,7 +91,7 @@ groups:
               type: reduce
               expression: A
               reducer: last
-          # C: any shortfall at all. 47h rather than 48 in the query already lets an hourly
+          # C: any shortfall at all. Requiring through 23:00 local rather than midnight already lets an hourly
           # last slot (23:00) and a quarter-hourly one (23:45) both pass, so 0 is exact.
           - refId: C
             datasourceUid: __expr__
