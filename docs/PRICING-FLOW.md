@@ -11,7 +11,7 @@ date, and only when explicitly requested — mixed cutover-boundary days are lef
 
 ```mermaid
 flowchart TD
-    A["fetch_prices_for_day(day)<br/>Frank Energie GraphQL"] --> B[rows]
+    A["fetch_prices_for_day(day)<br/>Frank Energie GraphQL<br/>PT60M before 2026-08-01, PT15M from it"] --> B[rows]
     B --> C["split: fine (&lt;3600s) vs<br/>coarse (&gt;=3600s) rows"]
     C --> D{"day &gt;= CUTOVER_DATE (2026-08-01)<br/>AND coarse_rows present<br/>AND --reconstruct-if-coarse passed?"}
     D -- no --> KEEP["coarse rows stay as-is<br/>source = frank"]
