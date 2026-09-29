@@ -125,6 +125,9 @@ DEFAULT_MAX_SAMPLE_GAP_S = 3 * pricing.POLL_INTERVAL_S
 # integrate out of power_readings. Each costs a day of samples; on a healthy
 # system the list is empty or one long, and a list longer than this is a broken
 # nightly job rather than something to paper over one query at a time.
+# MIJNBATTERIJ_MAX_FILL_DAYS raises it for a known, bounded outage of that job (e.g.
+# efficiency.gate() rejecting every day for a while) -- otherwise the oldest missing
+# days drop out of the sum and the published cycle count steps backwards.
 DEFAULT_MAX_FILL_DAYS = 10
 
 
@@ -360,7 +363,7 @@ def discharge_from_readings(query_api, bucket: str, sys_sn: str, day: dt.date,
 def stored_discharge_total(query_api, bucket: str, sys_sn: str, stop: dt.datetime,
                            now: dt.datetime | None = None,
                            max_gap_s: float = DEFAULT_MAX_SAMPLE_GAP_S,
-                           max_fill_days: int = DEFAULT_MAX_FILL_DAYS) -> float:
+                           max_fill_days: int | None = None) -> float:
     """All-time kWh discharged before `stop`, per AlphaESS's own daily totals,
     WITH ANY DAY daily_energy IS MISSING INTEGRATED OUT OF power_readings.
 
@@ -388,6 +391,8 @@ def stored_discharge_total(query_api, bucket: str, sys_sn: str, stop: dt.datetim
         bucket=bucket, sys_sn=sys_sn, model_version=ENERGY_MODEL_VERSION,
         stop=stop.isoformat(),
     ))
+    if max_fill_days is None:
+        max_fill_days = _num_env("MIJNBATTERIJ_MAX_FILL_DAYS", DEFAULT_MAX_FILL_DAYS, int)
     now = dt.datetime.now(dt.UTC) if now is None else now
     yesterday = now.astimezone(NL_TZ).date() - dt.timedelta(days=1)
     missing = missing_discharge_days(

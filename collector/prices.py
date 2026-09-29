@@ -263,7 +263,9 @@ def daterange(start: dt.date, end: dt.date):
         d += dt.timedelta(days=1)
 
 
-def run(days: list[dt.date], dry_run: bool, reconstruct_if_coarse: bool = False) -> None:
+def run(days: list[dt.date], dry_run: bool, reconstruct_if_coarse: bool = False) -> int:
+    """Fetch and write each day; returns how many days FAILED to fetch (an unpublished
+    day is not a failure)."""
     write_api = None
     client = None
     if not dry_run:
@@ -274,6 +276,7 @@ def run(days: list[dt.date], dry_run: bool, reconstruct_if_coarse: bool = False)
         bucket = env("INFLUX_BUCKET")
 
     total_rows = 0
+    failed = 0
     try:
         for i, day in enumerate(days):
             if i:
@@ -282,6 +285,7 @@ def run(days: list[dt.date], dry_run: bool, reconstruct_if_coarse: bool = False)
                 rows = fetch_prices_for_day(day)
             except Exception:
                 log.exception("Failed to fetch prices for %s", day)
+                failed += 1
                 continue
             if not rows:
                 log.warning("No prices returned for %s (not yet published?)", day)
@@ -342,6 +346,9 @@ def run(days: list[dt.date], dry_run: bool, reconstruct_if_coarse: bool = False)
             client.close()
     log.info("Done: %d price rows across %d day(s)%s",
              total_rows, len(days), " (dry-run, nothing written)" if dry_run else "")
+    if failed:
+        log.error("%d of %d day(s) failed to fetch", failed, len(days))
+    return failed
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -385,7 +392,11 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     args = parse_args(sys.argv[1:])
-    run(resolve_days(args), dry_run=args.dry_run, reconstruct_if_coarse=args.reconstruct_if_coarse)
+    failed = run(resolve_days(args), dry_run=args.dry_run,
+                 reconstruct_if_coarse=args.reconstruct_if_coarse)
+    # Non-zero so DSM Task Scheduler (and `set -e` in refresh-prices.sh) sees a night where
+    # Frank rejected every request -- the 2026-09-29 failure exited 0 as "Done: 0 rows".
+    sys.exit(1 if failed else 0)
 
 
 if __name__ == "__main__":

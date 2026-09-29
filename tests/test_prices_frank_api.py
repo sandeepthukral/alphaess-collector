@@ -70,3 +70,14 @@ def test_row_missing_a_price_is_skipped(monkeypatch):
     del bad["allInPrice"]
     rows, _ = _fetch(monkeypatch, {"data": {"marketPrices": {"electricityPrices": [bad]}}})
     assert rows == []
+
+
+def test_run_counts_failed_days_but_not_unpublished_ones(monkeypatch):
+    def fake_fetch(day):
+        if day == dt.date(2026, 9, 28):
+            raise RuntimeError("Graphql validation error")
+        return []  # unpublished
+
+    monkeypatch.setattr(prices, "fetch_prices_for_day", fake_fetch)
+    days = [dt.date(2026, 9, 28), dt.date(2026, 9, 29), dt.date(2026, 9, 30)]
+    assert prices.run(days, dry_run=True) == 1
