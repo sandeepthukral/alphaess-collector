@@ -679,7 +679,7 @@ ALERT_FILES = sorted((PROVISIONING / "alerting").glob("*.yml"))
 
 def test_alert_rules_were_found():
     """Same failure mode as the dashboard glob: match nothing, test nothing, pass."""
-    assert len(ALERT_FILES) == 4
+    assert len(ALERT_FILES) == 5
 
 
 @pytest.mark.parametrize("path", ALERT_FILES, ids=lambda p: p.name)
@@ -1251,3 +1251,26 @@ def test_string_valued_stat_panels_reduce_over_every_field():
 def test_there_are_string_valued_stat_panels_to_check():
     """The heuristic above finds nothing if the mapping shape ever changes."""
     assert len(list(_string_valued_stat_panels())) >= 8
+
+
+def test_prices_alert_and_panel_share_the_needed_horizon():
+    """The prices alert is the 'prices' row of the 'Which job is late' panel as an alert.
+
+    Both decide what 'the planner holds enough prices' means from the same three numbers --
+    the 15:00 switch and the 23h / 47h horizons. If they drift, the row reads green while the
+    alert fires, or the reverse.
+    """
+    panel_query = None
+    stack = list(json.loads((REPO / "grafana" / "alphaess-dashboard.json").read_text("utf-8"))["panels"])
+    while stack:
+        panel = stack.pop()
+        stack.extend(panel.get("panels", []))
+        if panel.get("title") == "Which job is late":
+            panel_query = panel["targets"][0]["query"]
+    assert panel_query, "panel not found"
+    rule = yaml.safe_load(
+        (PROVISIONING / "alerting" / "alphaess-prices-missing.yml").read_text("utf-8")
+    )["groups"][0]["rules"][0]
+    alert_query = rule["data"][0]["model"]["query"]
+    line = "neededH = if date.hour(t: now()) >= 15 then 47.0 else 23.0"
+    assert line in panel_query and line in alert_query

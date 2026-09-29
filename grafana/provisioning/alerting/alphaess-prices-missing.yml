@@ -1,0 +1,102 @@
+# Alerts when the prices the planner needs are not in InfluxDB.
+#
+# The "Which job is late" panel on the main dashboard already computes this, but a
+# panel only helps if someone is looking. On 2026-09-03 (DSM task fired once before
+# publication) and 2026-09-29 (Frank's API rejecting every query while prices.py exited
+# 0) the planner scheduled a day on prices nobody fetched and nothing said so.
+#
+# Same test as that panel, deliberately: from 15:00 local tomorrow's prices must be held
+# (through 23:00 tomorrow), before 15:00 today's must be (through 23:00 today). The value
+# is hours SHORT of that; positive means missing. Keep the 15:00 switch and the 23h/47h
+# horizons in step with the panel query in grafana/alphaess-dashboard.json.
+#
+# It is an age-free check on purpose -- see the panel's description for why "how old is
+# the newest price" cannot see this failure.
+#
+# The bundled Grafana picks this up automatically (docker-compose.yml mounts
+# ./grafana/provisioning). Getting it to your phone needs a contact point, or the Kuma
+# keyword monitor in DEPLOY.md, "Monitoring that prices are held".
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: alphaess-prices
+    folder: AlphaESS
+    interval: 15m
+    rules:
+      - uid: alphaess-prices-missing
+        title: AlphaESS prices the planner needs are missing
+        condition: C
+        # refresh-prices.sh runs every 3 hours and the day-ahead publishes early
+        # afternoon, so at 15:00 "tomorrow missing" is normal for up to one run. Two
+        # hours of consecutive evaluations rides that out and still fires the same
+        # evening; a day where today's prices are missing is caught as soon as the
+        # condition has held that long.
+        for: 2h
+        # No series means no market_price at all in 7 days: the worst case, not silence.
+        noDataState: Alerting
+        execErrState: Alerting
+        labels:
+          service: alphaess-prices
+        annotations:
+          summary: >-
+            The planner is missing prices: {{ humanize $values.B.Value }} hours short of
+            what it needs.
+          description: >-
+            Today's prices are required before 15:00 local, tomorrow's from then on. Check
+            `docker compose logs collector` for a run of scripts/refresh-prices.sh: a
+            "Graphql validation error" means Frank changed its API again (prices.py now
+            exits 1 on that), "No prices published yet" after 15:00 means day-ahead is late.
+            Backfill with `docker compose run --rm collector python prices.py`.
+        data:
+          - refId: A
+            relativeTimeRange:
+              # The query sets its own range (it must reach 72h ahead); this is only the
+              # frame Grafana hands it.
+              from: 604800  # 7d
+              to: 0
+            datasourceUid: alphaess
+            model:
+              refId: A
+              # Change the bucket here if INFLUX_BUCKET is not the default.
+              query: |
+                import "date"
+                import "timezone"
+
+                option location = timezone.location(name: "Europe/Amsterdam")
+
+                nowS = float(v: int(v: now())) / 1000000000.0
+                dayStartS = float(v: int(v: date.truncate(t: now(), unit: 1d))) / 1000000000.0
+                neededH = if date.hour(t: now()) >= 15 then 47.0 else 23.0
+                neededS = dayStartS + neededH * 3600.0
+
+                from(bucket: "alphaess")
+                  |> range(start: -7d, stop: 72h)
+                  |> filter(fn: (r) => r._measurement == "market_price" and r._field == "market_price")
+                  |> group()
+                  |> sort(columns: ["_time"])
+                  |> last()
+                  |> map(fn: (r) => ({
+                       _time: now(),
+                       _value: (neededS - float(v: int(v: r._time)) / 1000000000.0) / 3600.0
+                     }))
+                  |> keep(columns: ["_time", "_value"])
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          # C: any shortfall at all. 47h rather than 48 in the query already lets an hourly
+          # last slot (23:00) and a quarter-hourly one (23:45) both pass, so 0 is exact.
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [0]
