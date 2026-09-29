@@ -275,6 +275,7 @@ services:
       # forever, with nothing in the logs to say why.
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-30}
       MIJNBATTERIJ_MAX_SAMPLE_GAP_S: ${MIJNBATTERIJ_MAX_SAMPLE_GAP_S:-}
+      MIJNBATTERIJ_MAX_FILL_DAYS: ${MIJNBATTERIJ_MAX_FILL_DAYS:-}
       # GET /api/me for the leaderboard rank, into `mijnbatterij_rank`. 0 = off.
       MIJNBATTERIJ_RANK_INTERVAL_SECONDS: ${MIJNBATTERIJ_RANK_INTERVAL_SECONDS:-3600}
       # Usable capacity, the denominator of totalBatteryCycles. Shared with

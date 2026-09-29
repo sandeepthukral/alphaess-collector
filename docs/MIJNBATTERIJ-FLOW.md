@@ -179,7 +179,8 @@ it *is* yesterday and dropped the following midnight. The counter then does not
 dip and recover, it steps down and stays there. On this installation four such
 days exist (2026-08-17 … 19 and 08-29, 61 kWh between them), so this is the
 normal case, not a hypothetical. `DEFAULT_MAX_FILL_DAYS` caps the work at ten
-days per refresh; a longer list is a broken nightly job and is logged as one.
+days per refresh (override: `MIJNBATTERIJ_MAX_FILL_DAYS`); a longer list is a broken
+nightly job and is logged as one.
 
 `batteryResultTotal` has a comparable hole and keeps it. The asymmetry is
 deliberate: a euro total that dips is a number moving, and the days it omits are

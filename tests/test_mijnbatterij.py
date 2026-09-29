@@ -1458,3 +1458,22 @@ def test_a_clean_backfill_reports_no_failures(monkeypatch):
     notification would mean nothing."""
     session = _FailingSession()
     assert _backfill(monkeypatch, session) == 0
+
+
+def test_fill_cap_is_env_overridable(monkeypatch):
+    """MIJNBATTERIJ_MAX_FILL_DAYS replaces the default cap when max_fill_days is not passed."""
+    monkeypatch.setattr(mb, "_sum_query", lambda *a, **k: 0.0)
+    monkeypatch.setattr(mb, "stored_discharge_days", lambda *a, **k: set())
+    filled = []
+    monkeypatch.setattr(mb, "discharge_from_readings",
+                        lambda q, b, s, day, gap: filled.append(day) or 1.0)
+    now = dt.datetime(2026, 10, 8, 12, tzinfo=dt.UTC)
+    monkeypatch.setattr(mb, "missing_discharge_days",
+                        lambda stored, yesterday: [dt.date(2026, 9, 20) + dt.timedelta(days=i)
+                                                   for i in range(14)])
+    mb.stored_discharge_total(None, "b", "sn", now, now=now)
+    assert len(filled) == 10  # default cap
+    filled.clear()
+    monkeypatch.setenv("MIJNBATTERIJ_MAX_FILL_DAYS", "30")
+    mb.stored_discharge_total(None, "b", "sn", now, now=now)
+    assert len(filled) == 14
