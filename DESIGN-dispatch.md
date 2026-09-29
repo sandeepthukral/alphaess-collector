@@ -716,7 +716,9 @@ can publish them.
 
 Every loop, after the write-then-verify readback it already performs for monitor #6, the
 dispatcher writes one point to measurement **`dispatch_state`** in the `alphaess` bucket.
-No extra Modbus traffic — this is publishing a read it already did.
+No extra Modbus traffic for the dispatch block itself — this is publishing a read it already
+did. The live power readings are the one exception: outside `GRID_SOURCE=p1` the PV meter is
+read once more per tick, after the write, purely so it can be published (see below).
 
 **Decode at write time, not in Flux.** Store both:
 
@@ -755,10 +757,13 @@ and why.
 **`actual_grid_w`, `actual_pv_w`, `actual_load_w` are the collector's `power_readings`, from this
 process.** The collector reads the AlphaESS cloud; this loop reads the inverter itself, and
 the inverter takes one Modbus connection, which this loop holds. So when the cloud went down
-(2026-09-29) this was the only process that could still see the house, and it was reading
-all three every tick without publishing them. Grid is whatever the tick decided on, so the
-published series and the surplus rule never disagree. The live dashboard tiles show the newer
-of the two sources, and the planner falls back to `soc_pct` when `power_readings` is silent.
+(2026-09-29) this was the only process that could still see the house. It already read grid
+and battery every tick for the surplus rule, and PV under P1; outside P1 it now also reads PV,
+at step 8a -- after the write, because the value is only published and a timeout there must
+not delay the command, and not at all on a tick where the inverter has already failed a read.
+Grid is whatever the tick decided on, so the published series and the surplus rule never
+disagree. The live dashboard tiles show the newer of the two sources. The battery-planning
+repo reads `soc_pct` as its fallback SoC, so renaming it breaks planning during a cloud outage.
 
 **`actual_battery_w` is a third register, separate from the dispatch block and from SoC.**
 `verified` proves the REGISTERS took a command; it says nothing about whether the battery

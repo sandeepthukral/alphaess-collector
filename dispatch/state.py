@@ -6,7 +6,9 @@ dashboard has to answer that, and Grafana does not speak Modbus and must not: th
 connection and this process is holding it. So the dispatcher is the only thing that can
 publish these registers, and it does so from the readback it already performs.
 
-No extra Modbus traffic. This is publishing a read that already happened.
+No extra Modbus traffic for the block. This is publishing a read that already happened. (The
+one exception is the PV meter outside P1, read after the write purely to publish it --
+`scheduler.py` step 8a.)
 
 DECODE AT WRITE TIME, NOT IN FLUX. Both the decoded fields and the raw block are stored: the
 decoded ones are for reading, the raw ones are for the morning after, when a decode turns out

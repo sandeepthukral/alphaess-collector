@@ -637,6 +637,34 @@ async def _read_weekly_block(cache: dict, now: dt.datetime, name: str, read_word
     return decoded
 
 
+async def _read_pv(inv: Inverter, cache: dict) -> int | None:
+    """The inverter's AC PV meter, or None when the read failed or looked implausible.
+
+    ONE WARNING PER TRANSITION, as for the cell voltages and temperatures: outside P1 this is
+    read every tick for publishing alone, so a register that stops answering would otherwise
+    log 1,440 identical WARNINGs a day. What the failure COSTS is said per source -- under P1
+    it vetoes a harvest this tick, otherwise the PV and load fields go unpublished.
+    """
+    cost = "no P1 harvest this tick" if GRID_SOURCE == "p1" else "publishing no PV or load"
+    pv_w, error = None, ""
+    try:
+        pv_w = await inv.read(R.REG_PV_METER, 2, signed=True)
+        if abs(pv_w) > IMPLAUSIBLE_POWER_W:
+            pv_w, error = None, f"implausible PV meter reading {pv_w:+d}W"
+    except OSError as e:
+        error = f"PV meter read failed: {e}"
+
+    was_failing = cache.get("pv_error", "")
+    if error and not was_failing:
+        log.warning("%s -- %s (further failures at debug)", error, cost)
+    elif error:
+        log.debug("%s -- %s", error, cost)
+    elif was_failing:
+        log.info("PV meter readings recovered")
+    cache["pv_error"] = error
+    return pv_w
+
+
 async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -> S.Decision:
     """One pass of section 5. Returns the decision, for the caller to report on."""
     # 1. Reload slots.json only when it changed on disk.
@@ -789,36 +817,11 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
     # otherwise re-arm a grid-fed charge every tick, night included, with nothing in the loop
     # able to notice. `None` on failure or implausibility, which holds.
     #
-    # READ EVERY TICK, but only DECIDED ON under P1. The reading is also published (step 9),
-    # and with the AlphaESS cloud down this process is the only thing that can see PV at all:
-    # the inverter takes one Modbus connection and this loop holds it. Handing it to `decide()`
-    # outside P1 would change nothing -- `pv_w` only bounds a harvest by command -- but gating
-    # it keeps the decision's inputs exactly what they were.
-    pv_w = None
-    try:
-        pv_w = await inv.read(R.REG_PV_METER, 2, signed=True)
-        if abs(pv_w) > IMPLAUSIBLE_POWER_W:
-            log.warning("implausible PV meter reading %+dW -- no P1 harvest this tick", pv_w)
-            pv_w = None
-    except OSError as e:
-        log.warning("PV meter read failed: %s -- no P1 harvest this tick", e)
+    # READ HERE ONLY UNDER P1, where it is a decision input. Outside P1 it is read too, but only
+    # for publishing, and so after the write (step 8a) -- see there.
+    pv_w = await _read_pv(inv, cache) if GRID_SOURCE == "p1" else None
     decision = S.decide(cache.get("doc"), now, live_soc, cache.get("error", ""), surplus_w,
-                        harvest_by_command=GRID_SOURCE == "p1",
-                        pv_w=pv_w if GRID_SOURCE == "p1" else None)
-
-    # Grid and PV as measured this tick, for publishing -- the cloud's `power_readings` gone,
-    # these are what the dashboard and the planner can fall back to. Grid is whatever this tick
-    # decided on (P1 under GRID_SOURCE=p1, the inverter's CT otherwise), so the published
-    # series and the surplus rule never disagree about it. Dropped when implausible, same as
-    # the battery reading above: the guard there cannot say which of the two was wrong.
-    actual_grid_w = (float(grid_w) if grid_w is not None and abs(grid_w) <= IMPLAUSIBLE_POWER_W
-                     else None)
-    actual_pv_w = float(pv_w) if pv_w is not None else None
-    # House load from the identity `load = pv + grid + battery` (battery discharge-positive),
-    # which is all the cloud's `pload` ever was -- see `collector.parse_fields`. Only when all
-    # three were read this tick: a missing term is a gap, not a zero.
-    actual_load_w = (actual_pv_w + actual_grid_w - actual_battery_w
-                     if None not in (actual_pv_w, actual_grid_w, actual_battery_w) else None)
+                        harvest_by_command=GRID_SOURCE == "p1", pv_w=pv_w)
 
     # 5. Hijack check, before we overwrite the evidence.
     #
@@ -940,6 +943,31 @@ async def tick(inv: Inverter, slots_path: Path, cache: dict, now: dt.datetime) -
         # row -- and without this reset a single stale 1 would sit in the cache through a
         # quiet night and turn the next unrelated blip into an alarm.
         cache["unverified_streak"] = 0
+
+    # 8a. PV outside P1, and the live power readings the cloud's `power_readings` carried.
+    #
+    # Published, not decided on, so read AFTER the write -- the argument step 8b makes at
+    # length: a Modbus timeout costs the client's full ~12 s retry ladder, and spent in front of
+    # the write it delays the command. Under P1 the read already happened at step 4, where it
+    # IS a decision input. Skipped when the inverter has already failed a read this tick, as
+    # the slow tiers below are: a dead inverter would otherwise add another full ladder to a
+    # tick that is already late.
+    if GRID_SOURCE != "p1" and not read_error:
+        pv_w = await _read_pv(inv, cache)
+
+    # With the AlphaESS cloud down this process is the only thing that can see the house: the
+    # inverter takes one Modbus connection and this loop holds it. Grid is whatever this tick
+    # decided on (P1 under GRID_SOURCE=p1, the inverter's CT otherwise), so the published
+    # series and the surplus rule never disagree about it. Dropped when implausible, like the
+    # battery reading: step 4's guard cannot say which of the two was wrong, so it drops both.
+    actual_grid_w = (float(grid_w) if grid_w is not None and abs(grid_w) <= IMPLAUSIBLE_POWER_W
+                     else None)
+    actual_pv_w = float(pv_w) if pv_w is not None else None
+    # House load from the identity `load = pv + grid + battery` (battery discharge-positive),
+    # which is all the cloud's `pload` ever was -- see `collector.parse_fields`. Only when all
+    # three were read this tick: a missing term is a gap, not a zero.
+    actual_load_w = (actual_pv_w + actual_grid_w - actual_battery_w
+                     if None not in (actual_pv_w, actual_grid_w, actual_battery_w) else None)
 
     # 8b. Battery cell voltage and temperature, min and max across the whole fleet of packs.
     #
